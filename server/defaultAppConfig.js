@@ -26,11 +26,11 @@ export const DEFAULT_WEB_PROVIDERS = {
   },
   news: {
     label: 'Новости Mail.ru',
-    urlTemplate: 'https://news.mail.ru/search/?q={query}',
+    urlTemplate: 'https://news.mail.ru/',
   },
   currency: {
-    label: 'Mail.ru Поиск',
-    urlTemplate: 'https://go.mail.ru/search?q={query}',
+    label: 'Курсы Mail.ru',
+    urlTemplate: 'https://finance.mail.ru/currency/',
   },
   maps: {
     label: 'Яндекс Карты BY',
@@ -38,11 +38,11 @@ export const DEFAULT_WEB_PROVIDERS = {
   },
   wiki: {
     label: 'Wikipedia RU',
-    urlTemplate: 'https://ru.wikipedia.org/w/index.php?search={query}',
+    urlTemplate: 'https://ru.wikipedia.org/wiki/{query}',
   },
   search: {
-    label: 'Mail.ru Поиск',
-    urlTemplate: 'https://go.mail.ru/search?q={query}',
+    label: 'Onliner BY',
+    urlTemplate: 'https://www.onliner.by/',
   },
 };
 

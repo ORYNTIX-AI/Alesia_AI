@@ -6,6 +6,29 @@ const MAX_READER_TEXT_LENGTH = 4000;
 const DEFAULT_TIMEOUT_MS = 15000;
 const DIRECT_URL_REGEX = /\bhttps?:\/\/[^\s]+/i;
 const DOMAIN_REGEX = /\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}\b/i;
+const WEATHER_RESULT_URL_PATTERN = /https:\/\/www\.gismeteo\.by\/weather-[^/]+-\d+\/?/i;
+
+const POPULAR_SITES = [
+  { aliases: ['онлайнер', 'onliner'], url: 'https://www.onliner.by/', title: 'Onliner BY' },
+  { aliases: ['куфар', 'kufar'], url: 'https://www.kufar.by/', title: 'Kufar BY' },
+  { aliases: ['ав бай', 'av.by', 'авто бай'], url: 'https://av.by/', title: 'AV BY' },
+  { aliases: ['яндекс карты', 'карты яндекс'], url: 'https://yandex.by/maps/', title: 'Яндекс Карты BY' },
+  { aliases: ['яндекс', 'yandex'], url: 'https://yandex.by/', title: 'Yandex BY' },
+  { aliases: ['гисметео', 'gismeteo'], url: 'https://www.gismeteo.by/', title: 'Gismeteo BY' },
+  { aliases: ['майл', 'mail.ru', 'мэйл'], url: 'https://mail.ru/', title: 'Mail.ru' },
+  { aliases: ['новости mail', 'mail новости'], url: 'https://news.mail.ru/', title: 'Новости Mail.ru' },
+  { aliases: ['банки ру', 'banki.ru'], url: 'https://www.banki.ru/', title: 'Банки.ру' },
+  { aliases: ['википедия', 'wikipedia'], url: 'https://ru.wikipedia.org/', title: 'Wikipedia RU' },
+];
+
+const WEATHER_MEMORY = [
+  { aliases: ['минск'], url: 'https://www.gismeteo.by/weather-minsk-4248/' },
+  { aliases: ['брест'], url: 'https://www.gismeteo.by/weather-brest-4912/' },
+  { aliases: ['гродно'], url: 'https://www.gismeteo.by/weather-grodno-4243/' },
+  { aliases: ['гомель'], url: 'https://www.gismeteo.by/weather-gomel-4918/' },
+  { aliases: ['витебск'], url: 'https://www.gismeteo.by/weather-vitebsk-4218/' },
+  { aliases: ['могилев', 'могилёв'], url: 'https://www.gismeteo.by/weather-mogilev-4251/' },
+];
 
 let browserPromise = null;
 let activePage = null;
@@ -36,13 +59,8 @@ function buildUrlFromTemplate(template, query) {
   return template.replace('{query}', encodeURIComponent(query));
 }
 
-function hasPreferredWebDomain(rawUrl) {
-  try {
-    const url = new URL(rawUrl);
-    return url.hostname.endsWith('.by') || url.hostname.endsWith('.ru');
-  } catch {
-    return false;
-  }
+function matchPopularSite(lower) {
+  return POPULAR_SITES.find((site) => site.aliases.some((alias) => lower.includes(alias)));
 }
 
 function normalizeQueryValue(input) {
@@ -52,6 +70,46 @@ function normalizeQueryValue(input) {
       .replace(/(^|\s)(погода|прогноз)(?=\s|$)/gi, ' ')
       .replace(/(^|\s)(в|во|на|по)\s*$/gi, ' ')
   );
+}
+
+function extractWikiQuery(transcript) {
+  return normalizeWhitespace(
+    String(transcript || '')
+      .replace(/(^|\s)(что такое|кто такой|кто такая|кто такие|расскажи про|информация о|википедия|найди|покажи|открой)(?=\s|$)/gi, ' ')
+      .replace(/[?!.]/g, ' ')
+  );
+}
+
+function buildWikipediaArticleUrl(query) {
+  const normalized = normalizeWhitespace(query).replace(/\s+/g, '_');
+  return `https://ru.wikipedia.org/wiki/${encodeURIComponent(normalized)}`;
+}
+
+function resolveNewsUrl(transcript, webProviders) {
+  const lower = transcript.toLowerCase();
+  if (hasKeyword(lower, ['технолог', 'ии', 'ai', 'гаджет', 'смартфон', 'ноутбук'])) {
+    return 'https://hi-tech.mail.ru/';
+  }
+  if (hasKeyword(lower, ['спорт', 'матч', 'футбол', 'хоккей', 'теннис'])) {
+    return 'https://sportmail.ru/';
+  }
+  if (hasKeyword(lower, ['экономик', 'финанс', 'бирж', 'акци'])) {
+    return 'https://finance.mail.ru/';
+  }
+  return webProviders.news.urlTemplate;
+}
+
+function simplifyLookup(input) {
+  return normalizeWhitespace(String(input || ''))
+    .toLowerCase()
+    .replace(/[^a-zа-яё0-9]+/gi, '')
+    .replace(/[еёуюаяыиоьй]$/i, '');
+}
+
+function resolveWeatherMemoryUrl(query) {
+  const queryStem = simplifyLookup(query);
+  const matched = WEATHER_MEMORY.find((entry) => entry.aliases.some((alias) => simplifyLookup(alias) === queryStem));
+  return matched?.url || null;
 }
 
 function extractWeatherQuery(transcript) {
@@ -83,22 +141,23 @@ function classifyTranscript(transcript, webProviders) {
   const lower = normalized.toLowerCase();
   const directUrl = extractUrlOrDomain(normalized);
   const searchQuery = stripCommandWords(normalized) || normalized;
+  const matchedSite = matchPopularSite(lower);
 
   if (!normalized || normalized.length < 4) {
     return { type: 'none', reason: 'too-short' };
   }
 
-  if (directUrl) {
-    if (!hasPreferredWebDomain(directUrl)) {
-      return {
-        type: 'search-fallback',
-        query: searchQuery,
-        url: buildUrlFromTemplate(webProviders.search.urlTemplate, searchQuery),
-        sourceType: 'search-fallback',
-        titleHint: 'Поиск',
-      };
-    }
+  if (matchedSite) {
+    return {
+      type: 'direct-site',
+      query: searchQuery,
+      url: matchedSite.url,
+      sourceType: 'direct-site',
+      titleHint: matchedSite.title,
+    };
+  }
 
+  if (directUrl) {
     return {
       type: 'direct-site',
       query: searchQuery,
@@ -110,11 +169,12 @@ function classifyTranscript(transcript, webProviders) {
 
   if (hasKeyword(lower, ['погода', 'температур', 'дождь', 'снег', 'прогноз'])) {
     const weatherQuery = extractWeatherQuery(normalized);
+    const weatherUrl = resolveWeatherMemoryUrl(weatherQuery) || buildUrlFromTemplate(webProviders.weather.urlTemplate, weatherQuery);
     return {
       type: 'provider-template',
       providerKey: 'weather',
       query: weatherQuery,
-      url: buildUrlFromTemplate(webProviders.weather.urlTemplate, weatherQuery),
+      url: weatherUrl,
       sourceType: 'provider-template',
       titleHint: 'Погода',
     };
@@ -125,7 +185,7 @@ function classifyTranscript(transcript, webProviders) {
       type: 'provider-template',
       providerKey: 'news',
       query: searchQuery,
-      url: buildUrlFromTemplate(webProviders.news.urlTemplate, searchQuery),
+      url: resolveNewsUrl(normalized, webProviders),
       sourceType: 'provider-template',
       titleHint: 'Новости',
     };
@@ -154,33 +214,17 @@ function classifyTranscript(transcript, webProviders) {
   }
 
   if (hasKeyword(lower, ['википед', 'кто такой', 'что такое', 'расскажи про', 'информация о'])) {
+    const wikiQuery = extractWikiQuery(normalized);
+    if (!wikiQuery) {
+      return { type: 'none', reason: 'empty-wiki-query' };
+    }
     return {
-      type: 'provider-template',
+      type: 'direct-site',
       providerKey: 'wiki',
-      query: searchQuery,
-      url: buildUrlFromTemplate(webProviders.wiki.urlTemplate, searchQuery),
-      sourceType: 'provider-template',
+      query: wikiQuery,
+      url: buildWikipediaArticleUrl(wikiQuery),
+      sourceType: 'direct-site',
       titleHint: 'Справка',
-    };
-  }
-
-  if (hasKeyword(lower, ['найди', 'поищи', 'посмотри в интернете', 'поиск', 'сайт', 'ссылк'])) {
-    return {
-      type: 'search-fallback',
-      query: searchQuery,
-      url: buildUrlFromTemplate(webProviders.search.urlTemplate, searchQuery),
-      sourceType: 'search-fallback',
-      titleHint: 'Поиск',
-    };
-  }
-
-  if (/[?？]$/.test(normalized) || hasKeyword(lower, ['какая', 'какой', 'какие', 'можешь'])) {
-    return {
-      type: 'search-fallback',
-      query: searchQuery,
-      url: buildUrlFromTemplate(webProviders.search.urlTemplate, searchQuery),
-      sourceType: 'search-fallback',
-      titleHint: 'Поиск',
     };
   }
 
@@ -259,6 +303,41 @@ async function getBrowser() {
   return browserPromise;
 }
 
+async function resolveInternalProviderPage(page, intent) {
+  const currentUrl = page.url();
+
+  if (intent.providerKey === 'weather' && currentUrl.includes('gismeteo.by/search/')) {
+    const queryStem = simplifyLookup(intent.query || '');
+    const weatherHref = await page.evaluate((queryValue) => {
+      const normalize = (value) => String(value || '')
+        .toLowerCase()
+        .replace(/[^a-zа-яё0-9]+/gi, '')
+        .replace(/[еёуюаяыиоьй]$/i, '');
+      const links = Array.from(document.querySelectorAll('a[href*="/weather-"]'))
+        .map((link) => ({
+          href: link.href,
+          text: (link.textContent || '').trim(),
+          className: link.className || '',
+        }))
+        .filter((link) => link.href);
+      const exactMatches = links.filter((link) => {
+        const textStem = normalize(link.text);
+        return textStem && queryValue && (textStem.includes(queryValue) || queryValue.includes(textStem));
+      });
+      const preferred = links.filter((link) => /catalog-group-link|city-link/.test(link.className || ''));
+      return exactMatches.at(-1)?.href || preferred.at(-1)?.href || links[0]?.href || null;
+    }, queryStem);
+
+    if (weatherHref && WEATHER_RESULT_URL_PATTERN.test(weatherHref)) {
+      await page.goto(weatherHref, {
+        waitUntil: 'domcontentloaded',
+        timeout: DEFAULT_TIMEOUT_MS,
+      });
+      await page.waitForTimeout(1200);
+    }
+  }
+}
+
 export async function detectBrowserIntent({ transcript, webProviders }) {
   return classifyTranscript(transcript, webProviders);
 }
@@ -285,6 +364,7 @@ export async function openBrowserIntent(intent) {
       timeout: DEFAULT_TIMEOUT_MS,
     });
 
+    await resolveInternalProviderPage(page, intent);
     await page.waitForTimeout(1200);
 
     const headers = response?.headers() || {};

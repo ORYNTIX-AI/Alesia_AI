@@ -39,10 +39,17 @@ function sanitizeWebProviders(webProviders) {
   const providers = webProviders || {};
   const sanitized = {};
 
-  for (const [key, value] of Object.entries({ ...DEFAULT_WEB_PROVIDERS, ...providers })) {
-    const fallback = DEFAULT_WEB_PROVIDERS[key] || { label: key, urlTemplate: '' };
+  for (const [key, fallback] of Object.entries(DEFAULT_WEB_PROVIDERS)) {
+    const value = providers[key] || {};
     const nextTemplate = String(value?.urlTemplate || fallback.urlTemplate || '');
-    const useFallbackTemplate = !templateUsesPreferredDomain(nextTemplate);
+    const useFallbackTemplate = !templateUsesPreferredDomain(nextTemplate)
+      || key === 'search'
+      || (key === 'news' && nextTemplate.includes('/search/'))
+      || (key === 'currency' && nextTemplate.includes('search'))
+      || (key === 'wiki' && nextTemplate.includes('/w/index.php'))
+      || (key === 'news' && nextTemplate !== fallback.urlTemplate)
+      || (key === 'currency' && nextTemplate !== fallback.urlTemplate)
+      || (key === 'wiki' && nextTemplate !== fallback.urlTemplate);
 
     sanitized[key] = {
       label: String(useFallbackTemplate ? fallback.label : (value?.label || fallback.label || key)),
