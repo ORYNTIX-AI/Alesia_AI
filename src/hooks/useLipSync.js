@@ -10,15 +10,6 @@ const BOOST = 1.0;        // Усиление амплитуды (Normalized)
 export function useLipSync({ scene, analyser }) {
     const headRef = useRef(null);
 
-    // Храним текущие скорости для каждого морфа (нужно для физики Damping)
-    const velocities = useRef({
-        viseme_aa: 0,
-        viseme_E: 0,
-        viseme_U: 0,
-        viseme_O: 0,
-        viseme_SS: 0
-    });
-
     useEffect(() => {
         if (!scene) return;
         scene.traverse((node) => {

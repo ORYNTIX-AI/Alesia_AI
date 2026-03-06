@@ -1,115 +1,195 @@
-// Backend WebSocket Proxy Server
-// This relays WebSocket connections through an HTTPS proxy to bypass geo-restrictions
-
 import express from 'express';
-import { WebSocketServer, WebSocket } from 'ws';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import { createServer } from 'http';
 import { HttpsProxyAgent } from 'https-proxy-agent';
+import { SocksProxyAgent } from 'socks-proxy-agent';
+import { WebSocketServer, WebSocket } from 'ws';
+import { detectBrowserIntent, openBrowserIntent } from './browserController.js';
+import { getAppConfigPath, loadAppConfig, saveAppConfig } from './configStore.js';
 
-// Proxy Configuration
-const PROXY_HOST = process.env.PROXY_HOST || '208.214.162.56';
-const PROXY_PORT = process.env.PROXY_PORT || 59100;
-const PROXY_USER = process.env.PROXY_USER || 'fxHrisftnZ';
-const PROXY_PASS = process.env.PROXY_PASS || 'Shbwy2NdKx';
+const PROXY_SCHEME = (process.env.PROXY_SCHEME || 'socks5h').toLowerCase();
+const PROXY_HOST = process.env.PROXY_HOST || '45.145.57.227';
+const PROXY_PORT = process.env.PROXY_PORT || 13475;
+const PROXY_USER = process.env.PROXY_USER || 'PhKW0n';
+const PROXY_PASS = process.env.PROXY_PASS || 'zaahsk';
+const encodedProxyUser = encodeURIComponent(PROXY_USER);
+const encodedProxyPass = encodeURIComponent(PROXY_PASS);
+const proxyAuth = PROXY_USER && PROXY_PASS ? `${encodedProxyUser}:${encodedProxyPass}@` : '';
+const PROXY_URL = `${PROXY_SCHEME}://${proxyAuth}${PROXY_HOST}:${PROXY_PORT}`;
+const proxyAgent = PROXY_SCHEME.startsWith('socks')
+  ? new SocksProxyAgent(PROXY_URL)
+  : new HttpsProxyAgent(PROXY_URL);
 
-const PROXY_URL = `http://${PROXY_USER}:${PROXY_PASS}@${PROXY_HOST}:${PROXY_PORT}`;
-const proxyAgent = new HttpsProxyAgent(PROXY_URL);
-
-// Gemini API Configuration
 const API_KEY = process.env.GEMINI_API_KEY;
 if (!API_KEY) {
-    console.error("ERROR: GEMINI_API_KEY is not set in environment variables!");
-    process.exit(1);
+  console.error('ERROR: GEMINI_API_KEY is not set in environment variables!');
+  process.exit(1);
 }
-const GEMINI_WS_URL = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${API_KEY}`;
+const GEMINI_WS_URL = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${API_KEY}`;
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const distDir = path.resolve(__dirname, '../dist');
+const indexHtmlPath = path.join(distDir, 'index.html');
 
 const app = express();
 const server = createServer(app);
 const wss = new WebSocketServer({ server, path: '/gemini-proxy' });
 
-// Health check
-app.get('/health', (req, res) => {
-    res.json({ status: 'ok', proxy: PROXY_HOST });
+app.use(express.json({ limit: '2mb' }));
+
+app.get('/health', async (req, res) => {
+  const config = await loadAppConfig();
+  res.json({
+    status: 'ok',
+    proxy: PROXY_HOST,
+    proxyScheme: PROXY_SCHEME,
+    configPath: getAppConfigPath(),
+    characters: config.characters.length,
+  });
 });
 
-wss.on('connection', (clientWs) => {
-    console.log('Client connected to proxy');
+app.get('/api/app-config', async (req, res) => {
+  try {
+    const config = await loadAppConfig();
+    res.json(config);
+  } catch (error) {
+    console.error('Failed to load app config', error);
+    res.status(500).json({ error: 'Не удалось загрузить конфиг приложения' });
+  }
+});
 
-    let geminiWs = null;
-    let messageBuffer = [];
-    let isConnected = false;
+app.put('/api/app-config', async (req, res) => {
+  try {
+    const saved = await saveAppConfig(req.body);
+    res.json(saved);
+  } catch (error) {
+    console.error('Failed to save app config', error);
+    res.status(400).json({ error: 'Не удалось сохранить конфиг приложения' });
+  }
+});
 
-    try {
-        // Connect to Gemini through proxy
-        geminiWs = new WebSocket(GEMINI_WS_URL, {
-            agent: proxyAgent
-        });
+app.post('/api/browser/intent', async (req, res) => {
+  try {
+    const config = await loadAppConfig();
+    const transcript = String(req.body?.transcript || '');
+    const intent = await detectBrowserIntent({
+      transcript,
+      webProviders: config.webProviders,
+    });
+    res.json(intent);
+  } catch (error) {
+    console.error('Failed to detect browser intent', error);
+    res.status(500).json({ error: 'Не удалось определить browser intent' });
+  }
+});
 
-        geminiWs.on('open', () => {
-            console.log('Connected to Gemini via proxy');
-            isConnected = true;
-
-            // Flush buffered messages
-            if (messageBuffer.length > 0) {
-                console.log(`Flushing ${messageBuffer.length} buffered messages`);
-                messageBuffer.forEach(msg => geminiWs.send(msg));
-                messageBuffer = [];
-            }
-        });
-
-        // Relay messages from client to Gemini (with buffering)
-        clientWs.on('message', (data) => {
-            if (isConnected && geminiWs.readyState === WebSocket.OPEN) {
-                geminiWs.send(data);
-            } else {
-                console.log('Buffering message while connecting...');
-                messageBuffer.push(data);
-            }
-        });
-
-        // Relay messages from Gemini to client
-        geminiWs.on('message', (data) => {
-            if (clientWs.readyState === WebSocket.OPEN) {
-                clientWs.send(data);
-            }
-        });
-
-        geminiWs.on('error', (err) => {
-            console.error('Gemini WS Error:', err.message);
-            if (clientWs.readyState === WebSocket.OPEN) {
-                clientWs.close(1011, "Gemini Error: " + err.message);
-            }
-        });
-
-        geminiWs.on('close', (code, reason) => {
-            console.log('Gemini WS Closed:', code, reason.toString());
-            if (clientWs.readyState === WebSocket.OPEN) {
-                clientWs.close(code, reason.toString());
-            }
-        });
-
-    } catch (e) {
-        console.error('Failed to create Gemini WS:', e.message);
-        clientWs.close(1011, "Proxy Error");
+app.post('/api/browser/open', async (req, res) => {
+  try {
+    const intent = req.body || {};
+    if (!intent.url) {
+      return res.status(400).json({ error: 'URL для открытия не передан' });
     }
 
-    clientWs.on('close', () => {
-        console.log('Client disconnected');
-        if (geminiWs && geminiWs.readyState === WebSocket.OPEN) {
-            geminiWs.close();
-        }
+    const result = await openBrowserIntent(intent);
+    res.json(result);
+  } catch (error) {
+    console.error('Failed to open browser intent', error);
+    res.status(400).json({
+      status: 'error',
+      error: error.message || 'Не удалось открыть страницу',
     });
-
-    clientWs.on('error', (err) => {
-        console.error('Client WS Error:', err.message);
-        if (geminiWs && geminiWs.readyState === WebSocket.OPEN) {
-            geminiWs.close();
-        }
-    });
+  }
 });
 
-const PORT = 3001;
+if (fs.existsSync(distDir)) {
+  app.use(express.static(distDir, { index: false }));
+}
+
+wss.on('connection', (clientWs) => {
+  console.log('Client connected to proxy');
+
+  let geminiWs = null;
+  let messageBuffer = [];
+  let isConnected = false;
+
+  try {
+    geminiWs = new WebSocket(GEMINI_WS_URL, { agent: proxyAgent });
+
+    geminiWs.on('open', () => {
+      console.log('Connected to Gemini via proxy');
+      isConnected = true;
+
+      if (messageBuffer.length > 0) {
+        console.log(`Flushing ${messageBuffer.length} buffered messages`);
+        messageBuffer.forEach((message) => geminiWs.send(message));
+        messageBuffer = [];
+      }
+    });
+
+    clientWs.on('message', (data) => {
+      if (isConnected && geminiWs.readyState === WebSocket.OPEN) {
+        geminiWs.send(data);
+      } else {
+        messageBuffer.push(data);
+      }
+    });
+
+    geminiWs.on('message', (data) => {
+      if (clientWs.readyState === WebSocket.OPEN) {
+        clientWs.send(data);
+      }
+    });
+
+    geminiWs.on('error', (error) => {
+      console.error('Gemini WS Error:', error.message);
+      if (clientWs.readyState === WebSocket.OPEN) {
+        clientWs.close(1011, `Gemini Error: ${error.message}`);
+      }
+    });
+
+    geminiWs.on('close', (code, reason) => {
+      console.log('Gemini WS Closed:', code, reason.toString());
+      if (clientWs.readyState === WebSocket.OPEN) {
+        clientWs.close(code, reason.toString());
+      }
+    });
+  } catch (error) {
+    console.error('Failed to create Gemini WS:', error.message);
+    clientWs.close(1011, 'Proxy Error');
+  }
+
+  clientWs.on('close', () => {
+    console.log('Client disconnected');
+    if (geminiWs && geminiWs.readyState === WebSocket.OPEN) {
+      geminiWs.close();
+    }
+  });
+
+  clientWs.on('error', (error) => {
+    console.error('Client WS Error:', error.message);
+    if (geminiWs && geminiWs.readyState === WebSocket.OPEN) {
+      geminiWs.close();
+    }
+  });
+});
+
+app.use((req, res, next) => {
+  if (req.path.startsWith('/api/')) {
+    return next();
+  }
+
+  if (fs.existsSync(indexHtmlPath)) {
+    return res.sendFile(indexHtmlPath);
+  }
+
+  return res.status(404).send('Frontend bundle not found');
+});
+
+const PORT = Number(process.env.PORT || 3001);
 server.listen(PORT, () => {
-    console.log(`Proxy server running on http://localhost:${PORT}`);
-    console.log(`WebSocket endpoint: ws://localhost:${PORT}/gemini-proxy`);
+  console.log(`Proxy server running on http://localhost:${PORT}`);
+  console.log(`WebSocket endpoint: ws://localhost:${PORT}/gemini-proxy`);
 });
