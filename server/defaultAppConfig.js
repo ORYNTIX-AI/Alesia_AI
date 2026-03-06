@@ -21,28 +21,28 @@ export const DEFAULT_GREETING = 'Поздоровайся коротко с по
 
 export const DEFAULT_WEB_PROVIDERS = {
   weather: {
-    label: 'wttr.in',
-    urlTemplate: 'https://wttr.in/{query}?lang=ru',
+    label: 'Gismeteo BY',
+    urlTemplate: 'https://www.gismeteo.by/search/{query}/',
   },
   news: {
-    label: 'DuckDuckGo News',
-    urlTemplate: 'https://duckduckgo.com/?q={query}&iar=news&ia=news',
+    label: 'Новости Mail.ru',
+    urlTemplate: 'https://news.mail.ru/search/?q={query}',
   },
   currency: {
-    label: 'DuckDuckGo',
-    urlTemplate: 'https://duckduckgo.com/?q={query}',
+    label: 'Mail.ru Поиск',
+    urlTemplate: 'https://go.mail.ru/search?q={query}',
   },
   maps: {
-    label: 'OpenStreetMap',
-    urlTemplate: 'https://www.openstreetmap.org/search?query={query}',
+    label: 'Яндекс Карты BY',
+    urlTemplate: 'https://yandex.by/maps/?text={query}',
   },
   wiki: {
     label: 'Wikipedia RU',
     urlTemplate: 'https://ru.wikipedia.org/w/index.php?search={query}',
   },
   search: {
-    label: 'DuckDuckGo',
-    urlTemplate: 'https://duckduckgo.com/?q={query}',
+    label: 'Mail.ru Поиск',
+    urlTemplate: 'https://go.mail.ru/search?q={query}',
   },
 };
 

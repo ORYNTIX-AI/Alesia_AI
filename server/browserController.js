@@ -36,6 +36,15 @@ function buildUrlFromTemplate(template, query) {
   return template.replace('{query}', encodeURIComponent(query));
 }
 
+function hasPreferredWebDomain(rawUrl) {
+  try {
+    const url = new URL(rawUrl);
+    return url.hostname.endsWith('.by') || url.hostname.endsWith('.ru');
+  } catch {
+    return false;
+  }
+}
+
 function normalizeQueryValue(input) {
   return normalizeWhitespace(
     String(input || '')
@@ -80,6 +89,16 @@ function classifyTranscript(transcript, webProviders) {
   }
 
   if (directUrl) {
+    if (!hasPreferredWebDomain(directUrl)) {
+      return {
+        type: 'search-fallback',
+        query: searchQuery,
+        url: buildUrlFromTemplate(webProviders.search.urlTemplate, searchQuery),
+        sourceType: 'search-fallback',
+        titleHint: 'Поиск',
+      };
+    }
+
     return {
       type: 'direct-site',
       query: searchQuery,
@@ -202,6 +221,10 @@ async function assertPublicUrl(rawUrl) {
     throw new Error('Локальные адреса запрещены');
   }
 
+  if (!hostname.endsWith('.by') && !hostname.endsWith('.ru')) {
+    throw new Error('Разрешены только сайты в доменах .by и .ru');
+  }
+
   const lookup = await dns.lookup(hostname, { all: true });
   if (!lookup.length || lookup.some((entry) => isPrivateIp(entry.address))) {
     throw new Error('Внутренние или приватные адреса запрещены');
@@ -251,7 +274,7 @@ export async function openBrowserIntent(intent) {
   }
 
   const page = await browser.newPage({
-    viewport: { width: 1280, height: 720 },
+    viewport: { width: 1440, height: 920 },
     userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
   });
   activePage = page;
@@ -275,7 +298,7 @@ export async function openBrowserIntent(intent) {
     if (!embeddable) {
       const screenshot = await page.screenshot({
         type: 'jpeg',
-        quality: 55,
+        quality: 78,
       });
       screenshotUrl = `data:image/jpeg;base64,${screenshot.toString('base64')}`;
     }

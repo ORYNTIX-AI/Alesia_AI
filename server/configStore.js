@@ -11,6 +11,15 @@ import {
 
 const APP_CONFIG_PATH = process.env.APP_CONFIG_PATH || path.resolve(process.cwd(), '.runtime-data/app-config.json');
 
+function templateUsesPreferredDomain(urlTemplate) {
+  try {
+    const candidate = new URL(String(urlTemplate || '').replace('{query}', 'test'));
+    return candidate.hostname.endsWith('.by') || candidate.hostname.endsWith('.ru');
+  } catch {
+    return false;
+  }
+}
+
 function sanitizeCharacter(rawCharacter, fallbackId) {
   const character = rawCharacter || {};
   const voiceName = String(character.voiceName || 'Aoede');
@@ -31,9 +40,13 @@ function sanitizeWebProviders(webProviders) {
   const sanitized = {};
 
   for (const [key, value] of Object.entries({ ...DEFAULT_WEB_PROVIDERS, ...providers })) {
+    const fallback = DEFAULT_WEB_PROVIDERS[key] || { label: key, urlTemplate: '' };
+    const nextTemplate = String(value?.urlTemplate || fallback.urlTemplate || '');
+    const useFallbackTemplate = !templateUsesPreferredDomain(nextTemplate);
+
     sanitized[key] = {
-      label: String(value?.label || DEFAULT_WEB_PROVIDERS[key]?.label || key),
-      urlTemplate: String(value?.urlTemplate || DEFAULT_WEB_PROVIDERS[key]?.urlTemplate || ''),
+      label: String(useFallbackTemplate ? fallback.label : (value?.label || fallback.label || key)),
+      urlTemplate: String(useFallbackTemplate ? fallback.urlTemplate : nextTemplate),
     };
   }
 

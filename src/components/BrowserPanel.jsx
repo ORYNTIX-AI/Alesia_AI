@@ -25,7 +25,7 @@ export function BrowserPanel({ panel }) {
       <section className="browser-panel">
         <iframe
           className="browser-panel__iframe"
-          title={panel.title || 'Встроенная страница'}
+          title={panel.title || 'Сайт'}
           src={panel.url}
           loading="lazy"
           referrerPolicy="no-referrer"
@@ -34,24 +34,19 @@ export function BrowserPanel({ panel }) {
     );
   }
 
-  if (panel?.status === 'ready') {
+  if (panel?.status === 'ready' && panel.screenshotUrl) {
     return (
-      <section className="browser-panel browser-panel--reader-mode">
-        <div className="browser-panel__reader">
-          {panel.screenshotUrl && (
-            <img className="browser-panel__screenshot" src={panel.screenshotUrl} alt={panel.title || 'Снимок страницы'} />
-          )}
-          <div className="browser-panel__reader-copy">
-            <div className="browser-panel__reader-title">{panel.title || 'Страница'}</div>
-            {panel.url && (
-              <a className="browser-panel__reader-link" href={panel.url} target="_blank" rel="noreferrer">
-                {panel.url}
-              </a>
-            )}
-            <div className="browser-panel__reader-text">
-              {panel.readerText || 'Содержимое страницы недоступно.'}
-            </div>
-          </div>
+      <section className="browser-panel browser-panel--visual">
+        <img className="browser-panel__snapshot" src={panel.screenshotUrl} alt={panel.title || 'Сайт'} />
+      </section>
+    );
+  }
+
+  if (panel?.status === 'ready' && panel.url) {
+    return (
+      <section className="browser-panel browser-panel--state">
+        <div className="browser-panel__state browser-panel__state--error">
+          <p>Не удалось отрисовать сайт в окне.</p>
         </div>
       </section>
     );

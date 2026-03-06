@@ -197,7 +197,6 @@ function App() {
     loading,
     error: configError,
     saving,
-    setConfig,
     persistConfig,
   } = useAppConfig();
   const browserRequestIdRef = useRef(0);
@@ -230,7 +229,6 @@ function App() {
   }, [themeMode]);
 
   const commitConfig = async (nextConfig) => {
-    setConfig(nextConfig);
     try {
       const saved = await persistConfig(nextConfig);
       setSaveError(null);
