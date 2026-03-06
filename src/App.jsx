@@ -21,10 +21,42 @@ const DEFAULT_PANEL_STATE = {
 };
 
 const BACKGROUND_PRESETS = {
-  aurora: 'linear-gradient(180deg, rgba(102, 181, 199, 0.95), rgba(240, 250, 250, 0.8))',
-  sunset: 'linear-gradient(180deg, rgba(255, 188, 121, 0.92), rgba(255, 233, 205, 0.82))',
-  midnight: 'linear-gradient(180deg, rgba(34, 52, 92, 0.92), rgba(17, 24, 39, 0.88))',
-  forest: 'linear-gradient(180deg, rgba(71, 120, 99, 0.92), rgba(218, 236, 226, 0.84))',
+  aurora: {
+    stage: 'radial-gradient(circle at 20% 18%, rgba(247, 255, 254, 0.92) 0%, transparent 22%), radial-gradient(circle at 78% 22%, rgba(190, 255, 250, 0.42) 0%, transparent 28%), linear-gradient(160deg, #88d3df 0%, #5ba7ba 46%, #1f4f66 100%)',
+    screenLeft: 'rgba(111, 220, 221, 0.26)',
+    screenRight: 'rgba(171, 243, 229, 0.2)',
+    frameTint: 'rgba(113, 205, 212, 0.08)',
+    panelTint: 'rgba(240, 255, 255, 0.16)',
+    shadow: 'rgba(34, 112, 127, 0.28)',
+    border: 'rgba(209, 251, 248, 0.42)',
+  },
+  sunset: {
+    stage: 'radial-gradient(circle at 18% 15%, rgba(255, 244, 226, 0.92) 0%, transparent 22%), radial-gradient(circle at 76% 24%, rgba(255, 186, 164, 0.4) 0%, transparent 28%), linear-gradient(160deg, #ffbb77 0%, #ff7d78 48%, #7f467d 100%)',
+    screenLeft: 'rgba(255, 187, 119, 0.24)',
+    screenRight: 'rgba(255, 123, 143, 0.2)',
+    frameTint: 'rgba(255, 170, 118, 0.08)',
+    panelTint: 'rgba(255, 248, 241, 0.14)',
+    shadow: 'rgba(147, 68, 78, 0.28)',
+    border: 'rgba(255, 227, 198, 0.42)',
+  },
+  midnight: {
+    stage: 'radial-gradient(circle at 22% 18%, rgba(128, 222, 255, 0.28) 0%, transparent 18%), radial-gradient(circle at 80% 24%, rgba(135, 129, 255, 0.24) 0%, transparent 22%), linear-gradient(165deg, #15224b 0%, #091327 58%, #020814 100%)',
+    screenLeft: 'rgba(37, 108, 180, 0.22)',
+    screenRight: 'rgba(68, 79, 178, 0.18)',
+    frameTint: 'rgba(34, 61, 122, 0.08)',
+    panelTint: 'rgba(8, 15, 29, 0.24)',
+    shadow: 'rgba(6, 15, 36, 0.42)',
+    border: 'rgba(96, 150, 255, 0.24)',
+  },
+  forest: {
+    stage: 'radial-gradient(circle at 20% 18%, rgba(233, 255, 241, 0.78) 0%, transparent 18%), radial-gradient(circle at 76% 24%, rgba(172, 233, 194, 0.34) 0%, transparent 25%), linear-gradient(160deg, #8ac77b 0%, #378a69 44%, #173728 100%)',
+    screenLeft: 'rgba(103, 182, 117, 0.22)',
+    screenRight: 'rgba(65, 139, 121, 0.18)',
+    frameTint: 'rgba(95, 166, 111, 0.08)',
+    panelTint: 'rgba(244, 255, 247, 0.12)',
+    shadow: 'rgba(29, 74, 52, 0.3)',
+    border: 'rgba(219, 255, 228, 0.38)',
+  },
 };
 
 class CanvasErrorBoundary extends React.Component {
@@ -184,6 +216,12 @@ function App() {
   const handledTranscriptsRef = useRef([]);
 
   const selectedCharacter = config?.characters?.find((character) => character.id === config.activeCharacterId) || config?.characters?.[0] || null;
+  const voiceOptions = (config?.supportedVoiceNames?.length ? config.supportedVoiceNames : ['Aoede', 'Kore', 'Puck'])
+    .map((voiceName) => ({ value: voiceName, label: voiceName }));
+  const uiCharacter = settingsOpen && settingsDraft && selectedCharacter && settingsDraft.id === selectedCharacter.id
+    ? { ...selectedCharacter, backgroundPreset: settingsDraft.backgroundPreset, displayName: settingsDraft.displayName }
+    : selectedCharacter;
+  const activeBackground = BACKGROUND_PRESETS[uiCharacter?.backgroundPreset] || BACKGROUND_PRESETS.aurora;
   const themeMode = config?.themeMode === 'dark' ? 'dark' : 'light';
   const runtimeConfig = selectedCharacter
     ? {
@@ -360,11 +398,23 @@ function App() {
   }
 
   return (
-    <div className="screen-shell">
-      <div className="app-frame">
+    <div
+      className="screen-shell"
+      style={{
+        '--screen-left-glow': activeBackground.screenLeft,
+        '--screen-right-glow': activeBackground.screenRight,
+      }}
+    >
+      <div
+        className="app-frame"
+        style={{
+          '--frame-tint': activeBackground.frameTint,
+          '--panel-tint': activeBackground.panelTint,
+        }}
+      >
         <div className="top-toolbar">
           <div className="top-toolbar__meta">
-            <div className="top-toolbar__name">{selectedCharacter.displayName}</div>
+            <div className="top-toolbar__name">{uiCharacter.displayName}</div>
             <div className="top-toolbar__subline">
               {status === 'connected' ? 'Разговор активен' : 'Готова к разговору'}
             </div>
@@ -384,7 +434,14 @@ function App() {
           <CharacterArrow direction="left" onClick={() => handleCharacterStep(-1)} />
 
           <div className="avatar-stage-wrap">
-            <div className="avatar-stage" style={{ background: BACKGROUND_PRESETS[selectedCharacter.backgroundPreset] || BACKGROUND_PRESETS.aurora }}>
+            <div
+              className="avatar-stage"
+              style={{
+                background: activeBackground.stage,
+                '--stage-shadow': activeBackground.shadow,
+                '--stage-border': activeBackground.border,
+              }}
+            >
               <Canvas camera={{ position: [0, 0, 0.64], fov: 45 }} dpr={[1, 2]} gl={{ antialias: true, alpha: true, powerPreference: 'high-performance' }}>
                 <color attach="background" args={['#00000000']} />
                 <ambientLight intensity={0.92} />
@@ -435,6 +492,7 @@ function App() {
       <SettingsDrawer
         isOpen={settingsOpen}
         draft={settingsDraft}
+        voiceOptions={voiceOptions}
         onDraftChange={setSettingsDraft}
         onClose={() => setSettingsOpen(false)}
         onSave={handleSaveSettings}

@@ -16,6 +16,7 @@ function CloseIcon() {
 export function SettingsDrawer({
   isOpen,
   draft,
+  voiceOptions = [],
   onDraftChange,
   onClose,
   onSave,
@@ -57,7 +58,13 @@ export function SettingsDrawer({
 
         <label className="settings-field">
           <span>Голос</span>
-          <input name="voiceName" value={draft.voiceName} onChange={handleInputChange} />
+          <select name="voiceName" value={draft.voiceName} onChange={handleInputChange}>
+            {voiceOptions.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
         </label>
 
         <label className="settings-field">

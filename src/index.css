@@ -86,6 +86,9 @@ a {
   justify-content: center;
   padding: 10px 22px 12px;
   overflow: hidden;
+  background:
+    radial-gradient(circle at 12% 18%, var(--screen-left-glow, transparent) 0%, transparent 34%),
+    radial-gradient(circle at 88% 16%, var(--screen-right-glow, transparent) 0%, transparent 32%);
 }
 
 .screen-shell__loading {
@@ -106,6 +109,23 @@ a {
   display: grid;
   grid-template-rows: auto auto auto auto minmax(0, 1fr);
   gap: 12px;
+  isolation: isolate;
+}
+
+.app-frame::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(circle at 50% 0%, var(--frame-tint, transparent) 0%, transparent 54%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.05), transparent 28%);
+}
+
+.app-frame > * {
+  position: relative;
+  z-index: 1;
 }
 
 .top-toolbar {
@@ -200,8 +220,29 @@ a {
   aspect-ratio: 1 / 1;
   border-radius: 26px;
   overflow: hidden;
-  box-shadow: 0 16px 36px rgba(20, 30, 40, 0.12);
+  box-shadow: 0 18px 42px var(--stage-shadow, rgba(20, 30, 40, 0.12));
   position: relative;
+  border: 1px solid var(--stage-border, transparent);
+}
+
+.avatar-stage::before,
+.avatar-stage::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.avatar-stage::before {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.18), transparent 32%),
+    radial-gradient(circle at 18% 14%, rgba(255, 255, 255, 0.22) 0%, transparent 22%);
+}
+
+.avatar-stage::after {
+  inset: 1px;
+  border-radius: 25px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.16);
 }
 
 .avatar-stage canvas {
@@ -345,7 +386,9 @@ a {
   min-height: 0;
   margin: 0 auto;
   border-radius: 18px;
-  background: var(--panel-bg);
+  background:
+    linear-gradient(180deg, var(--panel-tint, transparent), transparent 34%),
+    var(--panel-bg);
   overflow: hidden;
 }
 

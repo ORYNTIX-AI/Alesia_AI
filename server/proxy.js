@@ -8,6 +8,7 @@ import { SocksProxyAgent } from 'socks-proxy-agent';
 import { WebSocketServer, WebSocket } from 'ws';
 import { detectBrowserIntent, openBrowserIntent } from './browserController.js';
 import { getAppConfigPath, loadAppConfig, saveAppConfig } from './configStore.js';
+import { SUPPORTED_VOICE_NAMES } from './defaultAppConfig.js';
 
 const PROXY_SCHEME = (process.env.PROXY_SCHEME || 'socks5h').toLowerCase();
 const PROXY_HOST = process.env.PROXY_HOST || '45.145.57.227';
@@ -54,7 +55,10 @@ app.get('/health', async (req, res) => {
 app.get('/api/app-config', async (req, res) => {
   try {
     const config = await loadAppConfig();
-    res.json(config);
+    res.json({
+      ...config,
+      supportedVoiceNames: SUPPORTED_VOICE_NAMES,
+    });
   } catch (error) {
     console.error('Failed to load app config', error);
     res.status(500).json({ error: 'Не удалось загрузить конфиг приложения' });
@@ -64,7 +68,10 @@ app.get('/api/app-config', async (req, res) => {
 app.put('/api/app-config', async (req, res) => {
   try {
     const saved = await saveAppConfig(req.body);
-    res.json(saved);
+    res.json({
+      ...saved,
+      supportedVoiceNames: SUPPORTED_VOICE_NAMES,
+    });
   } catch (error) {
     console.error('Failed to save app config', error);
     res.status(400).json({ error: 'Не удалось сохранить конфиг приложения' });
