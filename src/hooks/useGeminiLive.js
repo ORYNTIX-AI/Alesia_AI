@@ -8,6 +8,10 @@ const DEFAULT_RUNTIME_CONFIG = {
   greetingText: 'Поздоровайся коротко с пользователем, тебя зовут Алеся из AR-Fox.',
 };
 
+const DEFAULT_CALLBACKS = {
+  onInputTranscription: null,
+};
+
 const defaultBackendUrl = () => {
   if (typeof window === 'undefined') return 'ws://localhost:3001/gemini-proxy';
 
@@ -39,7 +43,7 @@ function buildSystemInstruction(runtimeConfig) {
 4. Любой ответ по веб-контексту делай коротким, вслух, 1-3 предложения.`;
 }
 
-export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFIG) {
+export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFIG, callbacks = DEFAULT_CALLBACKS) {
   const [status, setStatus] = useState('disconnected');
   const [error, setError] = useState(null);
   const wsRef = useRef(null);
@@ -49,6 +53,7 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
   const userVolumeRef = useRef(0);
   const setupCompleteRef = useRef(false);
   const runtimeConfigRef = useRef({ ...DEFAULT_RUNTIME_CONFIG, ...runtimeConfig });
+  const callbacksRef = useRef({ ...DEFAULT_CALLBACKS, ...callbacks });
 
   useEffect(() => {
     runtimeConfigRef.current = {
@@ -56,6 +61,13 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
       ...runtimeConfig,
     };
   }, [runtimeConfig]);
+
+  useEffect(() => {
+    callbacksRef.current = {
+      ...DEFAULT_CALLBACKS,
+      ...callbacks,
+    };
+  }, [callbacks]);
 
   const sendTextTurn = useCallback((text) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
@@ -165,6 +177,7 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
                 },
               },
             },
+            inputAudioTranscription: {},
             systemInstruction: {
               parts: [
                 {
@@ -189,6 +202,10 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
 
             sendTextTurn(activeRuntime.greetingText || DEFAULT_RUNTIME_CONFIG.greetingText);
             return;
+          }
+
+          if (data.serverContent?.inputTranscription?.text) {
+            callbacksRef.current.onInputTranscription?.(data.serverContent.inputTranscription.text);
           }
 
           if (data.serverContent?.modelTurn?.parts) {

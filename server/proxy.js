@@ -6,7 +6,7 @@ import { createServer } from 'http';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import { SocksProxyAgent } from 'socks-proxy-agent';
 import { WebSocketServer, WebSocket } from 'ws';
-import { configureBrowserController, detectBrowserIntent, openBrowserIntent } from './browserController.js';
+import { closeBrowser, configureBrowserController, detectBrowserIntent, openBrowserIntent } from './browserController.js';
 import { getAppConfigPath, loadAppConfig, saveAppConfig } from './configStore.js';
 import { SUPPORTED_VOICE_NAMES } from './defaultAppConfig.js';
 
@@ -42,6 +42,7 @@ const indexHtmlPath = path.join(distDir, 'index.html');
 const app = express();
 const server = createServer(app);
 const wss = new WebSocketServer({ server, path: '/gemini-proxy' });
+let shutdownInProgress = false;
 
 app.use(express.json({ limit: '2mb' }));
 
@@ -206,3 +207,55 @@ server.listen(PORT, () => {
   console.log(`Proxy server running on http://localhost:${PORT}`);
   console.log(`WebSocket endpoint: ws://localhost:${PORT}/gemini-proxy`);
 });
+
+async function shutdown(signal) {
+  if (shutdownInProgress) {
+    return;
+  }
+
+  shutdownInProgress = true;
+  console.log(`Received ${signal}, shutting down gracefully`);
+  const forcedExitTimer = setTimeout(() => {
+    console.error('Graceful shutdown timed out');
+    process.exit(1);
+  }, 10000);
+  forcedExitTimer.unref?.();
+
+  try {
+    for (const client of wss.clients) {
+      try {
+        client.close(1001, 'Server shutting down');
+      } catch {
+        // Ignore close errors during shutdown.
+      }
+    }
+
+    await new Promise((resolve) => {
+      wss.close(() => resolve());
+    });
+
+    await new Promise((resolve, reject) => {
+      server.close((error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve();
+      });
+    });
+
+    await closeBrowser();
+    clearTimeout(forcedExitTimer);
+    process.exit(0);
+  } catch (error) {
+    console.error('Graceful shutdown failed', error);
+    clearTimeout(forcedExitTimer);
+    process.exit(1);
+  }
+}
+
+for (const signal of ['SIGINT', 'SIGTERM']) {
+  process.once(signal, () => {
+    void shutdown(signal);
+  });
+}

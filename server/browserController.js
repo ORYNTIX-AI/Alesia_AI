@@ -6,6 +6,12 @@ import { chromium } from 'playwright';
 const MAX_READER_TEXT_LENGTH = 4000;
 const DEFAULT_TIMEOUT_MS = 15000;
 const SITE_RESOLUTION_CACHE_TTL_MS = 12 * 60 * 60 * 1000;
+const PAGE_SETTLE_MS = 400;
+const SCREENSHOT_SETTLE_MS = 250;
+const parsedBrowserIdleTimeoutMs = Number.parseInt(process.env.BROWSER_IDLE_TIMEOUT_MS || '', 10);
+const BROWSER_IDLE_TIMEOUT_MS = Number.isFinite(parsedBrowserIdleTimeoutMs) && parsedBrowserIdleTimeoutMs >= 0
+  ? parsedBrowserIdleTimeoutMs
+  : 30000;
 const DIRECT_URL_REGEX = /\bhttps?:\/\/[^\s]+/i;
 const DOMAIN_REGEX = /\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}\b/i;
 const WEATHER_RESULT_URL_PATTERN = /https:\/\/www\.gismeteo\.by\/weather-[^/]+-\d+\/?/i;
@@ -20,7 +26,10 @@ const WEATHER_MEMORY = [
 ];
 
 let browserPromise = null;
+let browserInstance = null;
+let browserIdleTimer = null;
 let activePage = null;
+let activePageContext = null;
 let activeRequestId = 0;
 let geminiApiKey = '';
 let geminiAgent = null;
@@ -63,6 +72,11 @@ function hasKeyword(transcript, keywords) {
   return keywords.some((keyword) => value.includes(keyword));
 }
 
+function hasKeywordFragment(transcript, fragments) {
+  const value = simplifyLookup(transcript);
+  return fragments.some((fragment) => value.includes(simplifyLookup(fragment)));
+}
+
 function buildUrlFromTemplate(template, query) {
   return template.replace('{query}', encodeURIComponent(query));
 }
@@ -75,8 +89,9 @@ function normalizeQueryValue(input) {
   return normalizeWhitespace(
     String(input || '')
       .replace(/(^|\s)(какая|какой|какие|каково|можешь|мне|пожалуйста|сейчас|будет|будут|есть|ли)(?=\s|$)/gi, ' ')
-      .replace(/(^|\s)(погода|прогноз)(?=\s|$)/gi, ' ')
-      .replace(/(^|\s)(в|во|на|по)\s*$/gi, ' ')
+      .replace(/(^|\s)(сайт|сайта|страницу|страница|странице)(?=\s|$)/gi, ' ')
+      .replace(/(^|\s)(погод[а-яё]*|прогноз[а-яё]*)(?=\s|$)/gi, ' ')
+      .replace(/(^|\s)(в|во|на|по|с|со)(?=\s|$)/gi, ' ')
   );
 }
 
@@ -91,6 +106,15 @@ function extractWikiQuery(transcript) {
 function buildWikipediaArticleUrl(query) {
   const normalized = normalizeWhitespace(query).replace(/\s+/g, '_');
   return `https://ru.wikipedia.org/wiki/${encodeURIComponent(normalized)}`;
+}
+
+function getProviderHomeUrl(template) {
+  try {
+    const url = new URL(template);
+    return `${url.origin}/`;
+  } catch {
+    return template;
+  }
 }
 
 function resolveNewsUrl(transcript, webProviders) {
@@ -124,10 +148,10 @@ function extractWeatherQuery(transcript) {
   const normalized = normalizeWhitespace(transcript);
   const locationMatch = normalized.match(/(?:^|\s)(?:в|во|на)\s+([а-яёa-z0-9\s-]+?)(?:\s+(?:сегодня|завтра|послезавтра|на выходных|будет|будут))?[?!.]*$/i);
   if (locationMatch?.[1]) {
-    return normalizeQueryValue(locationMatch[1]) || 'Minsk';
+    return normalizeQueryValue(locationMatch[1]);
   }
 
-  return normalizeQueryValue(stripCommandWords(normalized)) || 'Minsk';
+  return normalizeQueryValue(stripCommandWords(normalized));
 }
 
 function extractUrlOrDomain(transcript) {
@@ -270,9 +294,30 @@ function extractQuotedPhrases(text) {
     .filter(Boolean);
 }
 
-function buildLookupVariants(siteQuery, contextHint) {
+function isGenericSiteCategoryQuery(input) {
+  return hasKeywordFragment(input, [
+    'тур',
+    'путев',
+    'отел',
+    'отдых',
+    'виз',
+    'погод',
+    'новост',
+    'курс',
+    'карт',
+    'справк',
+    'объявлен',
+    'машин',
+    'авто',
+    'недвиж',
+    'билет',
+  ]);
+}
+
+function buildLookupVariants(siteQuery, contextHint, transcript = '') {
   const queryStem = simplifyLookup(siteQuery);
   const variants = new Set();
+  const shouldUseContextBrands = isGenericSiteCategoryQuery(siteQuery) || isGenericSiteCategoryQuery(transcript);
 
   if (siteQuery) {
     variants.add(normalizeWhitespace(siteQuery));
@@ -281,12 +326,15 @@ function buildLookupVariants(siteQuery, contextHint) {
   const quotedPhrases = extractQuotedPhrases(contextHint);
   quotedPhrases.forEach((phrase) => {
     const phraseStem = simplifyLookup(phrase);
-    if (queryStem && phraseStem && (phraseStem.includes(queryStem) || queryStem.includes(phraseStem))) {
+    if (
+      shouldUseContextBrands ||
+      (queryStem && phraseStem && (phraseStem.includes(queryStem) || queryStem.includes(phraseStem)))
+    ) {
       variants.add(phrase);
     }
   });
 
-  if (queryStem && queryStem !== simplifyLookup(siteQuery)) {
+  if (queryStem && queryStem.length >= 3 && queryStem !== simplifyLookup(siteQuery)) {
     variants.add(queryStem);
   }
 
@@ -311,6 +359,9 @@ ${checkedFailures.map((failure, index) => `${index + 1}. ${failure.url} -> ${fai
 3. Разрешены только домены .by и .ru.
 4. Верни JSON без markdown и без пояснений.
 5. Если пользователь назвал именно раздел или бренд сайта, можешь вернуть конкретный URL раздела, но только если уверен.
+6. Название сайта может быть в косвенном падеже, разговорной форме, сокращении или неполным.
+7. Если запрос общий по смыслу, например "сайт с турами", а в контексте активного персонажа явно есть компания или бренд, сначала попробуй определить официальный сайт этой компании.
+8. Если знаешь несколько реальных вариантов, верни лучший вариант в url, а остальные в candidateUrls.
 
 Формат ответа JSON:
 {
@@ -318,6 +369,7 @@ ${checkedFailures.map((failure, index) => `${index + 1}. ${failure.url} -> ${fai
   "title": "Короткое название сайта",
   "domain": "example.by",
   "url": "https://example.by/",
+  "candidateUrls": ["https://example.by/"],
   "reason": "коротко"
 }
 
@@ -327,6 +379,7 @@ ${checkedFailures.map((failure, index) => `${index + 1}. ${failure.url} -> ${fai
   "title": "",
   "domain": "",
   "url": "",
+  "candidateUrls": [],
   "reason": "почему не удалось уверенно определить"
 }
 
@@ -335,49 +388,139 @@ ${checkedFailures.map((failure, index) => `${index + 1}. ${failure.url} -> ${fai
 Контекст активного персонажа: "${normalizeWhitespace(contextHint || '')}"${previousFailuresBlock}`;
 }
 
+function buildSiteCandidatePrompt(transcript, lookupVariants, contextHint, checkedFailures = []) {
+  const failuresBlock = checkedFailures.length > 0
+    ? `\nНе используй уже проверенные и неподходящие варианты:
+${checkedFailures.map((failure, index) => `${index + 1}. ${failure.url} -> ${failure.reason}`).join('\n')}`
+    : '';
+
+  return `Ты системный генератор кандидатов домена для голосового аватара.
+
+Нужно предложить несколько наиболее вероятных реальных доменов сайта без поиска.
+
+Правила:
+1. Используй только свои знания о реально существующих публичных сайтах.
+2. Разрешены только домены .by и .ru.
+3. Если в контексте есть бренд или компания, учитывай их как главный ориентир.
+4. Если пользователь сказал что-то общее вроде "сайт с турами", можно предложить официальный сайт компании из контекста или самый вероятный тематический сайт.
+5. Верни JSON без markdown.
+
+Формат ответа JSON:
+{
+  "candidates": [
+    {
+      "title": "Короткое название сайта",
+      "domain": "example.by",
+      "url": "https://example.by/",
+      "reason": "кратко"
+    }
+  ]
+}
+
+Если кандидатов нет, верни:
+{
+  "candidates": []
+}
+
+Фраза пользователя: "${transcript}"
+Варианты названия сайта: "${lookupVariants.filter(Boolean).join(', ')}"
+Контекст активного персонажа: "${normalizeWhitespace(contextHint || '')}"${failuresBlock}`;
+}
+
 async function resolveSiteWithGemini(transcript, siteQuery, contextHint) {
-  const cacheKey = simplifyLookup(siteQuery || transcript);
-  const cached = siteResolutionCache.get(cacheKey);
-  if (cached && cached.url && (Date.now() - cached.timestamp) < SITE_RESOLUTION_CACHE_TTL_MS) {
-    return cached.value;
+  const lookupVariants = buildLookupVariants(siteQuery, contextHint, transcript);
+  const cacheKeys = Array.from(new Set(
+    [siteQuery, transcript]
+      .map((value) => simplifyLookup(value))
+      .filter(Boolean)
+  ));
+
+  for (const cacheKey of cacheKeys) {
+    const cached = siteResolutionCache.get(cacheKey);
+    if (cached && cached.value?.url && (Date.now() - cached.timestamp) < SITE_RESOLUTION_CACHE_TTL_MS) {
+      return cached.value;
+    }
   }
 
   const checkedFailures = [];
 
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    const resolved = await requestGeminiJson(buildSiteResolverPrompt(transcript, siteQuery, contextHint, checkedFailures));
-    const canResolve = Boolean(resolved?.canResolve);
-    const candidateUrl = normalizeResolvedUrl(resolved?.domain, resolved?.url);
+  for (const lookupVariant of (lookupVariants.length ? lookupVariants : [siteQuery || transcript])) {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const resolved = await requestGeminiJson(buildSiteResolverPrompt(transcript, lookupVariant, contextHint, checkedFailures));
+      const title = normalizeWhitespace(resolved?.title || '');
+      const reason = normalizeWhitespace(resolved?.reason || '');
+      const primaryUrl = normalizeResolvedUrl(resolved?.domain, resolved?.url);
+      const alternateUrls = Array.isArray(resolved?.candidateUrls)
+        ? resolved.candidateUrls.map((candidateUrl) => normalizeResolvedUrl('', candidateUrl))
+        : [];
+      const candidateUrls = Array.from(new Set([primaryUrl, ...alternateUrls].filter(Boolean)));
 
-    const value = {
-      canResolve,
-      title: normalizeWhitespace(resolved?.title || ''),
-      reason: normalizeWhitespace(resolved?.reason || ''),
-      url: candidateUrl,
-    };
+      if (!Boolean(resolved?.canResolve) && candidateUrls.length === 0) {
+        if (reason) {
+          checkedFailures.push({
+            url: lookupVariant || '(пустой вариант)',
+            reason,
+          });
+        }
+        continue;
+      }
 
-    if (!value.canResolve || !value.url) {
-      if (value.reason) {
+      for (const candidateUrl of candidateUrls) {
+        try {
+          const safeUrl = await assertPublicUrl(candidateUrl);
+          const safeValue = {
+            canResolve: true,
+            title,
+            reason,
+            url: safeUrl,
+          };
+          cacheKeys.forEach((cacheKey) => {
+            siteResolutionCache.set(cacheKey, { value: safeValue, timestamp: Date.now() });
+          });
+          return safeValue;
+        } catch (error) {
+          checkedFailures.push({
+            url: candidateUrl,
+            reason: error.message || 'не прошёл проверку',
+          });
+        }
+      }
+
+      if (reason) {
         checkedFailures.push({
-          url: value.url || '(пустой вариант)',
-          reason: value.reason,
+          url: lookupVariant || '(пустой вариант)',
+          reason,
         });
       }
+    }
+  }
+
+  const candidatePayload = await requestGeminiJson(
+    buildSiteCandidatePrompt(transcript, lookupVariants.length ? lookupVariants : [siteQuery || transcript], contextHint, checkedFailures)
+  ).catch(() => null);
+  const fallbackCandidates = Array.isArray(candidatePayload?.candidates) ? candidatePayload.candidates : [];
+
+  for (const candidate of fallbackCandidates) {
+    const candidateUrl = normalizeResolvedUrl(candidate?.domain, candidate?.url);
+    if (!candidateUrl) {
       continue;
     }
 
     try {
-      const safeUrl = await assertPublicUrl(value.url);
+      const safeUrl = await assertPublicUrl(candidateUrl);
       const safeValue = {
-        ...value,
         canResolve: true,
+        title: normalizeWhitespace(candidate?.title || ''),
+        reason: normalizeWhitespace(candidate?.reason || 'gemini-candidates'),
         url: safeUrl,
       };
-      siteResolutionCache.set(cacheKey, { value: safeValue, timestamp: Date.now() });
+      cacheKeys.forEach((cacheKey) => {
+        siteResolutionCache.set(cacheKey, { value: safeValue, timestamp: Date.now() });
+      });
       return safeValue;
     } catch (error) {
       checkedFailures.push({
-        url: value.url,
+        url: candidateUrl,
         reason: error.message || 'не прошёл проверку',
       });
     }
@@ -389,126 +532,6 @@ async function resolveSiteWithGemini(transcript, siteQuery, contextHint) {
     reason: checkedFailures.at(-1)?.reason || 'Не удалось определить сайт',
     url: '',
   };
-}
-
-function decodeHtmlEntities(text) {
-  return String(text || '')
-    .replace(/&amp;/g, '&')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, '\'')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>');
-}
-
-function extractDuckDuckGoTarget(rawHref) {
-  const href = decodeHtmlEntities(rawHref || '').trim();
-  if (!href) return '';
-
-  if (href.startsWith('//duckduckgo.com/l/?')) {
-    const redirectUrl = new URL(`https:${href}`);
-    const resolved = redirectUrl.searchParams.get('uddg');
-    return resolved ? decodeURIComponent(resolved) : '';
-  }
-
-  if (href.startsWith('/l/?')) {
-    const redirectUrl = new URL(`https://duckduckgo.com${href}`);
-    const resolved = redirectUrl.searchParams.get('uddg');
-    return resolved ? decodeURIComponent(resolved) : '';
-  }
-
-  return href;
-}
-
-function extractDuckDuckGoResults(html) {
-  const results = [];
-  const pattern = /<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
-  let match = pattern.exec(html);
-
-  while (match) {
-    const targetUrl = extractDuckDuckGoTarget(match[1]);
-    const title = decodeHtmlEntities(match[2].replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim();
-    if (targetUrl) {
-      results.push({
-        url: targetUrl,
-        title,
-      });
-    }
-    match = pattern.exec(html);
-  }
-
-  return results;
-}
-
-function scoreSearchCandidate(candidate, queryStem) {
-  const hostname = (() => {
-    try {
-      return new URL(candidate.url).hostname.toLowerCase();
-    } catch {
-      return '';
-    }
-  })();
-  const hostStem = simplifyLookup(hostname.replace(/\.(by|ru)$/i, '').replace(/^www\./i, ''));
-  const titleStem = simplifyLookup(candidate.title);
-  const pathDepth = (() => {
-    try {
-      return new URL(candidate.url).pathname.split('/').filter(Boolean).length;
-    } catch {
-      return 99;
-    }
-  })();
-
-  let score = 0;
-  if (hostStem && (hostStem.includes(queryStem) || queryStem.includes(hostStem))) score += 8;
-  if (titleStem && (titleStem.includes(queryStem) || queryStem.includes(titleStem))) score += 5;
-  if (hostname.endsWith('.by')) score += 1;
-  if (pathDepth === 0) score += 3;
-  if (pathDepth > 1) score -= 3;
-  return score;
-}
-
-async function resolveSiteWithSearch(siteQuery, contextHint) {
-  const lookupVariants = buildLookupVariants(siteQuery, contextHint);
-
-  for (const query of lookupVariants) {
-    const queryStem = simplifyLookup(query);
-    const searchUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(`${query} site:.by OR site:.ru`)}`;
-    const html = await requestText(searchUrl, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-        Accept: 'text/html,application/xhtml+xml',
-      },
-    });
-
-    const results = extractDuckDuckGoResults(html);
-    const candidates = [];
-
-    for (const result of results) {
-      try {
-        const safeUrl = await assertPublicUrl(result.url);
-        candidates.push({
-          ...result,
-          url: safeUrl,
-          score: scoreSearchCandidate(result, queryStem),
-        });
-      } catch {
-        // Ignore non-public or disallowed candidates.
-      }
-    }
-
-    const bestCandidate = candidates
-      .sort((left, right) => right.score - left.score)[0];
-
-    if (bestCandidate && bestCandidate.score >= 8) {
-      return {
-        canResolve: true,
-        title: bestCandidate.title,
-        reason: 'hidden-search-fallback',
-        url: bestCandidate.url,
-      };
-    }
-  }
-
-  return null;
 }
 
 async function classifyTranscript(transcript, webProviders, contextHint) {
@@ -532,9 +555,11 @@ async function classifyTranscript(transcript, webProviders, contextHint) {
     };
   }
 
-  if (hasKeyword(lower, ['погода', 'температур', 'дождь', 'снег', 'прогноз'])) {
+  if (hasKeywordFragment(lower, ['погод', 'температур', 'дожд', 'снег', 'прогноз'])) {
     const weatherQuery = extractWeatherQuery(normalized);
-    const weatherUrl = resolveWeatherMemoryUrl(weatherQuery) || buildUrlFromTemplate(webProviders.weather.urlTemplate, weatherQuery);
+    const weatherUrl = weatherQuery
+      ? resolveWeatherMemoryUrl(weatherQuery) || buildUrlFromTemplate(webProviders.weather.urlTemplate, weatherQuery)
+      : getProviderHomeUrl(webProviders.weather.urlTemplate);
     return {
       type: 'provider-template',
       providerKey: 'weather',
@@ -545,7 +570,7 @@ async function classifyTranscript(transcript, webProviders, contextHint) {
     };
   }
 
-  if (hasKeyword(lower, ['новости', 'топ новости', 'что нового'])) {
+  if (hasKeywordFragment(lower, ['новост', 'что нового'])) {
     return {
       type: 'provider-template',
       providerKey: 'news',
@@ -556,7 +581,7 @@ async function classifyTranscript(transcript, webProviders, contextHint) {
     };
   }
 
-  if (hasKeyword(lower, ['курс', 'доллар', 'евро', 'bitcoin', 'биткоин', 'крипт'])) {
+  if (hasKeywordFragment(lower, ['курс', 'доллар', 'евро', 'bitcoin', 'биткоин', 'крипт'])) {
     return {
       type: 'provider-template',
       providerKey: 'currency',
@@ -567,7 +592,7 @@ async function classifyTranscript(transcript, webProviders, contextHint) {
     };
   }
 
-  if (hasKeyword(lower, ['карта', 'где находится', 'как добраться', 'маршрут'])) {
+  if (hasKeywordFragment(lower, ['карт', 'где находится', 'добрат', 'маршрут'])) {
     return {
       type: 'provider-template',
       providerKey: 'maps',
@@ -578,7 +603,7 @@ async function classifyTranscript(transcript, webProviders, contextHint) {
     };
   }
 
-  if (hasKeyword(lower, ['википед', 'кто такой', 'что такое', 'расскажи про', 'информация о'])) {
+  if (hasKeywordFragment(lower, ['википед', 'кто такой', 'что такое', 'расскажи про', 'информация о'])) {
     const wikiQuery = extractWikiQuery(normalized);
     if (!wikiQuery) {
       return { type: 'none', reason: 'empty-wiki-query' };
@@ -616,25 +641,6 @@ async function classifyTranscript(transcript, webProviders, contextHint) {
       }
     } catch (error) {
       console.error('Failed to resolve site with Gemini', error);
-    }
-
-    try {
-      const fallback = await resolveSiteWithSearch(siteLookupQuery, contextHint);
-      if (fallback?.url) {
-        siteResolutionCache.set(simplifyLookup(siteLookupQuery), {
-          value: fallback,
-          timestamp: Date.now(),
-        });
-        return {
-          type: 'direct-site',
-          query: siteLookupQuery,
-          url: fallback.url,
-          sourceType: 'direct-site',
-          titleHint: fallback.title || new URL(fallback.url).hostname,
-        };
-      }
-    } catch (error) {
-      console.error('Failed to resolve site with hidden search fallback', error);
     }
 
     return {
@@ -708,11 +714,75 @@ function isEmbeddable(headers) {
   return true;
 }
 
+function clearBrowserIdleTimer() {
+  if (browserIdleTimer) {
+    clearTimeout(browserIdleTimer);
+    browserIdleTimer = null;
+  }
+}
+
+function resetBrowserState() {
+  clearBrowserIdleTimer();
+  browserPromise = null;
+  browserInstance = null;
+  activePage = null;
+  activePageContext = null;
+}
+
+async function closeActivePage() {
+  const context = activePageContext;
+  const page = activePage;
+  activePage = null;
+  activePageContext = null;
+
+  if (context) {
+    await context.close().catch(() => {});
+    return;
+  }
+
+  if (page && !page.isClosed()) {
+    await page.close().catch(() => {});
+  }
+}
+
+export async function closeBrowser() {
+  clearBrowserIdleTimer();
+  await closeActivePage();
+
+  const browser = browserInstance || await browserPromise?.catch(() => null);
+  browserPromise = null;
+  browserInstance = null;
+
+  if (browser) {
+    await browser.close().catch(() => {});
+  }
+}
+
+function scheduleBrowserShutdown() {
+  clearBrowserIdleTimer();
+  if (!browserPromise || activePage) {
+    return;
+  }
+
+  browserIdleTimer = setTimeout(() => {
+    void closeBrowser();
+  }, BROWSER_IDLE_TIMEOUT_MS);
+  browserIdleTimer.unref?.();
+}
+
 async function getBrowser() {
+  clearBrowserIdleTimer();
   if (!browserPromise) {
     browserPromise = chromium.launch({
       headless: true,
-      args: ['--disable-dev-shm-usage', '--no-sandbox'],
+      args: ['--disable-dev-shm-usage', '--no-sandbox', '--disable-gpu', '--mute-audio'],
+    }).then((browser) => {
+      browserInstance = browser;
+      browser.on('disconnected', resetBrowserState);
+      return browser;
+    }).catch((error) => {
+      resetBrowserState();
+      throw error;
     });
   }
 
@@ -749,7 +819,7 @@ async function resolveInternalProviderPage(page, intent) {
         waitUntil: 'domcontentloaded',
         timeout: DEFAULT_TIMEOUT_MS,
       });
-      await page.waitForTimeout(1200);
+      await page.waitForTimeout(PAGE_SETTLE_MS);
     }
   }
 }
@@ -764,34 +834,50 @@ export async function openBrowserIntent(intent) {
   const safeUrl = await assertPublicUrl(intent.url);
   const browser = await getBrowser();
 
-  if (activePage && !activePage.isClosed()) {
-    await activePage.close().catch(() => {});
-  }
+  await closeActivePage();
 
-  const page = await browser.newPage({
+  const context = await browser.newContext({
     viewport: { width: 1440, height: 920 },
     userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    reducedMotion: 'reduce',
+    serviceWorkers: 'block',
   });
+  const page = await context.newPage();
+  activePageContext = context;
   activePage = page;
 
   try {
-    const response = await page.goto(safeUrl, {
-      waitUntil: 'domcontentloaded',
-      timeout: DEFAULT_TIMEOUT_MS,
-    });
+    let response = null;
+    try {
+      response = await page.goto(safeUrl, {
+        waitUntil: 'commit',
+        timeout: DEFAULT_TIMEOUT_MS,
+      });
+    } catch (error) {
+      if (error?.name !== 'TimeoutError' || page.url() === 'about:blank') {
+        throw error;
+      }
+    }
+
+    await page.waitForLoadState('domcontentloaded', {
+      timeout: Math.min(DEFAULT_TIMEOUT_MS, 6000),
+    }).catch(() => {});
 
     await resolveInternalProviderPage(page, intent);
-    await page.waitForTimeout(1200);
+    await page.waitForTimeout(PAGE_SETTLE_MS);
 
     const headers = response?.headers() || {};
     const title = normalizeWhitespace(await page.title()) || intent.titleHint || new URL(safeUrl).hostname;
-    const readerText = normalizeWhitespace(
-      await page.evaluate(() => document.body?.innerText || '')
-    ).slice(0, MAX_READER_TEXT_LENGTH);
     const embeddable = isEmbeddable(headers);
+    let readerText = '';
 
     let screenshotUrl = null;
-    if (!embeddable) {
+    if (embeddable) {
+      readerText = normalizeWhitespace(
+        await page.evaluate(() => document.body?.innerText || '')
+      ).slice(0, MAX_READER_TEXT_LENGTH);
+    } else {
+      await page.waitForTimeout(SCREENSHOT_SETTLE_MS);
       const screenshot = await page.screenshot({
         type: 'jpeg',
         quality: 78,
@@ -811,12 +897,12 @@ export async function openBrowserIntent(intent) {
       query: intent.query || '',
     };
   } finally {
-    if (!page.isClosed()) {
-      await page.close().catch(() => {});
-    }
+    await context.close().catch(() => {});
 
     if (activeRequestId === requestId && activePage === page) {
       activePage = null;
+      activePageContext = null;
+      scheduleBrowserShutdown();
     }
   }
 }

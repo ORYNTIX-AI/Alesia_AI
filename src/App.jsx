@@ -221,6 +221,7 @@ function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsDraft, setSettingsDraft] = useState(null);
   const [browserPanel, setBrowserPanel] = useState(DEFAULT_PANEL_STATE);
+  const [liveInputTranscript, setLiveInputTranscript] = useState('');
   const [saveError, setSaveError] = useState(null);
   const [appliedSessionSignature, setAppliedSessionSignature] = useState(null);
   const {
@@ -233,6 +234,7 @@ function App() {
   const browserRequestIdRef = useRef(0);
   const handledTranscriptsRef = useRef([]);
   const interimTimerRef = useRef(null);
+  const liveTranscriptTimerRef = useRef(null);
 
   const selectedCharacter = config?.characters?.find((character) => character.id === config.activeCharacterId) || config?.characters?.[0] || null;
   const voiceOptions = (config?.supportedVoiceNames?.length ? config.supportedVoiceNames : ['Aoede', 'Kore', 'Puck'])
@@ -254,7 +256,15 @@ function App() {
     }
     : undefined;
 
-  const { status, connect, disconnect, error, getUserVolume, sendTextTurn } = useGeminiLive(audioPlayer, runtimeConfig);
+  const handleLiveInputTranscription = React.useCallback((transcript) => {
+    setLiveInputTranscript(String(transcript || '').trim());
+  }, []);
+
+  const { status, connect, disconnect, error, getUserVolume, sendTextTurn } = useGeminiLive(
+    audioPlayer,
+    runtimeConfig,
+    { onInputTranscription: handleLiveInputTranscription },
+  );
 
   const currentSignature = buildSignature(selectedCharacter);
   const sessionNeedsReconnect = status === 'connected' && Boolean(appliedSessionSignature) && appliedSessionSignature !== currentSignature;
@@ -277,6 +287,7 @@ function App() {
   const handleStart = async () => {
     await audioPlayer.initialize();
     setInitialized(true);
+    setLiveInputTranscript('');
     setAppliedSessionSignature(currentSignature);
     connect();
   };
@@ -284,6 +295,7 @@ function App() {
   const handleStop = () => {
     disconnect();
     setInitialized(false);
+    setLiveInputTranscript('');
     setAppliedSessionSignature(null);
     audioPlayer.close();
   };
@@ -444,6 +456,27 @@ function App() {
       }
     };
   }, [handleBrowserTranscript, interimTranscript, status]);
+
+  useEffect(() => {
+    if (status !== 'connected' || !isStableInterimBrowserCandidate(liveInputTranscript)) {
+      if (liveTranscriptTimerRef.current) {
+        clearTimeout(liveTranscriptTimerRef.current);
+        liveTranscriptTimerRef.current = null;
+      }
+      return undefined;
+    }
+
+    liveTranscriptTimerRef.current = setTimeout(() => {
+      handleBrowserTranscript(liveInputTranscript);
+    }, INTERIM_BROWSER_TRIGGER_DELAY_MS);
+
+    return () => {
+      if (liveTranscriptTimerRef.current) {
+        clearTimeout(liveTranscriptTimerRef.current);
+        liveTranscriptTimerRef.current = null;
+      }
+    };
+  }, [handleBrowserTranscript, liveInputTranscript, status]);
 
   if (loading || !config || !selectedCharacter) {
     return (
