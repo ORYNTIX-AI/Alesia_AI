@@ -20,7 +20,7 @@ const DEFAULT_PANEL_STATE = {
   error: null,
 };
 
-const INTERIM_BROWSER_TRIGGER_DELAY_MS = 900;
+const INTERIM_BROWSER_TRIGGER_DELAY_MS = 320;
 const MAX_SESSION_WEB_HISTORY_ENTRIES = 8;
 const MAX_SESSION_WEB_PROMPT_ENTRIES = 5;
 
@@ -178,6 +178,36 @@ function isStableInterimBrowserCandidate(transcript) {
   return true;
 }
 
+function isLikelyBrowserIntent(transcript) {
+  const normalized = String(transcript || '').trim().toLowerCase();
+  if (!normalized) return false;
+
+  if (/\bhttps?:\/\/[^\s]+/i.test(normalized)) return true;
+  if (/\b(?:[a-z0-9-]+\.)+(?:by|ru)\b/i.test(normalized)) return true;
+  if (/\b[a-z0-9-]{2,}\s+(?:by|ru)\b/i.test(normalized)) return true;
+
+  return /(открой|зайди|перейди|покажи|посмотри|какая|какой|какие|погода|новости|курс|карта|маршрут|википед|что такое|кто такой|информация о|сайт)/i.test(normalized);
+}
+
+function isAssistantBrowserNarration(transcript) {
+  const normalized = String(transcript || '').trim().toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+
+  return /(открыва[юе]|открою|смотрю|посмотрю|открывается|пытаюсь открыть).{0,40}(сайт|страниц|погод|новост|карт|википед)/i.test(normalized)
+    || /(не удалось открыть|не удалось определить сайт|сайт не открылся)/i.test(normalized);
+}
+
+function buildEarlyBrowserLoadingTitle(transcript) {
+  const normalized = String(transcript || '').replace(/\s+/g, ' ').trim().replace(/[?!.]+$/g, '');
+  if (!normalized) {
+    return 'Начинаю открывать сайт';
+  }
+
+  return `Начинаю: ${truncatePromptValue(normalized, 96)}`;
+}
+
 function truncatePromptValue(value, maxLength = 180) {
   const normalized = String(value || '').replace(/\s+/g, ' ').trim();
   if (normalized.length <= maxLength) {
@@ -277,6 +307,10 @@ function App() {
   const interimTimerRef = useRef(null);
   const liveTranscriptTimerRef = useRef(null);
   const sessionWebHistoryRef = useRef([]);
+  const browserPanelSnapshotRef = useRef(DEFAULT_PANEL_STATE);
+  const earlyBrowserFeedbackKeyRef = useRef('');
+  const lastBrowserCommandRef = useRef({ key: '', transcript: '', timestamp: 0 });
+  const browserSpeechGuardUntilRef = useRef(0);
 
   const selectedCharacter = config?.characters?.find((character) => character.id === config.activeCharacterId) || config?.characters?.[0] || null;
   const voiceOptions = (config?.supportedVoiceNames?.length ? config.supportedVoiceNames : ['Aoede', 'Kore', 'Puck'])
@@ -339,6 +373,10 @@ function App() {
     sessionWebHistoryRef.current = [];
     handledTranscriptsRef.current = [];
     browserRequestIdRef.current = 0;
+    browserPanelSnapshotRef.current = DEFAULT_PANEL_STATE;
+    earlyBrowserFeedbackKeyRef.current = '';
+    lastBrowserCommandRef.current = { key: '', transcript: '', timestamp: 0 };
+    browserSpeechGuardUntilRef.current = 0;
 
     if (interimTimerRef.current) {
       clearTimeout(interimTimerRef.current);
@@ -349,6 +387,37 @@ function App() {
       clearTimeout(liveTranscriptTimerRef.current);
       liveTranscriptTimerRef.current = null;
     }
+  }, []);
+
+  const showEarlyBrowserFeedback = React.useCallback((transcript) => {
+    const normalized = String(transcript || '').trim();
+    if (!isLikelyBrowserIntent(normalized)) {
+      return;
+    }
+
+    const feedbackKey = normalizeTranscriptKey(normalized);
+    if (feedbackKey && feedbackKey === earlyBrowserFeedbackKeyRef.current) {
+      return;
+    }
+
+    earlyBrowserFeedbackKeyRef.current = feedbackKey;
+    setBrowserPanel((current) => {
+      if (current.status !== 'loading') {
+        browserPanelSnapshotRef.current = current;
+      }
+
+      return {
+        ...DEFAULT_PANEL_STATE,
+        status: 'loading',
+        title: buildEarlyBrowserLoadingTitle(normalized),
+        sourceType: 'intent-pending',
+      };
+    });
+  }, []);
+
+  const restoreBrowserPanelSnapshot = React.useCallback(() => {
+    setBrowserPanel(browserPanelSnapshotRef.current);
+    earlyBrowserFeedbackKeyRef.current = '';
   }, []);
 
   const { status, connect, disconnect, error, getUserVolume, sendTextTurn } = useGeminiLive(
@@ -439,8 +508,31 @@ function App() {
     const normalized = transcript.trim();
     if (!normalized) return;
 
+    if (isAssistantBrowserNarration(normalized)) {
+      return;
+    }
+
+    if (isLikelyBrowserIntent(normalized)) {
+      showEarlyBrowserFeedback(normalized);
+    }
+
     const dedupeKey = normalizeTranscriptKey(normalized);
     const now = Date.now();
+    const lastBrowserCommand = lastBrowserCommandRef.current;
+    const isEchoOfRecentBrowserAction = (
+      now < browserSpeechGuardUntilRef.current
+      && Boolean(lastBrowserCommand.key)
+      && (
+        dedupeKey === lastBrowserCommand.key
+        || dedupeKey.includes(lastBrowserCommand.key)
+        || lastBrowserCommand.key.includes(dedupeKey)
+      )
+    );
+
+    if (isEchoOfRecentBrowserAction) {
+      return;
+    }
+
     handledTranscriptsRef.current = handledTranscriptsRef.current.filter((entry) => now - entry.timestamp < 15000);
     if (handledTranscriptsRef.current.some((entry) => entry.key === dedupeKey)) {
       return;
@@ -460,6 +552,10 @@ function App() {
         }),
       });
     } catch (requestError) {
+      if (earlyBrowserFeedbackKeyRef.current === dedupeKey) {
+        restoreBrowserPanelSnapshot();
+      }
+      browserSpeechGuardUntilRef.current = now + 2500;
       setBrowserPanel({
         ...DEFAULT_PANEL_STATE,
         status: 'error',
@@ -469,10 +565,15 @@ function App() {
     }
 
     if (!intent || intent.type === 'none') {
+      if (earlyBrowserFeedbackKeyRef.current === dedupeKey) {
+        restoreBrowserPanelSnapshot();
+      }
       return;
     }
 
     if (intent.type === 'unresolved-site') {
+      earlyBrowserFeedbackKeyRef.current = '';
+      browserSpeechGuardUntilRef.current = now + 2500;
       appendSessionWebHistory({
         status: 'failed',
         transcript: normalized,
@@ -490,6 +591,9 @@ function App() {
 
     const requestId = browserRequestIdRef.current + 1;
     browserRequestIdRef.current = requestId;
+    earlyBrowserFeedbackKeyRef.current = '';
+    lastBrowserCommandRef.current = { key: dedupeKey, transcript: normalized, timestamp: now };
+    browserSpeechGuardUntilRef.current = now + 6000;
     setBrowserPanel({
       ...DEFAULT_PANEL_STATE,
       status: 'loading',
@@ -510,6 +614,8 @@ function App() {
         return;
       }
 
+      earlyBrowserFeedbackKeyRef.current = '';
+      browserSpeechGuardUntilRef.current = Date.now() + 2500;
       setBrowserPanel(opened);
       appendSessionWebHistory({
         status: 'opened',
@@ -524,6 +630,8 @@ function App() {
         return;
       }
 
+      earlyBrowserFeedbackKeyRef.current = '';
+      browserSpeechGuardUntilRef.current = Date.now() + 2500;
       appendSessionWebHistory({
         status: 'failed',
         transcript: normalized,
@@ -542,7 +650,7 @@ function App() {
         getSessionHistorySummary(),
       ));
     }
-  }, [appendSessionWebHistory, getSessionHistoryPayload, getSessionHistorySummary, selectedCharacter, sendTextTurn]);
+  }, [appendSessionWebHistory, getSessionHistoryPayload, getSessionHistorySummary, restoreBrowserPanelSnapshot, selectedCharacter, sendTextTurn, showEarlyBrowserFeedback]);
 
   const {
     isSupported: sidecarSupported,
@@ -563,6 +671,8 @@ function App() {
       return undefined;
     }
 
+    showEarlyBrowserFeedback(interimTranscript);
+
     interimTimerRef.current = setTimeout(() => {
       handleBrowserTranscript(interimTranscript);
     }, INTERIM_BROWSER_TRIGGER_DELAY_MS);
@@ -573,7 +683,7 @@ function App() {
         interimTimerRef.current = null;
       }
     };
-  }, [handleBrowserTranscript, interimTranscript, status]);
+  }, [handleBrowserTranscript, interimTranscript, showEarlyBrowserFeedback, status]);
 
   useEffect(() => {
     if (status !== 'connected' || !isStableInterimBrowserCandidate(liveInputTranscript)) {
@@ -583,6 +693,8 @@ function App() {
       }
       return undefined;
     }
+
+    showEarlyBrowserFeedback(liveInputTranscript);
 
     liveTranscriptTimerRef.current = setTimeout(() => {
       handleBrowserTranscript(liveInputTranscript);
@@ -594,7 +706,7 @@ function App() {
         liveTranscriptTimerRef.current = null;
       }
     };
-  }, [handleBrowserTranscript, liveInputTranscript, status]);
+  }, [handleBrowserTranscript, liveInputTranscript, showEarlyBrowserFeedback, status]);
 
   if (loading || !config || !selectedCharacter) {
     return (
