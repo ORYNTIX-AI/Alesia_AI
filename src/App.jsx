@@ -1,7 +1,7 @@
 import React, { Suspense, useEffect, useRef, useState } from 'react';
 import { Canvas } from '@react-three/fiber';
 import { Html, OrbitControls, useProgress } from '@react-three/drei';
-import { Avatar } from './components/Avatar';
+import { Avatar, DEFAULT_AVATAR_MODEL_URL } from './components/Avatar';
 import { BrowserPanel } from './components/BrowserPanel';
 import { SettingsDrawer } from './components/SettingsDrawer';
 import { useAppConfig } from './hooks/useAppConfig';
@@ -209,6 +209,9 @@ function App() {
     ? { ...selectedCharacter, backgroundPreset: settingsDraft.backgroundPreset, displayName: settingsDraft.displayName }
     : selectedCharacter;
   const activeBackground = BACKGROUND_PRESETS[uiCharacter?.backgroundPreset] || BACKGROUND_PRESETS.aurora;
+  const avatarModelUrl = uiCharacter?.avatarModelUrl || DEFAULT_AVATAR_MODEL_URL;
+  const avatarInstanceId = uiCharacter?.avatarInstanceId || `avatar-${uiCharacter?.id || 'default'}`;
+  const avatarRenderKey = [avatarInstanceId, avatarModelUrl, uiCharacter?.backgroundPreset || 'aurora'].join('|');
   const themeMode = config?.themeMode === 'dark' ? 'dark' : 'light';
   const runtimeConfig = selectedCharacter
     ? {
@@ -419,13 +422,14 @@ function App() {
           <div className="avatar-stage-wrap">
             <div
               className="avatar-stage"
+              data-avatar-instance={avatarInstanceId}
               style={{
                 background: activeBackground.stage,
                 '--stage-shadow': activeBackground.shadow,
                 '--stage-border': activeBackground.border,
               }}
             >
-              <Canvas camera={{ position: [0, 0, 0.64], fov: 45 }} dpr={[1, 2]} gl={{ antialias: true, alpha: true, powerPreference: 'high-performance' }}>
+              <Canvas key={avatarRenderKey} camera={{ position: [0, 0, 0.64], fov: 45 }} dpr={[1, 2]} gl={{ antialias: true, alpha: true, powerPreference: 'high-performance' }}>
                 <color attach="background" args={[activeBackground.canvasBackground]} />
                 <ambientLight intensity={0.92} />
                 <directionalLight position={[0, 0, 5]} intensity={0.68} />
@@ -433,7 +437,7 @@ function App() {
                 <CanvasErrorBoundary>
                   <Suspense fallback={<Loader />}>
                     <group position={[0, -0.75, 0]}>
-                      <Avatar audioPlayer={audioPlayer} />
+                      <Avatar key={avatarRenderKey} audioPlayer={audioPlayer} modelUrl={avatarModelUrl} instanceId={avatarInstanceId} />
                     </group>
                   </Suspense>
                 </CanvasErrorBoundary>

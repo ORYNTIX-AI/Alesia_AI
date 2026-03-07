@@ -2,6 +2,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import {
   DEFAULT_APP_CONFIG,
+  DEFAULT_AVATAR_MODEL_URL,
   DEFAULT_WEB_PROVIDERS,
   DEFAULT_VOICE_MODEL,
   DEFAULT_GREETING,
@@ -22,16 +23,19 @@ function templateUsesPreferredDomain(urlTemplate) {
 
 function sanitizeCharacter(rawCharacter, fallbackId) {
   const character = rawCharacter || {};
+  const characterId = String(character.id || fallbackId);
   const voiceName = String(character.voiceName || 'Aoede');
 
   return {
-    id: String(character.id || fallbackId),
+    id: characterId,
     displayName: String(character.displayName || 'Персонаж'),
     voiceModelId: String(character.voiceModelId || DEFAULT_VOICE_MODEL),
     systemPrompt: String(character.systemPrompt || DEFAULT_SYSTEM_PROMPT),
     voiceName: SUPPORTED_VOICE_NAMES.includes(voiceName) ? voiceName : 'Aoede',
     backgroundPreset: String(character.backgroundPreset || 'aurora'),
     greetingText: String(character.greetingText || DEFAULT_GREETING),
+    avatarModelUrl: String(character.avatarModelUrl || DEFAULT_AVATAR_MODEL_URL),
+    avatarInstanceId: String(character.avatarInstanceId || `avatar-${characterId}`),
   };
 }
 

@@ -1,18 +1,41 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 import { useFrame } from '@react-three/fiber';
 import { useGLTF } from '@react-three/drei';
+import { clone } from 'three/examples/jsm/utils/SkeletonUtils.js';
 import { useLipSync } from '../hooks/useLipSync';
 
 // ARKit and Oculus Visemes are required for specific lip-sync morphs
-const AVATAR_URL = 'https://models.readyplayer.me/6940682e5917bffe25eb75ed.glb?morphTargets=ARKit,Oculus+Visemes';
+export const DEFAULT_AVATAR_MODEL_URL = 'https://models.readyplayer.me/6940682e5917bffe25eb75ed.glb?morphTargets=ARKit,Oculus+Visemes';
 
-export function Avatar({ audioPlayer }) {
-    const { scene } = useGLTF(AVATAR_URL);
+function cloneAvatarScene(sourceScene, instanceId) {
+    const nextScene = clone(sourceScene);
+    nextScene.userData.avatarInstanceId = instanceId;
+    nextScene.name = instanceId || nextScene.name;
+
+    nextScene.traverse((node) => {
+        if (!node.isMesh) return;
+
+        if (Array.isArray(node.material)) {
+            node.material = node.material.map((material) => (material?.clone ? material.clone() : material));
+            return;
+        }
+
+        if (node.material?.clone) {
+            node.material = node.material.clone();
+        }
+    });
+
+    return nextScene;
+}
+
+export function Avatar({ audioPlayer, modelUrl = DEFAULT_AVATAR_MODEL_URL, instanceId }) {
+    const { scene } = useGLTF(modelUrl);
     const analyser = audioPlayer?.analyser;
     const avatarRef = React.useRef();
+    const avatarScene = useMemo(() => cloneAvatarScene(scene, instanceId), [scene, instanceId]);
 
     // Custom Hook for Spectral Lip-Sync
-    useLipSync({ scene, analyser });
+    useLipSync({ scene: avatarScene, analyser });
 
     // Idle Animation: Subtle breathing/sway
     useFrame((state) => {
@@ -27,11 +50,11 @@ export function Avatar({ audioPlayer }) {
     return (
         <primitive
             ref={avatarRef}
-            object={scene}
+            object={avatarScene}
             position={[0, 0, 0]}
             scale={1.3}
         />
     );
 }
 
-useGLTF.preload(AVATAR_URL);
+useGLTF.preload(DEFAULT_AVATAR_MODEL_URL);

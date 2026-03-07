@@ -1,5 +1,6 @@
 export const DEFAULT_VOICE_MODEL = 'models/gemini-2.5-flash-native-audio-preview-09-2025';
 export const SUPPORTED_VOICE_NAMES = ['Aoede', 'Kore', 'Puck'];
+export const DEFAULT_AVATAR_MODEL_URL = 'https://models.readyplayer.me/6940682e5917bffe25eb75ed.glb?morphTargets=ARKit,Oculus+Visemes';
 
 export const DEFAULT_SYSTEM_PROMPT = `Ты Алеся, голосовой консультант туроператора "АлатанТур" (Беларусь). Говори только на русском языке.
 
@@ -55,6 +56,8 @@ export const DEFAULT_CHARACTERS = [
     voiceName: SUPPORTED_VOICE_NAMES[0],
     backgroundPreset: 'aurora',
     greetingText: DEFAULT_GREETING,
+    avatarModelUrl: DEFAULT_AVATAR_MODEL_URL,
+    avatarInstanceId: 'avatar-alesya-classic',
   },
   {
     id: 'alesya-kore',
@@ -64,6 +67,8 @@ export const DEFAULT_CHARACTERS = [
     voiceName: SUPPORTED_VOICE_NAMES[1],
     backgroundPreset: 'sunset',
     greetingText: DEFAULT_GREETING,
+    avatarModelUrl: DEFAULT_AVATAR_MODEL_URL,
+    avatarInstanceId: 'avatar-alesya-kore',
   },
   {
     id: 'alesya-puck',
@@ -73,6 +78,8 @@ export const DEFAULT_CHARACTERS = [
     voiceName: SUPPORTED_VOICE_NAMES[2],
     backgroundPreset: 'midnight',
     greetingText: DEFAULT_GREETING,
+    avatarModelUrl: DEFAULT_AVATAR_MODEL_URL,
+    avatarInstanceId: 'avatar-alesya-puck',
   },
 ];
 
