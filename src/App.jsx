@@ -171,6 +171,8 @@ function normalizeTranscriptKey(transcript) {
 
 function isStableInterimBrowserCandidate(transcript) {
   const normalized = String(transcript || '').trim();
+  if (/^(открой|зайди|перейди|покажи|посмотри)\s+[\p{L}\p{N}.-]+/iu.test(normalized)) return true;
+  if (/^(какая|какой|какие)\s+погода\b/iu.test(normalized)) return true;
   if (normalized.length < 10) return false;
   if (normalized.split(/\s+/).length < 2) return false;
   if (/^(открой|зайди|перейди|посмотри|покажи)\s*(сайт|страницу)?\s*$/i.test(normalized)) return false;

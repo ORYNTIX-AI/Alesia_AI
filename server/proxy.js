@@ -89,12 +89,19 @@ app.post('/api/browser/intent', async (req, res) => {
     const transcript = String(req.body?.transcript || '');
     const contextHint = String(req.body?.contextHint || '');
     const sessionHistory = Array.isArray(req.body?.sessionHistory) ? req.body.sessionHistory : [];
+    console.log('[browser-intent] request', JSON.stringify({ transcript }));
     const intent = await detectBrowserIntent({
       transcript,
       contextHint,
       sessionHistory,
       webProviders: config.webProviders,
     });
+    console.log('[browser-intent] result', JSON.stringify({
+      transcript,
+      type: intent?.type || 'none',
+      url: intent?.url || '',
+      error: intent?.error || '',
+    }));
     res.json(intent);
   } catch (error) {
     console.error('Failed to detect browser intent', error);
@@ -109,7 +116,19 @@ app.post('/api/browser/open', async (req, res) => {
       return res.status(400).json({ error: 'URL для открытия не передан' });
     }
 
+    console.log('[browser-open] request', JSON.stringify({
+      type: intent?.type || '',
+      providerKey: intent?.providerKey || '',
+      url: intent?.url || '',
+      query: intent?.query || '',
+    }));
     const result = await openBrowserIntent(intent);
+    console.log('[browser-open] result', JSON.stringify({
+      status: result?.status || '',
+      url: result?.url || '',
+      embeddable: Boolean(result?.embeddable),
+      title: result?.title || '',
+    }));
     res.json(result);
   } catch (error) {
     console.error('Failed to open browser intent', error);
