@@ -53,7 +53,7 @@ function stripCommandWords(transcript) {
   return normalizeWhitespace(
     String(transcript || '')
       .replace(/^(ну|пожалуйста|слушай|смотри)\s+/i, '')
-      .replace(/(^|\s)(можешь|могла бы|поищи|найди|посмотри|покажи|открой|зайди|перейди|скажи|узнай)(?=\s|$)/gi, ' ')
+      .replace(/(^|\s)(можешь|могла бы|поищи|найди|посмотри|покажи|открой|открыть|зайди|зайти|перейди|перейти|скажи|узнай)(?=\s|$)/gi, ' ')
       .replace(/(^|\s)(в интернете|на сайте|по сайту|для меня)(?=\s|$)/gi, ' ')
       .replace(/[?!.]/g, ' ')
   );
@@ -62,7 +62,7 @@ function stripCommandWords(transcript) {
 function extractSiteLookupQuery(transcript) {
   return normalizeWhitespace(
     String(transcript || '')
-      .replace(/(^|\s)(открой|зайди|перейди|покажи|посмотри|найди|скажи|узнай)(?=\s|$)/gi, ' ')
+      .replace(/(^|\s)(можешь|могла бы|открой|открыть|зайди|зайти|перейди|перейти|покажи|посмотри|найди|скажи|узнай)(?=\s|$)/gi, ' ')
       .replace(/(^|\s)(сайт|сайта|страницу|страница|странице|главную|главную страницу|официальный|официального|официальную|домашнюю|домашнюю страницу)(?=\s|$)/gi, ' ')
       .replace(/[?!.]/g, ' ')
   );
@@ -83,7 +83,21 @@ function buildUrlFromTemplate(template, query) {
 }
 
 function isExplicitSiteOpenRequest(lower) {
-  return hasKeyword(lower, ['открой', 'зайди', 'перейди', 'открой сайт', 'открой страницу', 'зайди на сайт']);
+  return hasKeyword(lower, [
+    'открой',
+    'открыть',
+    'зайди',
+    'зайти',
+    'перейди',
+    'перейти',
+    'открой сайт',
+    'открыть сайт',
+    'открой страницу',
+    'зайди на сайт',
+    'можешь открыть',
+    'можешь зайти',
+    'можешь перейти',
+  ]);
 }
 
 function normalizeQueryValue(input) {
@@ -419,6 +433,28 @@ function isGenericSiteCategoryQuery(input) {
   ]);
 }
 
+function looksLikeStandaloneSiteMention(transcript) {
+  const normalized = normalizeWhitespace(transcript);
+  if (!normalized || normalized.length < 4) {
+    return false;
+  }
+
+  const words = normalized.split(/\s+/).filter(Boolean);
+  if (words.length > 2) {
+    return false;
+  }
+
+  if (hasKeywordFragment(normalized, ['погод', 'новост', 'курс', 'карт', 'википед', 'кто такой', 'что такое'])) {
+    return false;
+  }
+
+  if (/^(можешь|моглабы|пожалуйста|ну|слушай)$/i.test(simplifyLookup(normalized))) {
+    return false;
+  }
+
+  return /^[\p{L}\p{N}\s.-]+$/u.test(normalized);
+}
+
 function buildLookupVariants(siteQuery, contextHint, transcript = '') {
   const queryStem = simplifyLookup(siteQuery);
   const variants = new Set();
@@ -740,7 +776,7 @@ async function classifyTranscript(transcript, webProviders, contextHint, session
     };
   }
 
-  if (isExplicitSiteOpenRequest(lower)) {
+  if (isExplicitSiteOpenRequest(lower) || /\bсайт\b/i.test(lower) || looksLikeStandaloneSiteMention(normalized)) {
     const historyMatch = resolveFromSessionHistory(normalized, normalizedSessionHistory);
     if (historyMatch?.url) {
       const historyUrl = parseHistoryUrl(historyMatch.url);

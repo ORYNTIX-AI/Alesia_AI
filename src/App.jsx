@@ -179,6 +179,24 @@ function isStableInterimBrowserCandidate(transcript) {
   return true;
 }
 
+function looksLikeStandaloneSiteMention(transcript) {
+  const normalized = String(transcript || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  if (!normalized || normalized.length < 4) {
+    return false;
+  }
+
+  const words = normalized.split(/\s+/).filter(Boolean);
+  if (words.length > 2) {
+    return false;
+  }
+
+  if (/(погода|новости|курс|карта|маршрут|википед|кто такой|что такое)/i.test(normalized)) {
+    return false;
+  }
+
+  return /^[\p{L}\p{N}\s.-]+$/iu.test(normalized);
+}
+
 function isLikelyBrowserIntent(transcript) {
   const normalized = String(transcript || '').trim().toLowerCase();
   if (!normalized) return false;
@@ -186,8 +204,10 @@ function isLikelyBrowserIntent(transcript) {
   if (/\bhttps?:\/\/[^\s]+/i.test(normalized)) return true;
   if (/\b(?:[a-z0-9-]+\.)+(?:by|ru)\b/i.test(normalized)) return true;
   if (/\b[a-z0-9-]{2,}\s+(?:by|ru)\b/i.test(normalized)) return true;
+  if (/\bсайт\b/i.test(normalized)) return true;
+  if (looksLikeStandaloneSiteMention(normalized)) return true;
 
-  return /(открой|зайди|перейди|покажи|посмотри|какая|какой|какие|погода|новости|курс|карта|маршрут|википед|что такое|кто такой|информация о|сайт)/i.test(normalized);
+  return /(открой|открыть|зайди|зайти|перейди|перейти|покажи|посмотри|какая|какой|какие|погода|новости|курс|карта|маршрут|википед|что такое|кто такой|информация о)/i.test(normalized);
 }
 
 function isAssistantBrowserNarration(transcript) {
