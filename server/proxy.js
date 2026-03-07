@@ -86,8 +86,10 @@ app.post('/api/browser/intent', async (req, res) => {
   try {
     const config = await loadAppConfig();
     const transcript = String(req.body?.transcript || '');
+    const contextHint = String(req.body?.contextHint || '');
     const intent = await detectBrowserIntent({
       transcript,
+      contextHint,
       webProviders: config.webProviders,
     });
     res.json(intent);

@@ -178,7 +178,7 @@ function buildWebFailurePrompt(transcript, errorMessage) {
 Исходный запрос пользователя: "${transcript}"
 Причина: ${errorMessage || 'неизвестная ошибка'}
 
-Коротко объясни, что именно в этот раз сайт не открылся, и попроси назвать домен .by или .ru точнее.`;
+Коротко объясни, что именно в этот раз сайт не открылся, и попроси назвать сайт точнее без упоминания доменов .by или .ru.`;
 }
 
 async function jsonRequest(url, options) {
@@ -322,7 +322,10 @@ function App() {
       intent = await jsonRequest('/api/browser/intent', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ transcript: normalized }),
+        body: JSON.stringify({
+          transcript: normalized,
+          contextHint: selectedCharacter?.systemPrompt || '',
+        }),
       });
     } catch (requestError) {
       setBrowserPanel({
@@ -382,7 +385,7 @@ function App() {
       });
       sendTextTurn(buildWebFailurePrompt(normalized, requestError.message || 'Не удалось открыть страницу'));
     }
-  }, [sendTextTurn]);
+  }, [selectedCharacter, sendTextTurn]);
 
   const {
     isSupported: sidecarSupported,
