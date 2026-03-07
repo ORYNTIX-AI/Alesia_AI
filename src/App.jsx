@@ -507,9 +507,12 @@ function App() {
       return;
     }
 
-    if (isLikelyBrowserIntent(normalized)) {
-      showEarlyBrowserFeedback(normalized);
+    const likelyBrowserIntent = isLikelyBrowserIntent(normalized);
+    if (!likelyBrowserIntent) {
+      return;
     }
+
+    showEarlyBrowserFeedback(normalized);
 
     const dedupeKey = normalizeTranscriptKey(normalized);
     const now = Date.now();
@@ -534,6 +537,7 @@ function App() {
     }
 
     handledTranscriptsRef.current.push({ key: dedupeKey, timestamp: now });
+    sendTextTurn('Секунду, проверяю.');
 
     let intent;
     try {
@@ -563,6 +567,16 @@ function App() {
       if (earlyBrowserFeedbackKeyRef.current === dedupeKey) {
         restoreBrowserPanelSnapshot();
       }
+      setBrowserPanel({
+        ...DEFAULT_PANEL_STATE,
+        status: 'error',
+        error: 'Не получилось понять, какой сайт или страницу нужно открыть.',
+      });
+      sendTextTurn(buildWebFailurePrompt(
+        normalized,
+        'Не получилось понять, какой сайт или страницу нужно открыть.',
+        getSessionHistorySummary(),
+      ));
       return;
     }
 
