@@ -5,6 +5,7 @@ import { chromium } from 'playwright';
 
 const MAX_READER_TEXT_LENGTH = 4000;
 const DEFAULT_TIMEOUT_MS = 15000;
+const GEMINI_REQUEST_TIMEOUT_MS = 22000;
 const SITE_RESOLUTION_CACHE_TTL_MS = 12 * 60 * 60 * 1000;
 const PAGE_SETTLE_MS = 400;
 const SCREENSHOT_SETTLE_MS = 250;
@@ -33,13 +34,13 @@ let activePageContext = null;
 let activeRequestId = 0;
 let geminiApiKey = '';
 let geminiAgent = null;
-let geminiModel = process.env.BROWSER_RESOLVER_MODEL || 'gemini-2.5-flash';
+let geminiModel = process.env.BROWSER_RESOLVER_MODEL || 'gemini-3-flash-preview';
 const siteResolutionCache = new Map();
 
 export function configureBrowserController({ apiKey, agent, model } = {}) {
   geminiApiKey = String(apiKey || '');
   geminiAgent = agent || null;
-  geminiModel = String(model || process.env.BROWSER_RESOLVER_MODEL || 'gemini-2.5-flash');
+  geminiModel = String(model || process.env.BROWSER_RESOLVER_MODEL || 'gemini-3-flash-preview');
 }
 
 function normalizeWhitespace(input) {
@@ -290,13 +291,13 @@ function parseJsonText(text) {
   }
 }
 
-function requestText(url, { method = 'GET', headers = {}, body = null, agent } = {}) {
+function requestText(url, { method = 'GET', headers = {}, body = null, agent, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
   return new Promise((resolve, reject) => {
     const request = https.request(url, {
       method,
       headers,
       agent,
-      timeout: DEFAULT_TIMEOUT_MS,
+      timeout: timeoutMs,
     }, (response) => {
       let raw = '';
       response.setEncoding('utf8');
@@ -345,7 +346,7 @@ async function requestGeminiJson(prompt) {
   });
 
   const url = `https://generativelanguage.googleapis.com/v1beta/${buildGeminiModelPath()}:generateContent`;
-  const raw = await requestText(url, {
+  const requestOptions = {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -354,9 +355,24 @@ async function requestGeminiJson(prompt) {
     },
     body,
     agent: geminiAgent,
-  });
-  const payload = raw ? JSON.parse(raw) : {};
-  return parseJsonText(extractResponseText(payload));
+    timeoutMs: GEMINI_REQUEST_TIMEOUT_MS,
+  };
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const raw = await requestText(url, requestOptions);
+      const payload = raw ? JSON.parse(raw) : {};
+      return parseJsonText(extractResponseText(payload));
+    } catch (error) {
+      const isLastAttempt = attempt === 1;
+      const isTimeout = /таймаут/i.test(String(error?.message || ''));
+      if (isLastAttempt || !isTimeout) {
+        throw error;
+      }
+    }
+  }
+
+  throw new Error('Gemini resolver failed without response');
 }
 
 function normalizeResolvedUrl(domain, url) {

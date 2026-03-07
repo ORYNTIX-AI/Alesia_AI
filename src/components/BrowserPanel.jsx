@@ -1,8 +1,9 @@
 export function BrowserPanel({ panel }) {
   if (panel?.status === 'loading') {
+    const isResolving = panel.sourceType === 'intent-pending';
     return (
-      <section className={`browser-panel ${panel.url ? 'browser-panel--loading-visual' : 'browser-panel--state'}`}>
-        {panel.url && (
+      <section className={`browser-panel ${panel.url && !isResolving ? 'browser-panel--loading-visual' : 'browser-panel--state'}`}>
+        {panel.url && !isResolving && (
           <iframe
             className="browser-panel__iframe"
             title={panel.title || 'Сайт'}
@@ -11,11 +12,11 @@ export function BrowserPanel({ panel }) {
             referrerPolicy="no-referrer"
           />
         )}
-        <div className={`browser-panel__state browser-panel__state--loading${panel.url ? ' browser-panel__state--overlay' : ''}`} aria-live="polite">
+        <div className={`browser-panel__state browser-panel__state--loading${panel.url && !isResolving ? ' browser-panel__state--overlay' : ''}`} aria-live="polite">
           <div className="browser-panel__spinner" />
-          <strong>Открывается сайт...</strong>
-          <p>{panel.title || 'Подготавливаю страницу'}</p>
-          {panel.url && <span className="browser-panel__meta">{panel.url}</span>}
+          <strong>{isResolving ? 'Ищу сайт...' : 'Открывается сайт...'}</strong>
+          <p>{panel.title || (isResolving ? 'Подбираю точный адрес сайта' : 'Подготавливаю страницу')}</p>
+          {panel.url && !isResolving && <span className="browser-panel__meta">{panel.url}</span>}
         </div>
       </section>
     );

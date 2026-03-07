@@ -6,7 +6,6 @@ import { BrowserPanel } from './components/BrowserPanel';
 import { SettingsDrawer } from './components/SettingsDrawer';
 import { useAppConfig } from './hooks/useAppConfig';
 import { useGeminiLive } from './hooks/useGeminiLive';
-import { useSpeechSidecar } from './hooks/useSpeechSidecar';
 import { AudioStreamPlayer } from './utils/AudioStreamPlayer';
 
 const DEFAULT_PANEL_STATE = {
@@ -202,10 +201,10 @@ function isAssistantBrowserNarration(transcript) {
 function buildEarlyBrowserLoadingTitle(transcript) {
   const normalized = String(transcript || '').replace(/\s+/g, ' ').trim().replace(/[?!.]+$/g, '');
   if (!normalized) {
-    return 'Начинаю открывать сайт';
+    return 'Подбираю адрес сайта';
   }
 
-  return `Начинаю: ${truncatePromptValue(normalized, 96)}`;
+  return `Подбираю адрес: ${truncatePromptValue(normalized, 96)}`;
 }
 
 function truncatePromptValue(value, maxLength = 180) {
@@ -304,7 +303,6 @@ function App() {
   } = useAppConfig();
   const browserRequestIdRef = useRef(0);
   const handledTranscriptsRef = useRef([]);
-  const interimTimerRef = useRef(null);
   const liveTranscriptTimerRef = useRef(null);
   const sessionWebHistoryRef = useRef([]);
   const browserPanelSnapshotRef = useRef(DEFAULT_PANEL_STATE);
@@ -377,11 +375,6 @@ function App() {
     earlyBrowserFeedbackKeyRef.current = '';
     lastBrowserCommandRef.current = { key: '', transcript: '', timestamp: 0 };
     browserSpeechGuardUntilRef.current = 0;
-
-    if (interimTimerRef.current) {
-      clearTimeout(interimTimerRef.current);
-      interimTimerRef.current = null;
-    }
 
     if (liveTranscriptTimerRef.current) {
       clearTimeout(liveTranscriptTimerRef.current);
@@ -652,39 +645,6 @@ function App() {
     }
   }, [appendSessionWebHistory, getSessionHistoryPayload, getSessionHistorySummary, restoreBrowserPanelSnapshot, selectedCharacter, sendTextTurn, showEarlyBrowserFeedback]);
 
-  const {
-    isSupported: sidecarSupported,
-    isListening: sidecarListening,
-    interimTranscript,
-    error: sidecarError,
-  } = useSpeechSidecar({
-    enabled: status === 'connected',
-    onFinalTranscript: handleBrowserTranscript,
-  });
-
-  useEffect(() => {
-    if (status !== 'connected' || !isStableInterimBrowserCandidate(interimTranscript)) {
-      if (interimTimerRef.current) {
-        clearTimeout(interimTimerRef.current);
-        interimTimerRef.current = null;
-      }
-      return undefined;
-    }
-
-    showEarlyBrowserFeedback(interimTranscript);
-
-    interimTimerRef.current = setTimeout(() => {
-      handleBrowserTranscript(interimTranscript);
-    }, INTERIM_BROWSER_TRIGGER_DELAY_MS);
-
-    return () => {
-      if (interimTimerRef.current) {
-        clearTimeout(interimTimerRef.current);
-        interimTimerRef.current = null;
-      }
-    };
-  }, [handleBrowserTranscript, interimTranscript, showEarlyBrowserFeedback, status]);
-
   useEffect(() => {
     if (status !== 'connected' || !isStableInterimBrowserCandidate(liveInputTranscript)) {
       if (liveTranscriptTimerRef.current) {
@@ -767,7 +727,7 @@ function App() {
               </Canvas>
             </div>
 
-            <LiveStatusPill status={status} audioPlayer={audioPlayer} getUserVolume={getUserVolume} sidecarListening={sidecarListening} />
+            <LiveStatusPill status={status} audioPlayer={audioPlayer} getUserVolume={getUserVolume} sidecarListening={false} />
           </div>
 
           <CharacterArrow direction="right" onClick={() => handleCharacterStep(1)} />
@@ -790,8 +750,6 @@ function App() {
           {configError && <div className="notice notice--error">{configError}</div>}
           {saveError && <div className="notice notice--error">{saveError}</div>}
           {sessionNeedsReconnect && <div className="notice notice--warning">Новые настройки голоса и промпта применятся после переподключения.</div>}
-          {sidecarError && <div className="notice notice--warning">Ошибка распознавания речи: {sidecarError}</div>}
-          {status === 'connected' && !sidecarSupported && <div className="notice notice--warning">Браузер не поддерживает распознавание речи для веб-режима. Голосовой режим продолжает работать.</div>}
         </div>
 
         <BrowserPanel panel={browserPanel} />
