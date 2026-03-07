@@ -21,6 +21,8 @@ const DEFAULT_PANEL_STATE = {
 };
 
 const INTERIM_BROWSER_TRIGGER_DELAY_MS = 900;
+const MAX_SESSION_WEB_HISTORY_ENTRIES = 8;
+const MAX_SESSION_WEB_PROMPT_ENTRIES = 5;
 
 const BACKGROUND_PRESETS = {
   aurora: {
@@ -176,32 +178,71 @@ function isStableInterimBrowserCandidate(transcript) {
   return true;
 }
 
-function buildWebPendingPrompt(transcript, titleHint) {
+function truncatePromptValue(value, maxLength = 180) {
+  const normalized = String(value || '').replace(/\s+/g, ' ').trim();
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+  return `${normalized.slice(0, maxLength - 1).trimEnd()}…`;
+}
+
+function buildSessionHistorySummary(sessionHistory) {
+  const recentEntries = Array.isArray(sessionHistory)
+    ? sessionHistory.slice(-MAX_SESSION_WEB_PROMPT_ENTRIES)
+    : [];
+
+  if (!recentEntries.length) {
+    return 'История веб-действий этой сессии пока пуста.';
+  }
+
+  return recentEntries
+    .map((entry, index) => {
+      const title = truncatePromptValue(entry.title || entry.url || entry.transcript || 'Сайт');
+      const requestLabel = truncatePromptValue(entry.transcript || 'без уточнения');
+      const urlLabel = truncatePromptValue(entry.url || '', 120);
+
+      if (entry.status === 'failed') {
+        const reason = truncatePromptValue(entry.note || 'ошибка открытия');
+        return `${index + 1}. Не открылся: ${title}. Запрос: "${requestLabel}". Причина: ${reason}.`;
+      }
+
+      return `${index + 1}. Открыт: ${title}${urlLabel ? ` (${urlLabel})` : ''}. Запрос: "${requestLabel}".`;
+    })
+    .join('\n');
+}
+
+function buildWebPendingPrompt(transcript, titleHint, historySummary) {
   return `WEB_CONTEXT_PENDING:
 Служебное событие: browser-controller начал открывать сайт по запросу пользователя.
 Исходный запрос пользователя: "${transcript}"
 Цель открытия: ${titleHint || 'Сайт'}
+Недавняя веб-история этой сессии:
+${historySummary}
 
 Ответь одной короткой фразой, что ты открываешь сайт и смотришь страницу.`;
 }
 
-function buildWebResultPrompt(transcript, panelState) {
+function buildWebResultPrompt(transcript, panelState, historySummary) {
   return `WEB_CONTEXT_RESULT:
 Служебное событие: browser-controller уже успешно открыл сайт по запросу пользователя. Не говори, что ты не можешь открывать сайты.
 Исходный запрос пользователя: "${transcript}"
 Источник: ${panelState.title || 'Веб-страница'}
 URL: ${panelState.url || 'n/a'}
+Недавняя веб-история этой сессии:
+${historySummary}
 Содержимое страницы:
 ${panelState.readerText || 'Содержимое страницы не удалось извлечь.'}
 
 Ответь коротко и только на основе этого контекста.`;
 }
 
-function buildWebFailurePrompt(transcript, errorMessage) {
+function buildWebFailurePrompt(transcript, errorMessage, historySummary) {
   return `WEB_CONTEXT_ERROR:
 Служебное событие: browser-controller не смог открыть сайт по запросу пользователя. Не говори, что ты вообще не умеешь открывать сайты.
 Исходный запрос пользователя: "${transcript}"
 Причина: ${errorMessage || 'неизвестная ошибка'}
+Недавняя веб-история этой сессии:
+${historySummary}
 
 Коротко объясни, что именно в этот раз сайт не открылся, и попроси назвать сайт точнее без упоминания доменов .by или .ru.`;
 }
@@ -235,6 +276,7 @@ function App() {
   const handledTranscriptsRef = useRef([]);
   const interimTimerRef = useRef(null);
   const liveTranscriptTimerRef = useRef(null);
+  const sessionWebHistoryRef = useRef([]);
 
   const selectedCharacter = config?.characters?.find((character) => character.id === config.activeCharacterId) || config?.characters?.[0] || null;
   const voiceOptions = (config?.supportedVoiceNames?.length ? config.supportedVoiceNames : ['Aoede', 'Kore', 'Puck'])
@@ -258,6 +300,55 @@ function App() {
 
   const handleLiveInputTranscription = React.useCallback((transcript) => {
     setLiveInputTranscript(String(transcript || '').trim());
+  }, []);
+
+  const appendSessionWebHistory = React.useCallback((entry) => {
+    const normalizedEntry = {
+      status: entry?.status === 'failed' ? 'failed' : 'opened',
+      transcript: truncatePromptValue(entry?.transcript || '', 220),
+      title: truncatePromptValue(entry?.title || '', 180),
+      url: truncatePromptValue(entry?.url || '', 240),
+      note: truncatePromptValue(entry?.note || '', 220),
+      timestamp: Date.now(),
+    };
+
+    sessionWebHistoryRef.current = [
+      ...sessionWebHistoryRef.current,
+      normalizedEntry,
+    ].slice(-MAX_SESSION_WEB_HISTORY_ENTRIES);
+  }, []);
+
+  const getSessionHistorySummary = React.useCallback(
+    () => buildSessionHistorySummary(sessionWebHistoryRef.current),
+    [],
+  );
+
+  const getSessionHistoryPayload = React.useCallback(
+    () => sessionWebHistoryRef.current.map((entry) => ({
+      status: entry.status,
+      transcript: entry.transcript,
+      title: entry.title,
+      url: entry.url,
+      note: entry.note,
+      timestamp: entry.timestamp,
+    })),
+    [],
+  );
+
+  const resetSessionRuntimeState = React.useCallback(() => {
+    sessionWebHistoryRef.current = [];
+    handledTranscriptsRef.current = [];
+    browserRequestIdRef.current = 0;
+
+    if (interimTimerRef.current) {
+      clearTimeout(interimTimerRef.current);
+      interimTimerRef.current = null;
+    }
+
+    if (liveTranscriptTimerRef.current) {
+      clearTimeout(liveTranscriptTimerRef.current);
+      liveTranscriptTimerRef.current = null;
+    }
   }, []);
 
   const { status, connect, disconnect, error, getUserVolume, sendTextTurn } = useGeminiLive(
@@ -288,6 +379,7 @@ function App() {
     await audioPlayer.initialize();
     setInitialized(true);
     setLiveInputTranscript('');
+    resetSessionRuntimeState();
     setAppliedSessionSignature(currentSignature);
     connect();
   };
@@ -296,6 +388,7 @@ function App() {
     disconnect();
     setInitialized(false);
     setLiveInputTranscript('');
+    resetSessionRuntimeState();
     setAppliedSessionSignature(null);
     audioPlayer.close();
   };
@@ -363,6 +456,7 @@ function App() {
         body: JSON.stringify({
           transcript: normalized,
           contextHint: selectedCharacter?.systemPrompt || '',
+          sessionHistory: getSessionHistoryPayload(),
         }),
       });
     } catch (requestError) {
@@ -379,12 +473,18 @@ function App() {
     }
 
     if (intent.type === 'unresolved-site') {
+      appendSessionWebHistory({
+        status: 'failed',
+        transcript: normalized,
+        title: intent.titleHint || intent.query || 'Сайт',
+        note: intent.error || 'Не удалось определить сайт',
+      });
       setBrowserPanel({
         ...DEFAULT_PANEL_STATE,
         status: 'error',
         error: intent.error || 'Не распознала сайт',
       });
-      sendTextTurn(buildWebFailurePrompt(normalized, intent.error));
+      sendTextTurn(buildWebFailurePrompt(normalized, intent.error, getSessionHistorySummary()));
       return;
     }
 
@@ -397,7 +497,7 @@ function App() {
       title: intent.titleHint || 'Открываю страницу',
       sourceType: intent.sourceType || intent.type,
     });
-    sendTextTurn(buildWebPendingPrompt(normalized, intent.titleHint || intent.url));
+    sendTextTurn(buildWebPendingPrompt(normalized, intent.titleHint || intent.url, getSessionHistorySummary()));
 
     try {
       const opened = await jsonRequest('/api/browser/open', {
@@ -411,20 +511,38 @@ function App() {
       }
 
       setBrowserPanel(opened);
-      sendTextTurn(buildWebResultPrompt(normalized, opened));
+      appendSessionWebHistory({
+        status: 'opened',
+        transcript: normalized,
+        title: opened.title || intent.titleHint || 'Сайт',
+        url: opened.url || intent.url,
+        note: opened.query || '',
+      });
+      sendTextTurn(buildWebResultPrompt(normalized, opened, getSessionHistorySummary()));
     } catch (requestError) {
       if (browserRequestIdRef.current !== requestId) {
         return;
       }
 
+      appendSessionWebHistory({
+        status: 'failed',
+        transcript: normalized,
+        title: intent.titleHint || intent.query || 'Сайт',
+        url: intent.url || '',
+        note: requestError.message || 'Не удалось открыть страницу',
+      });
       setBrowserPanel({
         ...DEFAULT_PANEL_STATE,
         status: 'error',
         error: requestError.message || 'Не удалось открыть страницу',
       });
-      sendTextTurn(buildWebFailurePrompt(normalized, requestError.message || 'Не удалось открыть страницу'));
+      sendTextTurn(buildWebFailurePrompt(
+        normalized,
+        requestError.message || 'Не удалось открыть страницу',
+        getSessionHistorySummary(),
+      ));
     }
-  }, [selectedCharacter, sendTextTurn]);
+  }, [appendSessionWebHistory, getSessionHistoryPayload, getSessionHistorySummary, selectedCharacter, sendTextTurn]);
 
   const {
     isSupported: sidecarSupported,

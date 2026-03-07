@@ -138,6 +138,95 @@ function simplifyLookup(input) {
     .replace(/[еёуюаяыиоьй]$/i, '');
 }
 
+function sanitizeSessionHistory(sessionHistory) {
+  if (!Array.isArray(sessionHistory)) {
+    return [];
+  }
+
+  return sessionHistory
+    .slice(-8)
+    .map((entry) => ({
+      status: normalizeWhitespace(entry?.status || '').toLowerCase(),
+      transcript: normalizeWhitespace(entry?.transcript || '').slice(0, 220),
+      title: normalizeWhitespace(entry?.title || '').slice(0, 180),
+      url: normalizeWhitespace(entry?.url || '').slice(0, 240),
+      note: normalizeWhitespace(entry?.note || '').slice(0, 220),
+    }))
+    .filter((entry) => entry.transcript || entry.title || entry.url);
+}
+
+function buildSessionHistoryPromptBlock(sessionHistory) {
+  const normalizedHistory = sanitizeSessionHistory(sessionHistory);
+  if (!normalizedHistory.length) {
+    return 'Недавняя веб-история этой сессии: нет.';
+  }
+
+  return `Недавняя веб-история этой сессии:
+${normalizedHistory.map((entry, index) => {
+  const title = entry.title || entry.url || entry.transcript || 'Сайт';
+  if (entry.status === 'failed') {
+    return `${index + 1}. Ошибка открытия: ${title}. Запрос: "${entry.transcript || 'без уточнения'}". Причина: ${entry.note || 'не указана'}.`;
+  }
+
+  return `${index + 1}. Открыт: ${title}${entry.url ? ` (${entry.url})` : ''}. Запрос: "${entry.transcript || 'без уточнения'}".`;
+}).join('\n')}`;
+}
+
+function parseHistoryUrl(rawUrl) {
+  try {
+    return new URL(rawUrl);
+  } catch {
+    return null;
+  }
+}
+
+function resolveFromSessionHistory(transcript, sessionHistory) {
+  const normalizedHistory = sanitizeSessionHistory(sessionHistory)
+    .filter((entry) => entry.status === 'opened' && entry.url);
+
+  if (!normalizedHistory.length) {
+    return null;
+  }
+
+  const simplifiedTranscript = simplifyLookup(transcript);
+  const lastOpened = normalizedHistory.at(-1);
+
+  const referencesLastSite = /(тот|тотже|предыдущ|прошл|последн|снова|обратно|его|её|эту|этот)/i.test(simplifiedTranscript)
+    && /(сайт|страниц|открой|зайди|перейди|вернись|покажи)/i.test(simplifiedTranscript);
+
+  if (referencesLastSite && lastOpened) {
+    return {
+      title: lastOpened.title || parseHistoryUrl(lastOpened.url)?.hostname || lastOpened.url,
+      url: lastOpened.url,
+      reason: 'session-history:last-opened',
+    };
+  }
+
+  for (let index = normalizedHistory.length - 1; index >= 0; index -= 1) {
+    const entry = normalizedHistory[index];
+    const parsedUrl = parseHistoryUrl(entry.url);
+    const hostname = parsedUrl?.hostname?.replace(/^www\./i, '') || '';
+    const candidates = [
+      entry.title,
+      entry.transcript,
+      hostname,
+      hostname.split('.')[0],
+    ]
+      .map((value) => simplifyLookup(value))
+      .filter(Boolean);
+
+    if (candidates.some((candidate) => candidate && simplifiedTranscript && (candidate.includes(simplifiedTranscript) || simplifiedTranscript.includes(candidate)))) {
+      return {
+        title: entry.title || hostname || entry.url,
+        url: entry.url,
+        reason: 'session-history:matched-site',
+      };
+    }
+  }
+
+  return null;
+}
+
 function resolveWeatherMemoryUrl(query) {
   const queryStem = simplifyLookup(query);
   const matched = WEATHER_MEMORY.find((entry) => entry.aliases.some((alias) => simplifyLookup(alias) === queryStem));
@@ -341,13 +430,14 @@ function buildLookupVariants(siteQuery, contextHint, transcript = '') {
   return Array.from(variants).filter(Boolean);
 }
 
-function buildSiteResolverPrompt(transcript, siteQuery, contextHint, checkedFailures = []) {
+function buildSiteResolverPrompt(transcript, siteQuery, contextHint, sessionHistory = [], checkedFailures = []) {
   const previousFailuresBlock = checkedFailures.length > 0
     ? `\nУже проверенные и неподходящие варианты:
 ${checkedFailures.map((failure, index) => `${index + 1}. ${failure.url} -> ${failure.reason}`).join('\n')}
 
 Не повторяй эти варианты. Предложи другой реальный домен, если знаешь его уверенно.`
     : '';
+  const sessionHistoryBlock = buildSessionHistoryPromptBlock(sessionHistory);
 
   return `Ты системный резолвер доменов для голосового аватара.
 
@@ -385,14 +475,16 @@ ${checkedFailures.map((failure, index) => `${index + 1}. ${failure.url} -> ${fai
 
 Фраза пользователя: "${transcript}"
 Название сайта или цель открытия: "${siteQuery}"
-Контекст активного персонажа: "${normalizeWhitespace(contextHint || '')}"${previousFailuresBlock}`;
+Контекст активного персонажа: "${normalizeWhitespace(contextHint || '')}"
+${sessionHistoryBlock}${previousFailuresBlock}`;
 }
 
-function buildSiteCandidatePrompt(transcript, lookupVariants, contextHint, checkedFailures = []) {
+function buildSiteCandidatePrompt(transcript, lookupVariants, contextHint, sessionHistory = [], checkedFailures = []) {
   const failuresBlock = checkedFailures.length > 0
     ? `\nНе используй уже проверенные и неподходящие варианты:
 ${checkedFailures.map((failure, index) => `${index + 1}. ${failure.url} -> ${failure.reason}`).join('\n')}`
     : '';
+  const sessionHistoryBlock = buildSessionHistoryPromptBlock(sessionHistory);
 
   return `Ты системный генератор кандидатов домена для голосового аватара.
 
@@ -424,10 +516,11 @@ ${checkedFailures.map((failure, index) => `${index + 1}. ${failure.url} -> ${fai
 
 Фраза пользователя: "${transcript}"
 Варианты названия сайта: "${lookupVariants.filter(Boolean).join(', ')}"
-Контекст активного персонажа: "${normalizeWhitespace(contextHint || '')}"${failuresBlock}`;
+Контекст активного персонажа: "${normalizeWhitespace(contextHint || '')}"
+${sessionHistoryBlock}${failuresBlock}`;
 }
 
-async function resolveSiteWithGemini(transcript, siteQuery, contextHint) {
+async function resolveSiteWithGemini(transcript, siteQuery, contextHint, sessionHistory = []) {
   const lookupVariants = buildLookupVariants(siteQuery, contextHint, transcript);
   const cacheKeys = Array.from(new Set(
     [siteQuery, transcript]
@@ -446,7 +539,13 @@ async function resolveSiteWithGemini(transcript, siteQuery, contextHint) {
 
   for (const lookupVariant of (lookupVariants.length ? lookupVariants : [siteQuery || transcript])) {
     for (let attempt = 0; attempt < 2; attempt += 1) {
-      const resolved = await requestGeminiJson(buildSiteResolverPrompt(transcript, lookupVariant, contextHint, checkedFailures));
+      const resolved = await requestGeminiJson(buildSiteResolverPrompt(
+        transcript,
+        lookupVariant,
+        contextHint,
+        sessionHistory,
+        checkedFailures,
+      ));
       const title = normalizeWhitespace(resolved?.title || '');
       const reason = normalizeWhitespace(resolved?.reason || '');
       const primaryUrl = normalizeResolvedUrl(resolved?.domain, resolved?.url);
@@ -455,7 +554,7 @@ async function resolveSiteWithGemini(transcript, siteQuery, contextHint) {
         : [];
       const candidateUrls = Array.from(new Set([primaryUrl, ...alternateUrls].filter(Boolean)));
 
-      if (!Boolean(resolved?.canResolve) && candidateUrls.length === 0) {
+      if (!resolved?.canResolve && candidateUrls.length === 0) {
         if (reason) {
           checkedFailures.push({
             url: lookupVariant || '(пустой вариант)',
@@ -496,7 +595,13 @@ async function resolveSiteWithGemini(transcript, siteQuery, contextHint) {
   }
 
   const candidatePayload = await requestGeminiJson(
-    buildSiteCandidatePrompt(transcript, lookupVariants.length ? lookupVariants : [siteQuery || transcript], contextHint, checkedFailures)
+    buildSiteCandidatePrompt(
+      transcript,
+      lookupVariants.length ? lookupVariants : [siteQuery || transcript],
+      contextHint,
+      sessionHistory,
+      checkedFailures,
+    )
   ).catch(() => null);
   const fallbackCandidates = Array.isArray(candidatePayload?.candidates) ? candidatePayload.candidates : [];
 
@@ -534,12 +639,13 @@ async function resolveSiteWithGemini(transcript, siteQuery, contextHint) {
   };
 }
 
-async function classifyTranscript(transcript, webProviders, contextHint) {
+async function classifyTranscript(transcript, webProviders, contextHint, sessionHistory = []) {
   const normalized = normalizeWhitespace(transcript);
   const lower = normalized.toLowerCase();
   const directUrl = extractUrlOrDomain(normalized);
   const searchQuery = stripCommandWords(normalized) || normalized;
   const siteLookupQuery = extractSiteLookupQuery(normalized) || searchQuery;
+  const normalizedSessionHistory = sanitizeSessionHistory(sessionHistory);
 
   if (!normalized || normalized.length < 4) {
     return { type: 'none', reason: 'too-short' };
@@ -619,8 +725,20 @@ async function classifyTranscript(transcript, webProviders, contextHint) {
   }
 
   if (isExplicitSiteOpenRequest(lower)) {
+    const historyMatch = resolveFromSessionHistory(normalized, normalizedSessionHistory);
+    if (historyMatch?.url) {
+      const historyUrl = parseHistoryUrl(historyMatch.url);
+      return {
+        type: 'direct-site',
+        query: siteLookupQuery,
+        url: historyMatch.url,
+        sourceType: 'direct-site',
+        titleHint: historyMatch.title || historyUrl?.hostname || historyMatch.url,
+      };
+    }
+
     try {
-      const resolved = await resolveSiteWithGemini(normalized, siteLookupQuery, contextHint);
+      const resolved = await resolveSiteWithGemini(normalized, siteLookupQuery, contextHint, normalizedSessionHistory);
       if (resolved.canResolve && resolved.url) {
         siteResolutionCache.set(simplifyLookup(siteLookupQuery), {
           value: {
@@ -824,8 +942,9 @@ async function resolveInternalProviderPage(page, intent) {
   }
 }
 
-export async function detectBrowserIntent({ transcript, webProviders, contextHint = '' }) {
-  return classifyTranscript(transcript, webProviders, contextHint);
+export async function detectBrowserIntent({ transcript, webProviders, contextHint = '', sessionHistory = [] }) {
+  const normalizedSessionHistory = sanitizeSessionHistory(sessionHistory);
+  return classifyTranscript(transcript, webProviders, contextHint, normalizedSessionHistory);
 }
 
 export async function openBrowserIntent(intent) {

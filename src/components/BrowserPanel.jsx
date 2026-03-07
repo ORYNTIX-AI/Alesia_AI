@@ -1,10 +1,21 @@
 export function BrowserPanel({ panel }) {
   if (panel?.status === 'loading') {
     return (
-      <section className="browser-panel browser-panel--state">
-        <div className="browser-panel__state browser-panel__state--loading">
+      <section className={`browser-panel ${panel.url ? 'browser-panel--loading-visual' : 'browser-panel--state'}`}>
+        {panel.url && (
+          <iframe
+            className="browser-panel__iframe"
+            title={panel.title || 'Сайт'}
+            src={panel.url}
+            loading="eager"
+            referrerPolicy="no-referrer"
+          />
+        )}
+        <div className={`browser-panel__state browser-panel__state--loading${panel.url ? ' browser-panel__state--overlay' : ''}`} aria-live="polite">
           <div className="browser-panel__spinner" />
-          <p>Открываю сайт...</p>
+          <strong>Открывается сайт...</strong>
+          <p>{panel.title || 'Подготавливаю страницу'}</p>
+          {panel.url && <span className="browser-panel__meta">{panel.url}</span>}
         </div>
       </section>
     );
@@ -27,7 +38,7 @@ export function BrowserPanel({ panel }) {
           className="browser-panel__iframe"
           title={panel.title || 'Сайт'}
           src={panel.url}
-          loading="lazy"
+          loading="eager"
           referrerPolicy="no-referrer"
         />
       </section>
