@@ -9,15 +9,15 @@ const DOMAIN_REGEX = /\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}\b/i
 const WEATHER_RESULT_URL_PATTERN = /https:\/\/www\.gismeteo\.by\/weather-[^/]+-\d+\/?/i;
 
 const POPULAR_SITES = [
-  { aliases: ['онлайнер', 'onliner'], url: 'https://www.onliner.by/', title: 'Onliner BY' },
+  { aliases: ['онлайнер', 'онлинер', 'onliner'], url: 'https://www.onliner.by/', title: 'Onliner BY' },
   { aliases: ['куфар', 'kufar'], url: 'https://www.kufar.by/', title: 'Kufar BY' },
-  { aliases: ['ав бай', 'av.by', 'авто бай'], url: 'https://av.by/', title: 'AV BY' },
+  { aliases: ['ав бай', 'av.by', 'авто бай', 'авбай', 'av by'], url: 'https://av.by/', title: 'AV BY' },
   { aliases: ['яндекс карты', 'карты яндекс'], url: 'https://yandex.by/maps/', title: 'Яндекс Карты BY' },
-  { aliases: ['яндекс', 'yandex'], url: 'https://yandex.by/', title: 'Yandex BY' },
-  { aliases: ['гисметео', 'gismeteo'], url: 'https://www.gismeteo.by/', title: 'Gismeteo BY' },
-  { aliases: ['майл', 'mail.ru', 'мэйл'], url: 'https://mail.ru/', title: 'Mail.ru' },
+  { aliases: ['яндекс', 'yandex', 'яндекс бай', 'yandex by'], url: 'https://yandex.by/', title: 'Yandex BY' },
+  { aliases: ['гисметео', 'gismeteo', 'гис метео'], url: 'https://www.gismeteo.by/', title: 'Gismeteo BY' },
+  { aliases: ['майл', 'mail.ru', 'mail ru', 'мэйл', 'мейл', 'майл ру'], url: 'https://mail.ru/', title: 'Mail.ru' },
   { aliases: ['новости mail', 'mail новости'], url: 'https://news.mail.ru/', title: 'Новости Mail.ru' },
-  { aliases: ['банки ру', 'banki.ru'], url: 'https://www.banki.ru/', title: 'Банки.ру' },
+  { aliases: ['банки ру', 'banki.ru', 'banki ru'], url: 'https://www.banki.ru/', title: 'Банки.ру' },
   { aliases: ['википедия', 'wikipedia'], url: 'https://ru.wikipedia.org/', title: 'Wikipedia RU' },
 ];
 
@@ -61,6 +61,10 @@ function buildUrlFromTemplate(template, query) {
 
 function matchPopularSite(lower) {
   return POPULAR_SITES.find((site) => site.aliases.some((alias) => lower.includes(alias)));
+}
+
+function isExplicitSiteOpenRequest(lower) {
+  return hasKeyword(lower, ['открой', 'зайди', 'перейди', 'открой сайт', 'открой страницу', 'зайди на сайт']);
 }
 
 function normalizeQueryValue(input) {
@@ -131,6 +135,11 @@ function extractUrlOrDomain(transcript) {
   const domainMatch = transcript.match(DOMAIN_REGEX);
   if (domainMatch) {
     return `https://${domainMatch[0]}`;
+  }
+
+  const spokenDomainMatch = transcript.toLowerCase().match(/\b([a-z0-9-]{2,})\s+(by|ru)\b/);
+  if (spokenDomainMatch) {
+    return `https://${spokenDomainMatch[1]}.${spokenDomainMatch[2]}`;
   }
 
   return null;
@@ -225,6 +234,14 @@ function classifyTranscript(transcript, webProviders) {
       url: buildWikipediaArticleUrl(wikiQuery),
       sourceType: 'direct-site',
       titleHint: 'Справка',
+    };
+  }
+
+  if (isExplicitSiteOpenRequest(lower)) {
+    return {
+      type: 'unresolved-site',
+      query: searchQuery,
+      error: 'Не распознала сайт. Назови популярный домен .by или .ru.',
     };
   }
 

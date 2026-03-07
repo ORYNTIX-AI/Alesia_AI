@@ -160,10 +160,6 @@ function buildSignature(character) {
   return [character.voiceModelId, character.voiceName, character.systemPrompt, character.greetingText].join('|');
 }
 
-function buildWebPendingPrompt(transcript) {
-  return `WEB_CONTEXT_PENDING: Пользователь попросил проверить внешний источник по запросу "${transcript}". Коротко скажи, что ты сейчас смотришь сайт.`;
-}
-
 function buildWebResultPrompt(transcript, panelState) {
   return `WEB_CONTEXT_RESULT:
 Исходный запрос пользователя: "${transcript}"
@@ -173,6 +169,10 @@ URL: ${panelState.url || 'n/a'}
 ${panelState.readerText || 'Содержимое страницы не удалось извлечь.'}
 
 Ответь коротко и только на основе этого контекста.`;
+}
+
+function buildWebFailurePrompt(transcript, errorMessage) {
+  return `WEB_CONTEXT_ERROR: Я не смогла открыть сайт по запросу "${transcript}". Причина: ${errorMessage || 'неизвестная ошибка'}. Коротко попроси пользователя назвать популярный домен .by или .ru точнее.`;
 }
 
 async function jsonRequest(url, options) {
@@ -328,6 +328,16 @@ function App() {
       return;
     }
 
+    if (intent.type === 'unresolved-site') {
+      setBrowserPanel({
+        ...DEFAULT_PANEL_STATE,
+        status: 'error',
+        error: intent.error || 'Не распознала сайт',
+      });
+      sendTextTurn(buildWebFailurePrompt(normalized, intent.error));
+      return;
+    }
+
     const requestId = browserRequestIdRef.current + 1;
     browserRequestIdRef.current = requestId;
     setBrowserPanel({
@@ -337,8 +347,6 @@ function App() {
       title: intent.titleHint || 'Открываю страницу',
       sourceType: intent.sourceType || intent.type,
     });
-
-    sendTextTurn(buildWebPendingPrompt(normalized));
 
     try {
       const opened = await jsonRequest('/api/browser/open', {
@@ -363,6 +371,7 @@ function App() {
         status: 'error',
         error: requestError.message || 'Не удалось открыть страницу',
       });
+      sendTextTurn(buildWebFailurePrompt(normalized, requestError.message || 'Не удалось открыть страницу'));
     }
   }, [sendTextTurn]);
 
