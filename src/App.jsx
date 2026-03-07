@@ -20,6 +20,8 @@ const DEFAULT_PANEL_STATE = {
   error: null,
 };
 
+const INTERIM_BROWSER_TRIGGER_DELAY_MS = 900;
+
 const BACKGROUND_PRESETS = {
   aurora: {
     stage: 'radial-gradient(circle at 20% 18%, rgba(247, 255, 254, 0.16) 0%, transparent 22%), radial-gradient(circle at 78% 22%, rgba(190, 255, 250, 0.14) 0%, transparent 28%), linear-gradient(160deg, #88d3df 0%, #5ba7ba 46%, #1f4f66 100%)',
@@ -160,6 +162,29 @@ function buildSignature(character) {
   return [character.voiceModelId, character.voiceName, character.systemPrompt, character.greetingText].join('|');
 }
 
+function normalizeTranscriptKey(transcript) {
+  return String(transcript || '')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, '');
+}
+
+function isStableInterimBrowserCandidate(transcript) {
+  const normalized = String(transcript || '').trim();
+  if (normalized.length < 10) return false;
+  if (normalized.split(/\s+/).length < 2) return false;
+  if (/^(открой|зайди|перейди|посмотри|покажи)\s*(сайт|страницу)?\s*$/i.test(normalized)) return false;
+  return true;
+}
+
+function buildWebPendingPrompt(transcript, titleHint) {
+  return `WEB_CONTEXT_PENDING:
+Служебное событие: browser-controller начал открывать сайт по запросу пользователя.
+Исходный запрос пользователя: "${transcript}"
+Цель открытия: ${titleHint || 'Сайт'}
+
+Ответь одной короткой фразой, что ты открываешь сайт и смотришь страницу.`;
+}
+
 function buildWebResultPrompt(transcript, panelState) {
   return `WEB_CONTEXT_RESULT:
 Служебное событие: browser-controller уже успешно открыл сайт по запросу пользователя. Не говори, что ты не можешь открывать сайты.
@@ -207,6 +232,7 @@ function App() {
   } = useAppConfig();
   const browserRequestIdRef = useRef(0);
   const handledTranscriptsRef = useRef([]);
+  const interimTimerRef = useRef(null);
 
   const selectedCharacter = config?.characters?.find((character) => character.id === config.activeCharacterId) || config?.characters?.[0] || null;
   const voiceOptions = (config?.supportedVoiceNames?.length ? config.supportedVoiceNames : ['Aoede', 'Kore', 'Puck'])
@@ -308,7 +334,7 @@ function App() {
     const normalized = transcript.trim();
     if (!normalized) return;
 
-    const dedupeKey = normalized.toLowerCase();
+    const dedupeKey = normalizeTranscriptKey(normalized);
     const now = Date.now();
     handledTranscriptsRef.current = handledTranscriptsRef.current.filter((entry) => now - entry.timestamp < 15000);
     if (handledTranscriptsRef.current.some((entry) => entry.key === dedupeKey)) {
@@ -359,6 +385,7 @@ function App() {
       title: intent.titleHint || 'Открываю страницу',
       sourceType: intent.sourceType || intent.type,
     });
+    sendTextTurn(buildWebPendingPrompt(normalized, intent.titleHint || intent.url));
 
     try {
       const opened = await jsonRequest('/api/browser/open', {
@@ -390,11 +417,33 @@ function App() {
   const {
     isSupported: sidecarSupported,
     isListening: sidecarListening,
+    interimTranscript,
     error: sidecarError,
   } = useSpeechSidecar({
     enabled: status === 'connected',
     onFinalTranscript: handleBrowserTranscript,
   });
+
+  useEffect(() => {
+    if (status !== 'connected' || !isStableInterimBrowserCandidate(interimTranscript)) {
+      if (interimTimerRef.current) {
+        clearTimeout(interimTimerRef.current);
+        interimTimerRef.current = null;
+      }
+      return undefined;
+    }
+
+    interimTimerRef.current = setTimeout(() => {
+      handleBrowserTranscript(interimTranscript);
+    }, INTERIM_BROWSER_TRIGGER_DELAY_MS);
+
+    return () => {
+      if (interimTimerRef.current) {
+        clearTimeout(interimTimerRef.current);
+        interimTimerRef.current = null;
+      }
+    };
+  }, [handleBrowserTranscript, interimTranscript, status]);
 
   if (loading || !config || !selectedCharacter) {
     return (
