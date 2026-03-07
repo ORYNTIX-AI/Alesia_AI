@@ -6,7 +6,7 @@ import { createServer } from 'http';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import { SocksProxyAgent } from 'socks-proxy-agent';
 import { WebSocketServer, WebSocket } from 'ws';
-import { detectBrowserIntent, openBrowserIntent } from './browserController.js';
+import { configureBrowserController, detectBrowserIntent, openBrowserIntent } from './browserController.js';
 import { getAppConfigPath, loadAppConfig, saveAppConfig } from './configStore.js';
 import { SUPPORTED_VOICE_NAMES } from './defaultAppConfig.js';
 
@@ -28,6 +28,10 @@ if (!API_KEY) {
   console.error('ERROR: GEMINI_API_KEY is not set in environment variables!');
   process.exit(1);
 }
+configureBrowserController({
+  apiKey: API_KEY,
+  agent: proxyAgent,
+});
 const GEMINI_WS_URL = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${API_KEY}`;
 
 const __filename = fileURLToPath(import.meta.url);

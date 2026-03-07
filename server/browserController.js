@@ -1,25 +1,14 @@
 import dns from 'dns/promises';
+import https from 'https';
 import net from 'net';
 import { chromium } from 'playwright';
 
 const MAX_READER_TEXT_LENGTH = 4000;
 const DEFAULT_TIMEOUT_MS = 15000;
+const SITE_RESOLUTION_CACHE_TTL_MS = 12 * 60 * 60 * 1000;
 const DIRECT_URL_REGEX = /\bhttps?:\/\/[^\s]+/i;
 const DOMAIN_REGEX = /\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}\b/i;
 const WEATHER_RESULT_URL_PATTERN = /https:\/\/www\.gismeteo\.by\/weather-[^/]+-\d+\/?/i;
-
-const POPULAR_SITES = [
-  { aliases: ['онлайнер', 'онлинер', 'onliner'], url: 'https://www.onliner.by/', title: 'Onliner BY' },
-  { aliases: ['куфар', 'kufar'], url: 'https://www.kufar.by/', title: 'Kufar BY' },
-  { aliases: ['ав бай', 'av.by', 'авто бай', 'авбай', 'av by'], url: 'https://av.by/', title: 'AV BY' },
-  { aliases: ['яндекс карты', 'карты яндекс'], url: 'https://yandex.by/maps/', title: 'Яндекс Карты BY' },
-  { aliases: ['яндекс', 'yandex', 'яндекс бай', 'yandex by'], url: 'https://yandex.by/', title: 'Yandex BY' },
-  { aliases: ['гисметео', 'gismeteo', 'гис метео'], url: 'https://www.gismeteo.by/', title: 'Gismeteo BY' },
-  { aliases: ['майл', 'mail.ru', 'mail ru', 'мэйл', 'мейл', 'майл ру'], url: 'https://mail.ru/', title: 'Mail.ru' },
-  { aliases: ['новости mail', 'mail новости'], url: 'https://news.mail.ru/', title: 'Новости Mail.ru' },
-  { aliases: ['банки ру', 'banki.ru', 'banki ru'], url: 'https://www.banki.ru/', title: 'Банки.ру' },
-  { aliases: ['википедия', 'wikipedia'], url: 'https://ru.wikipedia.org/', title: 'Wikipedia RU' },
-];
 
 const WEATHER_MEMORY = [
   { aliases: ['минск'], url: 'https://www.gismeteo.by/weather-minsk-4248/' },
@@ -33,6 +22,16 @@ const WEATHER_MEMORY = [
 let browserPromise = null;
 let activePage = null;
 let activeRequestId = 0;
+let geminiApiKey = '';
+let geminiAgent = null;
+let geminiModel = process.env.BROWSER_RESOLVER_MODEL || 'gemini-2.5-flash';
+const siteResolutionCache = new Map();
+
+export function configureBrowserController({ apiKey, agent, model } = {}) {
+  geminiApiKey = String(apiKey || '');
+  geminiAgent = agent || null;
+  geminiModel = String(model || process.env.BROWSER_RESOLVER_MODEL || 'gemini-2.5-flash');
+}
 
 function normalizeWhitespace(input) {
   return String(input || '')
@@ -57,10 +56,6 @@ function hasKeyword(transcript, keywords) {
 
 function buildUrlFromTemplate(template, query) {
   return template.replace('{query}', encodeURIComponent(query));
-}
-
-function matchPopularSite(lower) {
-  return POPULAR_SITES.find((site) => site.aliases.some((alias) => lower.includes(alias)));
 }
 
 function isExplicitSiteOpenRequest(lower) {
@@ -145,25 +140,174 @@ function extractUrlOrDomain(transcript) {
   return null;
 }
 
-function classifyTranscript(transcript, webProviders) {
+function buildGeminiModelPath() {
+  return geminiModel.startsWith('models/') ? geminiModel : `models/${geminiModel}`;
+}
+
+function extractResponseText(payload) {
+  return payload?.candidates?.[0]?.content?.parts
+    ?.map((part) => part?.text || '')
+    .join('')
+    .trim() || '';
+}
+
+function parseJsonText(text) {
+  const normalized = String(text || '').trim();
+  if (!normalized) {
+    throw new Error('Gemini вернул пустой ответ');
+  }
+
+  try {
+    return JSON.parse(normalized);
+  } catch {
+    const match = normalized.match(/\{[\s\S]*\}/);
+    if (match) {
+      return JSON.parse(match[0]);
+    }
+    throw new Error('Gemini вернул невалидный JSON');
+  }
+}
+
+function requestGeminiJson(prompt) {
+  if (!geminiApiKey) {
+    throw new Error('Gemini API key не настроен');
+  }
+
+  const body = JSON.stringify({
+    contents: [
+      {
+        role: 'user',
+        parts: [{ text: prompt }],
+      },
+    ],
+    generationConfig: {
+      temperature: 0,
+      responseMimeType: 'application/json',
+    },
+  });
+
+  const url = `https://generativelanguage.googleapis.com/v1beta/${buildGeminiModelPath()}:generateContent`;
+
+  return new Promise((resolve, reject) => {
+    const request = https.request(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(body),
+        'x-goog-api-key': geminiApiKey,
+      },
+      agent: geminiAgent,
+      timeout: DEFAULT_TIMEOUT_MS,
+    }, (response) => {
+      let raw = '';
+      response.setEncoding('utf8');
+      response.on('data', (chunk) => {
+        raw += chunk;
+      });
+      response.on('end', () => {
+        try {
+          const payload = raw ? JSON.parse(raw) : {};
+          if (response.statusCode < 200 || response.statusCode >= 300) {
+            const apiError = payload?.error?.message || `Gemini HTTP ${response.statusCode}`;
+            return reject(new Error(apiError));
+          }
+          return resolve(parseJsonText(extractResponseText(payload)));
+        } catch (error) {
+          return reject(error);
+        }
+      });
+    });
+
+    request.on('timeout', () => {
+      request.destroy(new Error('Истек таймаут Gemini при определении сайта'));
+    });
+    request.on('error', reject);
+    request.write(body);
+    request.end();
+  });
+}
+
+function normalizeResolvedUrl(domain, url) {
+  const normalizedUrl = normalizeWhitespace(url).replace(/^["']|["']$/g, '');
+  const normalizedDomain = normalizeWhitespace(domain).replace(/^https?:\/\//i, '').replace(/^www\./i, '').replace(/\/.*$/, '');
+
+  if (normalizedUrl) {
+    if (/^https?:\/\//i.test(normalizedUrl)) {
+      return normalizedUrl;
+    }
+    return `https://${normalizedUrl.replace(/^\/+/, '')}`;
+  }
+
+  if (normalizedDomain) {
+    return `https://${normalizedDomain}`;
+  }
+
+  return '';
+}
+
+function buildSiteResolverPrompt(transcript, siteQuery) {
+  return `Ты системный резолвер доменов для голосового аватара.
+
+Нужно определить реальный публичный домен сайта, который пользователь хочет открыть.
+
+Правила:
+1. Используй только свои знания о реально существующих популярных публичных сайтах.
+2. Никакого поиска и никаких предположений "наверное". Если не уверен, верни canResolve=false.
+3. Разрешены только домены .by и .ru.
+4. Верни JSON без markdown и без пояснений.
+5. Если пользователь назвал именно раздел или бренд сайта, можешь вернуть конкретный URL раздела, но только если уверен.
+
+Формат ответа JSON:
+{
+  "canResolve": true,
+  "title": "Короткое название сайта",
+  "domain": "example.by",
+  "url": "https://example.by/",
+  "reason": "коротко"
+}
+
+Если не уверен, верни:
+{
+  "canResolve": false,
+  "title": "",
+  "domain": "",
+  "url": "",
+  "reason": "почему не удалось уверенно определить"
+}
+
+Фраза пользователя: "${transcript}"
+Название сайта или цель открытия: "${siteQuery}"`;
+}
+
+async function resolveSiteWithGemini(transcript, siteQuery) {
+  const cacheKey = normalizeWhitespace(siteQuery || transcript).toLowerCase();
+  const cached = siteResolutionCache.get(cacheKey);
+  if (cached && (Date.now() - cached.timestamp) < SITE_RESOLUTION_CACHE_TTL_MS) {
+    return cached.value;
+  }
+
+  const resolved = await requestGeminiJson(buildSiteResolverPrompt(transcript, siteQuery));
+  const canResolve = Boolean(resolved?.canResolve);
+  const candidateUrl = normalizeResolvedUrl(resolved?.domain, resolved?.url);
+
+  const value = {
+    canResolve,
+    title: normalizeWhitespace(resolved?.title || ''),
+    reason: normalizeWhitespace(resolved?.reason || ''),
+    url: candidateUrl,
+  };
+  siteResolutionCache.set(cacheKey, { value, timestamp: Date.now() });
+  return value;
+}
+
+async function classifyTranscript(transcript, webProviders) {
   const normalized = normalizeWhitespace(transcript);
   const lower = normalized.toLowerCase();
   const directUrl = extractUrlOrDomain(normalized);
   const searchQuery = stripCommandWords(normalized) || normalized;
-  const matchedSite = matchPopularSite(lower);
 
   if (!normalized || normalized.length < 4) {
     return { type: 'none', reason: 'too-short' };
-  }
-
-  if (matchedSite) {
-    return {
-      type: 'direct-site',
-      query: searchQuery,
-      url: matchedSite.url,
-      sourceType: 'direct-site',
-      titleHint: matchedSite.title,
-    };
   }
 
   if (directUrl) {
@@ -238,10 +382,26 @@ function classifyTranscript(transcript, webProviders) {
   }
 
   if (isExplicitSiteOpenRequest(lower)) {
+    try {
+      const resolved = await resolveSiteWithGemini(normalized, searchQuery);
+      if (resolved.canResolve && resolved.url) {
+        const safeUrl = await assertPublicUrl(resolved.url);
+        return {
+          type: 'direct-site',
+          query: searchQuery,
+          url: safeUrl,
+          sourceType: 'direct-site',
+          titleHint: resolved.title || new URL(safeUrl).hostname,
+        };
+      }
+    } catch (error) {
+      console.error('Failed to resolve site with Gemini', error);
+    }
+
     return {
       type: 'unresolved-site',
       query: searchQuery,
-      error: 'Не распознала сайт. Назови популярный домен .by или .ru.',
+      error: 'Не смогла уверенно определить реальный домен сайта в .by или .ru.',
     };
   }
 
