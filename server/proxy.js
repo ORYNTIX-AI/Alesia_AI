@@ -87,12 +87,11 @@ app.post('/api/browser/intent', async (req, res) => {
   try {
     const config = await loadAppConfig();
     const transcript = String(req.body?.transcript || '');
-    const contextHint = String(req.body?.contextHint || '');
     const sessionHistory = Array.isArray(req.body?.sessionHistory) ? req.body.sessionHistory : [];
     console.log('[browser-intent] request', JSON.stringify({ transcript }));
     const intent = await detectBrowserIntent({
       transcript,
-      contextHint,
+      contextHint: '',
       sessionHistory,
       webProviders: config.webProviders,
     });

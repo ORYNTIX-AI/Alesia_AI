@@ -24,6 +24,8 @@ const INTERIM_BROWSER_TRIGGER_DELAY_MS = 320;
 const MAX_SESSION_WEB_HISTORY_ENTRIES = 8;
 const MAX_SESSION_WEB_PROMPT_ENTRIES = 5;
 const SIDECAR_BOT_VOLUME_GUARD = 0.06;
+const BROWSER_INTENT_TIMEOUT_MS = 15000;
+const BROWSER_OPEN_TIMEOUT_MS = 30000;
 
 const BACKGROUND_PRESETS = {
   aurora: {
@@ -357,13 +359,30 @@ ${historySummary}
 Коротко объясни, что именно в этот раз сайт не открылся, и попроси назвать сайт точнее без упоминания доменов .by или .ru.`;
 }
 
-async function jsonRequest(url, options) {
-  const response = await fetch(url, options);
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    throw new Error(payload.error || 'Запрос не выполнен');
+async function jsonRequest(url, options = {}, timeoutMs = 15000) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => {
+    controller.abort();
+  }, timeoutMs);
+
+  try {
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload.error || 'Запрос не выполнен');
+    }
+    return payload;
+  } catch (error) {
+    if (error?.name === 'AbortError') {
+      throw new Error('Истек таймаут ожидания ответа');
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
   }
-  return payload;
 }
 
 function App() {
@@ -631,10 +650,9 @@ function App() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             transcript: normalized,
-            contextHint: selectedCharacter?.systemPrompt || '',
             sessionHistory: getSessionHistoryPayload(),
           }),
-        });
+        }, BROWSER_INTENT_TIMEOUT_MS);
       } catch (requestError) {
         if (earlyBrowserFeedbackKeyRef.current === dedupeKey) {
           restoreBrowserPanelSnapshot();
@@ -645,6 +663,11 @@ function App() {
           status: 'error',
           error: requestError.message || 'Не удалось определить browser intent',
         });
+        sendTextTurn(buildWebFailurePrompt(
+          normalized,
+          requestError.message || 'Не удалось определить browser intent',
+          getSessionHistorySummary(),
+        ));
         return;
       }
 
@@ -702,7 +725,7 @@ function App() {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(intent),
-        });
+        }, BROWSER_OPEN_TIMEOUT_MS);
 
         if (browserRequestIdRef.current !== requestId) {
           return;
@@ -748,7 +771,7 @@ function App() {
       browserIntentInFlightRef.current = false;
       inFlightBrowserKeyRef.current = '';
     }
-  }, [appendSessionWebHistory, getSessionHistoryPayload, getSessionHistorySummary, restoreBrowserPanelSnapshot, selectedCharacter, sendTextTurn, showEarlyBrowserFeedback]);
+  }, [appendSessionWebHistory, getSessionHistoryPayload, getSessionHistorySummary, restoreBrowserPanelSnapshot, sendTextTurn, showEarlyBrowserFeedback]);
 
   const handleSidecarTranscript = React.useCallback((transcript) => {
     const normalized = String(transcript || '').trim();
@@ -770,7 +793,7 @@ function App() {
   });
 
   useEffect(() => {
-    if (status !== 'connected' || sidecarSupported || !isStableInterimBrowserCandidate(liveInputTranscript)) {
+    if (status !== 'connected' || (sidecarSupported && sidecarListening) || !isStableInterimBrowserCandidate(liveInputTranscript)) {
       if (liveTranscriptTimerRef.current) {
         clearTimeout(liveTranscriptTimerRef.current);
         liveTranscriptTimerRef.current = null;
@@ -790,7 +813,7 @@ function App() {
         liveTranscriptTimerRef.current = null;
       }
     };
-  }, [handleBrowserTranscript, liveInputTranscript, showEarlyBrowserFeedback, sidecarSupported, status]);
+  }, [handleBrowserTranscript, liveInputTranscript, showEarlyBrowserFeedback, sidecarListening, sidecarSupported, status]);
 
   if (loading || !config || !selectedCharacter) {
     return (
