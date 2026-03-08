@@ -171,45 +171,102 @@ function normalizeTranscriptKey(transcript) {
     .replace(/[^\p{L}\p{N}]+/gu, '');
 }
 
-function isStableInterimBrowserCandidate(transcript) {
-  const normalized = String(transcript || '').trim();
-  if (/^(открой|зайди|перейди|покажи|посмотри)\s+[\p{L}\p{N}.-]+/iu.test(normalized)) return true;
-  if (/^(какая|какой|какие)\s+погода\b/iu.test(normalized)) return true;
-  if (normalized.length < 10) return false;
-  if (normalized.split(/\s+/).length < 2) return false;
-  if (/^(открой|зайди|перейди|посмотри|покажи)\s*(сайт|страницу)?\s*$/i.test(normalized)) return false;
-  return true;
+function normalizeSpeechText(transcript) {
+  return String(transcript || '')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
-function looksLikeStandaloneSiteMention(transcript) {
-  const normalized = String(transcript || '').replace(/\s+/g, ' ').trim().toLowerCase();
-  if (!normalized || normalized.length < 4) {
-    return false;
+function extractBrowserTarget(transcript) {
+  const normalized = normalizeSpeechText(transcript);
+  if (!normalized) {
+    return '';
   }
 
-  const words = normalized.split(/\s+/).filter(Boolean);
-  if (words.length > 2) {
-    return false;
+  const urlMatch = normalized.match(/\bhttps?:\/\/[^\s]+/i);
+  if (urlMatch?.[0]) {
+    return urlMatch[0];
   }
 
-  if (/(погода|новости|курс|карта|маршрут|википед|кто такой|что такое)/i.test(normalized)) {
-    return false;
+  const domainMatch = normalized.match(/\b(?:[a-z0-9-]+\.)+(?:by|ru)\b/i);
+  if (domainMatch?.[0]) {
+    return domainMatch[0];
   }
 
-  return /^[\p{L}\p{N}\s.-]+$/iu.test(normalized);
+  const spokenDomainMatch = normalized.match(/\b([a-z0-9-]{2,}\s+(?:by|ru))\b/i);
+  if (spokenDomainMatch?.[1]) {
+    return spokenDomainMatch[1];
+  }
+
+  const tailMatch = normalized.match(/(?:открой|открыть|зайди|зайти|перейди|перейти)\s+(?:мне\s+)?(?:сайт|страницу|домен|адрес)?\s*(.+)$/iu);
+  if (tailMatch?.[1]) {
+    return normalizeSpeechText(tailMatch[1]);
+  }
+
+  const withSiteMatch = normalized.match(/(?:сайт|сайта|страницу|страница|домен|адрес)\s+(.+)$/iu);
+  if (withSiteMatch?.[1]) {
+    return normalizeSpeechText(withSiteMatch[1]);
+  }
+
+  return normalized;
 }
 
-function isLikelyBrowserIntent(transcript) {
-  const normalized = String(transcript || '').trim().toLowerCase();
+function isSimilarIntentKey(left, right) {
+  if (!left || !right) return false;
+  if (left === right) return true;
+  if (left.length < 4 || right.length < 4) return false;
+  return left.includes(right) || right.includes(left);
+}
+
+function buildBrowserIntentKey(transcript) {
+  const target = extractBrowserTarget(transcript);
+  const key = normalizeTranscriptKey(target);
+  if (key) return key;
+  return normalizeTranscriptKey(transcript);
+}
+
+function isExplicitBrowserRequest(transcript) {
+  const normalized = normalizeSpeechText(transcript).toLowerCase();
   if (!normalized) return false;
 
   if (/\bhttps?:\/\/[^\s]+/i.test(normalized)) return true;
   if (/\b(?:[a-z0-9-]+\.)+(?:by|ru)\b/i.test(normalized)) return true;
   if (/\b[a-z0-9-]{2,}\s+(?:by|ru)\b/i.test(normalized)) return true;
-  if (/\bсайт\b/i.test(normalized)) return true;
-  if (looksLikeStandaloneSiteMention(normalized)) return true;
 
-  return /(открой|открыть|зайди|зайти|перейди|перейти|покажи|посмотри|какая|какой|какие|погода|новости|курс|карта|маршрут|википед|что такое|кто такой|информация о)/i.test(normalized);
+  const padded = ` ${normalized.replace(/[.,!?;:()[\]{}"']/g, ' ')} `;
+  const hasOpenVerb = /(?:^|\s)(открой|открыть|зайди|зайти|перейди|перейти)(?=\s|$)/iu.test(padded);
+  const hasLookupVerb = /(?:^|\s)(найди|найти|покажи|посмотри)(?=\s|$)/iu.test(padded);
+  const hasWebNoun = /(?:^|\s)(сайт|сайта|страниц[ауые]?|домен|адрес|url|урл|веб|web)(?=\s|$)/iu.test(padded);
+  const hasWebContext = /(?:^|\s)(в интернете|в сети|онлайн|online)(?=\s|$)/iu.test(padded);
+
+  if (hasLookupVerb && (hasWebNoun || hasWebContext)) {
+    return true;
+  }
+
+  if (hasOpenVerb && hasWebNoun) {
+    return true;
+  }
+
+  if (hasOpenVerb) {
+    const target = extractBrowserTarget(normalized);
+    if (normalizeTranscriptKey(target).length >= 4) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function isStableInterimBrowserCandidate(transcript) {
+  const normalized = normalizeSpeechText(transcript);
+  if (!normalized || !isExplicitBrowserRequest(normalized)) return false;
+  if (normalized.length < 8) return false;
+  if (/^(открой|открыть|зайди|зайти|перейди|перейти|найди|найти|покажи|посмотри)\s*(сайт|страницу|домен|адрес)?\s*$/iu.test(normalized)) return false;
+  return true;
+}
+
+function isLikelyBrowserIntent(transcript) {
+  return isExplicitBrowserRequest(transcript);
 }
 
 function isAssistantBrowserNarration(transcript) {
@@ -333,6 +390,8 @@ function App() {
   const earlyBrowserFeedbackKeyRef = useRef('');
   const lastBrowserCommandRef = useRef({ key: '', transcript: '', timestamp: 0 });
   const browserSpeechGuardUntilRef = useRef(0);
+  const browserIntentInFlightRef = useRef(false);
+  const inFlightBrowserKeyRef = useRef('');
 
   const selectedCharacter = config?.characters?.find((character) => character.id === config.activeCharacterId) || config?.characters?.[0] || null;
   const voiceOptions = (config?.supportedVoiceNames?.length ? config.supportedVoiceNames : ['Aoede', 'Kore', 'Puck'])
@@ -399,6 +458,8 @@ function App() {
     earlyBrowserFeedbackKeyRef.current = '';
     lastBrowserCommandRef.current = { key: '', transcript: '', timestamp: 0 };
     browserSpeechGuardUntilRef.current = 0;
+    browserIntentInFlightRef.current = false;
+    inFlightBrowserKeyRef.current = '';
 
     if (liveTranscriptTimerRef.current) {
       clearTimeout(liveTranscriptTimerRef.current);
@@ -522,7 +583,7 @@ function App() {
   };
 
   const handleBrowserTranscript = React.useCallback(async (transcript) => {
-    const normalized = transcript.trim();
+    const normalized = normalizeSpeechText(transcript);
     if (!normalized) return;
 
     if (isAssistantBrowserNarration(normalized)) {
@@ -534,152 +595,158 @@ function App() {
       return;
     }
 
-    showEarlyBrowserFeedback(normalized);
-
-    const dedupeKey = normalizeTranscriptKey(normalized);
+    const dedupeKey = buildBrowserIntentKey(normalized);
     const now = Date.now();
     const lastBrowserCommand = lastBrowserCommandRef.current;
     const isEchoOfRecentBrowserAction = (
       now < browserSpeechGuardUntilRef.current
       && Boolean(lastBrowserCommand.key)
-      && (
-        dedupeKey === lastBrowserCommand.key
-        || dedupeKey.includes(lastBrowserCommand.key)
-        || lastBrowserCommand.key.includes(dedupeKey)
-      )
+      && isSimilarIntentKey(dedupeKey, lastBrowserCommand.key)
     );
 
     if (isEchoOfRecentBrowserAction) {
       return;
     }
 
-    handledTranscriptsRef.current = handledTranscriptsRef.current.filter((entry) => now - entry.timestamp < 15000);
-    if (handledTranscriptsRef.current.some((entry) => entry.key === dedupeKey)) {
+    if (browserIntentInFlightRef.current && isSimilarIntentKey(dedupeKey, inFlightBrowserKeyRef.current)) {
       return;
     }
 
+    handledTranscriptsRef.current = handledTranscriptsRef.current.filter((entry) => now - entry.timestamp < 15000);
+    if (handledTranscriptsRef.current.some((entry) => isSimilarIntentKey(entry.key, dedupeKey))) {
+      return;
+    }
+
+    showEarlyBrowserFeedback(normalized);
+    browserIntentInFlightRef.current = true;
+    inFlightBrowserKeyRef.current = dedupeKey;
     handledTranscriptsRef.current.push({ key: dedupeKey, timestamp: now });
     sendTextTurn('Секунду, проверяю.');
 
-    let intent;
     try {
-      intent = await jsonRequest('/api/browser/intent', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      let intent;
+      try {
+        intent = await jsonRequest('/api/browser/intent', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            transcript: normalized,
+            contextHint: selectedCharacter?.systemPrompt || '',
+            sessionHistory: getSessionHistoryPayload(),
+          }),
+        });
+      } catch (requestError) {
+        if (earlyBrowserFeedbackKeyRef.current === dedupeKey) {
+          restoreBrowserPanelSnapshot();
+        }
+        browserSpeechGuardUntilRef.current = now + 2500;
+        setBrowserPanel({
+          ...DEFAULT_PANEL_STATE,
+          status: 'error',
+          error: requestError.message || 'Не удалось определить browser intent',
+        });
+        return;
+      }
+
+      if (!intent || intent.type === 'none') {
+        if (earlyBrowserFeedbackKeyRef.current === dedupeKey) {
+          restoreBrowserPanelSnapshot();
+        }
+        setBrowserPanel({
+          ...DEFAULT_PANEL_STATE,
+          status: 'error',
+          error: 'Не получилось понять, какой сайт или страницу нужно открыть.',
+        });
+        sendTextTurn(buildWebFailurePrompt(
+          normalized,
+          'Не получилось понять, какой сайт или страницу нужно открыть.',
+          getSessionHistorySummary(),
+        ));
+        return;
+      }
+
+      if (intent.type === 'unresolved-site') {
+        earlyBrowserFeedbackKeyRef.current = '';
+        browserSpeechGuardUntilRef.current = now + 2500;
+        appendSessionWebHistory({
+          status: 'failed',
           transcript: normalized,
-          contextHint: selectedCharacter?.systemPrompt || '',
-          sessionHistory: getSessionHistoryPayload(),
-        }),
-      });
-    } catch (requestError) {
-      if (earlyBrowserFeedbackKeyRef.current === dedupeKey) {
-        restoreBrowserPanelSnapshot();
-      }
-      browserSpeechGuardUntilRef.current = now + 2500;
-      setBrowserPanel({
-        ...DEFAULT_PANEL_STATE,
-        status: 'error',
-        error: requestError.message || 'Не удалось определить browser intent',
-      });
-      return;
-    }
-
-    if (!intent || intent.type === 'none') {
-      if (earlyBrowserFeedbackKeyRef.current === dedupeKey) {
-        restoreBrowserPanelSnapshot();
-      }
-      setBrowserPanel({
-        ...DEFAULT_PANEL_STATE,
-        status: 'error',
-        error: 'Не получилось понять, какой сайт или страницу нужно открыть.',
-      });
-      sendTextTurn(buildWebFailurePrompt(
-        normalized,
-        'Не получилось понять, какой сайт или страницу нужно открыть.',
-        getSessionHistorySummary(),
-      ));
-      return;
-    }
-
-    if (intent.type === 'unresolved-site') {
-      earlyBrowserFeedbackKeyRef.current = '';
-      browserSpeechGuardUntilRef.current = now + 2500;
-      appendSessionWebHistory({
-        status: 'failed',
-        transcript: normalized,
-        title: intent.titleHint || intent.query || 'Сайт',
-        note: intent.error || 'Не удалось определить сайт',
-      });
-      setBrowserPanel({
-        ...DEFAULT_PANEL_STATE,
-        status: 'error',
-        error: intent.error || 'Не распознала сайт',
-      });
-      sendTextTurn(buildWebFailurePrompt(normalized, intent.error, getSessionHistorySummary()));
-      return;
-    }
-
-    const requestId = browserRequestIdRef.current + 1;
-    browserRequestIdRef.current = requestId;
-    earlyBrowserFeedbackKeyRef.current = '';
-    lastBrowserCommandRef.current = { key: dedupeKey, transcript: normalized, timestamp: now };
-    browserSpeechGuardUntilRef.current = now + 6000;
-    setBrowserPanel({
-      ...DEFAULT_PANEL_STATE,
-      status: 'loading',
-      url: intent.url,
-      title: intent.titleHint || 'Открываю страницу',
-      sourceType: intent.sourceType || intent.type,
-    });
-    sendTextTurn(buildWebPendingPrompt(normalized, intent.titleHint || intent.url, getSessionHistorySummary()));
-
-    try {
-      const opened = await jsonRequest('/api/browser/open', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(intent),
-      });
-
-      if (browserRequestIdRef.current !== requestId) {
+          title: intent.titleHint || intent.query || 'Сайт',
+          note: intent.error || 'Не удалось определить сайт',
+        });
+        setBrowserPanel({
+          ...DEFAULT_PANEL_STATE,
+          status: 'error',
+          error: intent.error || 'Не распознала сайт',
+        });
+        sendTextTurn(buildWebFailurePrompt(normalized, intent.error, getSessionHistorySummary()));
         return;
       }
 
+      const requestId = browserRequestIdRef.current + 1;
+      browserRequestIdRef.current = requestId;
       earlyBrowserFeedbackKeyRef.current = '';
-      browserSpeechGuardUntilRef.current = Date.now() + 2500;
-      setBrowserPanel(opened);
-      appendSessionWebHistory({
-        status: 'opened',
-        transcript: normalized,
-        title: opened.title || intent.titleHint || 'Сайт',
-        url: opened.url || intent.url,
-        note: opened.query || '',
-      });
-      sendTextTurn(buildWebResultPrompt(normalized, opened, getSessionHistorySummary()));
-    } catch (requestError) {
-      if (browserRequestIdRef.current !== requestId) {
-        return;
-      }
-
-      earlyBrowserFeedbackKeyRef.current = '';
-      browserSpeechGuardUntilRef.current = Date.now() + 2500;
-      appendSessionWebHistory({
-        status: 'failed',
-        transcript: normalized,
-        title: intent.titleHint || intent.query || 'Сайт',
-        url: intent.url || '',
-        note: requestError.message || 'Не удалось открыть страницу',
-      });
+      lastBrowserCommandRef.current = { key: dedupeKey, transcript: normalized, timestamp: now };
+      browserSpeechGuardUntilRef.current = now + 6000;
       setBrowserPanel({
         ...DEFAULT_PANEL_STATE,
-        status: 'error',
-        error: requestError.message || 'Не удалось открыть страницу',
+        status: 'loading',
+        url: intent.url,
+        title: intent.titleHint || 'Открываю страницу',
+        sourceType: intent.sourceType || intent.type,
       });
-      sendTextTurn(buildWebFailurePrompt(
-        normalized,
-        requestError.message || 'Не удалось открыть страницу',
-        getSessionHistorySummary(),
-      ));
+      sendTextTurn(buildWebPendingPrompt(normalized, intent.titleHint || intent.url, getSessionHistorySummary()));
+
+      try {
+        const opened = await jsonRequest('/api/browser/open', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(intent),
+        });
+
+        if (browserRequestIdRef.current !== requestId) {
+          return;
+        }
+
+        earlyBrowserFeedbackKeyRef.current = '';
+        browserSpeechGuardUntilRef.current = Date.now() + 2500;
+        setBrowserPanel(opened);
+        appendSessionWebHistory({
+          status: 'opened',
+          transcript: normalized,
+          title: opened.title || intent.titleHint || 'Сайт',
+          url: opened.url || intent.url,
+          note: opened.query || '',
+        });
+        sendTextTurn(buildWebResultPrompt(normalized, opened, getSessionHistorySummary()));
+      } catch (requestError) {
+        if (browserRequestIdRef.current !== requestId) {
+          return;
+        }
+
+        earlyBrowserFeedbackKeyRef.current = '';
+        browserSpeechGuardUntilRef.current = Date.now() + 2500;
+        appendSessionWebHistory({
+          status: 'failed',
+          transcript: normalized,
+          title: intent.titleHint || intent.query || 'Сайт',
+          url: intent.url || '',
+          note: requestError.message || 'Не удалось открыть страницу',
+        });
+        setBrowserPanel({
+          ...DEFAULT_PANEL_STATE,
+          status: 'error',
+          error: requestError.message || 'Не удалось открыть страницу',
+        });
+        sendTextTurn(buildWebFailurePrompt(
+          normalized,
+          requestError.message || 'Не удалось открыть страницу',
+          getSessionHistorySummary(),
+        ));
+      }
+    } finally {
+      browserIntentInFlightRef.current = false;
+      inFlightBrowserKeyRef.current = '';
     }
   }, [appendSessionWebHistory, getSessionHistoryPayload, getSessionHistorySummary, restoreBrowserPanelSnapshot, selectedCharacter, sendTextTurn, showEarlyBrowserFeedback]);
 
@@ -696,14 +763,14 @@ function App() {
     void handleBrowserTranscript(normalized);
   }, [audioPlayer, handleBrowserTranscript]);
 
-  const { isListening: sidecarListening } = useSpeechSidecar({
+  const { isSupported: sidecarSupported, isListening: sidecarListening } = useSpeechSidecar({
     enabled: status === 'connected',
     onFinalTranscript: handleSidecarTranscript,
     language: 'ru-RU',
   });
 
   useEffect(() => {
-    if (status !== 'connected' || !isStableInterimBrowserCandidate(liveInputTranscript)) {
+    if (status !== 'connected' || sidecarSupported || !isStableInterimBrowserCandidate(liveInputTranscript)) {
       if (liveTranscriptTimerRef.current) {
         clearTimeout(liveTranscriptTimerRef.current);
         liveTranscriptTimerRef.current = null;
@@ -723,7 +790,7 @@ function App() {
         liveTranscriptTimerRef.current = null;
       }
     };
-  }, [handleBrowserTranscript, liveInputTranscript, showEarlyBrowserFeedback, status]);
+  }, [handleBrowserTranscript, liveInputTranscript, showEarlyBrowserFeedback, sidecarSupported, status]);
 
   if (loading || !config || !selectedCharacter) {
     return (
