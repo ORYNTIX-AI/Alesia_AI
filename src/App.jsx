@@ -627,7 +627,7 @@ function App() {
       return;
     }
 
-    if (browserIntentInFlightRef.current && isSimilarIntentKey(dedupeKey, inFlightBrowserKeyRef.current)) {
+    if (browserIntentInFlightRef.current) {
       return;
     }
 

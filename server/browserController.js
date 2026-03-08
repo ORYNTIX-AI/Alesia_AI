@@ -5,7 +5,11 @@ import { chromium } from 'playwright';
 
 const MAX_READER_TEXT_LENGTH = 4000;
 const DEFAULT_TIMEOUT_MS = 15000;
-const GEMINI_REQUEST_TIMEOUT_MS = 22000;
+const GEMINI_REQUEST_TIMEOUT_MS = 16000;
+const parsedSiteResolutionTimeoutMs = Number.parseInt(process.env.SITE_RESOLUTION_TIMEOUT_MS || '', 10);
+const SITE_RESOLUTION_TIMEOUT_MS = Number.isFinite(parsedSiteResolutionTimeoutMs) && parsedSiteResolutionTimeoutMs >= 4000
+  ? parsedSiteResolutionTimeoutMs
+  : 16000;
 const SITE_RESOLUTION_CACHE_TTL_MS = 12 * 60 * 60 * 1000;
 const PAGE_SETTLE_MS = 400;
 const SCREENSHOT_SETTLE_MS = 250;
@@ -341,7 +345,7 @@ function requestText(url, { method = 'GET', headers = {}, body = null, agent, ti
   });
 }
 
-async function requestGeminiJson(prompt) {
+async function requestGeminiJson(prompt, timeoutMs = GEMINI_REQUEST_TIMEOUT_MS) {
   if (!geminiApiKey) {
     throw new Error('Gemini API key не настроен');
   }
@@ -369,16 +373,17 @@ async function requestGeminiJson(prompt) {
     },
     body,
     agent: geminiAgent,
-    timeoutMs: GEMINI_REQUEST_TIMEOUT_MS,
+    timeoutMs: Math.max(2500, timeoutMs),
   };
 
-  for (let attempt = 0; attempt < 2; attempt += 1) {
+  const maxAttempts = 1;
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     try {
       const raw = await requestText(url, requestOptions);
       const payload = raw ? JSON.parse(raw) : {};
       return parseJsonText(extractResponseText(payload));
     } catch (error) {
-      const isLastAttempt = attempt === 1;
+      const isLastAttempt = attempt === (maxAttempts - 1);
       const isTimeout = /таймаут/i.test(String(error?.message || ''));
       if (isLastAttempt || !isTimeout) {
         throw error;
@@ -482,6 +487,55 @@ function buildLookupVariants(siteQuery, contextHint, transcript = '') {
   return Array.from(variants).filter(Boolean);
 }
 
+function buildBigrams(stem) {
+  const result = new Set();
+  for (let index = 0; index < stem.length - 1; index += 1) {
+    result.add(stem.slice(index, index + 2));
+  }
+  return result;
+}
+
+function computeStemSimilarity(left, right) {
+  if (!left || !right) return 0;
+  if (left === right) return 1;
+  if (left.includes(right) || right.includes(left)) return 0.9;
+  if (left.length < 2 || right.length < 2) return 0;
+
+  const leftBigrams = buildBigrams(left);
+  const rightBigrams = buildBigrams(right);
+  let intersection = 0;
+  leftBigrams.forEach((value) => {
+    if (rightBigrams.has(value)) {
+      intersection += 1;
+    }
+  });
+  const union = leftBigrams.size + rightBigrams.size - intersection;
+  return union > 0 ? intersection / union : 0;
+}
+
+function pickContextBrandHint(siteQuery, contextHint) {
+  const queryStem = simplifyLookup(siteQuery);
+  if (!queryStem) {
+    return '';
+  }
+
+  const phrases = extractQuotedPhrases(contextHint);
+  let best = { phrase: '', score: 0 };
+
+  phrases.forEach((phrase) => {
+    const phraseStem = simplifyLookup(phrase);
+    if (!phraseStem) {
+      return;
+    }
+    const score = computeStemSimilarity(queryStem, phraseStem);
+    if (score > best.score) {
+      best = { phrase, score };
+    }
+  });
+
+  return best.score >= 0.16 ? best.phrase : '';
+}
+
 function buildSiteResolverPrompt(transcript, siteQuery, contextHint, sessionHistory = [], checkedFailures = []) {
   const previousFailuresBlock = checkedFailures.length > 0
     ? `\nУже проверенные и неподходящие варианты:
@@ -531,49 +585,16 @@ ${checkedFailures.map((failure, index) => `${index + 1}. ${failure.url} -> ${fai
 ${sessionHistoryBlock}${previousFailuresBlock}`;
 }
 
-function buildSiteCandidatePrompt(transcript, lookupVariants, contextHint, sessionHistory = [], checkedFailures = []) {
-  const failuresBlock = checkedFailures.length > 0
-    ? `\nНе используй уже проверенные и неподходящие варианты:
-${checkedFailures.map((failure, index) => `${index + 1}. ${failure.url} -> ${failure.reason}`).join('\n')}`
-    : '';
-  const sessionHistoryBlock = buildSessionHistoryPromptBlock(sessionHistory);
-
-  return `Ты системный генератор кандидатов домена для голосового аватара.
-
-Нужно предложить несколько наиболее вероятных реальных доменов сайта без поиска.
-
-Правила:
-1. Используй только свои знания о реально существующих публичных сайтах.
-2. Разрешены только домены .by и .ru.
-3. Если в контексте есть бренд или компания, учитывай их как главный ориентир.
-4. Если пользователь сказал что-то общее вроде "сайт с турами", можно предложить официальный сайт компании из контекста или самый вероятный тематический сайт.
-5. Верни JSON без markdown.
-
-Формат ответа JSON:
-{
-  "candidates": [
-    {
-      "title": "Короткое название сайта",
-      "domain": "example.by",
-      "url": "https://example.by/",
-      "reason": "кратко"
-    }
-  ]
-}
-
-Если кандидатов нет, верни:
-{
-  "candidates": []
-}
-
-Фраза пользователя: "${transcript}"
-Варианты названия сайта: "${lookupVariants.filter(Boolean).join(', ')}"
-Контекст активного персонажа: "${normalizeWhitespace(contextHint || '')}"
-${sessionHistoryBlock}${failuresBlock}`;
-}
-
 async function resolveSiteWithGemini(transcript, siteQuery, contextHint, sessionHistory = []) {
-  const lookupVariants = buildLookupVariants(siteQuery, contextHint, transcript);
+  const startedAt = Date.now();
+  const getRemainingBudget = () => SITE_RESOLUTION_TIMEOUT_MS - (Date.now() - startedAt);
+  const toGeminiTimeout = () => Math.min(GEMINI_REQUEST_TIMEOUT_MS, Math.max(2500, getRemainingBudget()));
+
+  let lookupVariants = buildLookupVariants(siteQuery, contextHint, transcript);
+  const contextBrandHint = pickContextBrandHint(siteQuery, contextHint);
+  if (contextBrandHint) {
+    lookupVariants = Array.from(new Set([contextBrandHint, ...lookupVariants]));
+  }
   const cacheKeys = Array.from(new Set(
     [siteQuery, transcript]
       .map((value) => simplifyLookup(value))
@@ -590,14 +611,32 @@ async function resolveSiteWithGemini(transcript, siteQuery, contextHint, session
   const checkedFailures = [];
 
   for (const lookupVariant of (lookupVariants.length ? lookupVariants : [siteQuery || transcript])) {
+    if (getRemainingBudget() <= 0) {
+      return {
+        canResolve: false,
+        title: '',
+        reason: 'Истек таймаут определения сайта',
+        url: '',
+      };
+    }
+
     for (let attempt = 0; attempt < 2; attempt += 1) {
+      if (getRemainingBudget() <= 0) {
+        return {
+          canResolve: false,
+          title: '',
+          reason: 'Истек таймаут определения сайта',
+          url: '',
+        };
+      }
+
       const resolved = await requestGeminiJson(buildSiteResolverPrompt(
         transcript,
         lookupVariant,
         contextHint,
         sessionHistory,
         checkedFailures,
-      ));
+      ), toGeminiTimeout());
       const title = normalizeWhitespace(resolved?.title || '');
       const reason = normalizeWhitespace(resolved?.reason || '');
       const primaryUrl = normalizeResolvedUrl(resolved?.domain, resolved?.url);
@@ -643,43 +682,6 @@ async function resolveSiteWithGemini(transcript, siteQuery, contextHint, session
           reason,
         });
       }
-    }
-  }
-
-  const candidatePayload = await requestGeminiJson(
-    buildSiteCandidatePrompt(
-      transcript,
-      lookupVariants.length ? lookupVariants : [siteQuery || transcript],
-      contextHint,
-      sessionHistory,
-      checkedFailures,
-    )
-  ).catch(() => null);
-  const fallbackCandidates = Array.isArray(candidatePayload?.candidates) ? candidatePayload.candidates : [];
-
-  for (const candidate of fallbackCandidates) {
-    const candidateUrl = normalizeResolvedUrl(candidate?.domain, candidate?.url);
-    if (!candidateUrl) {
-      continue;
-    }
-
-    try {
-      const safeUrl = await assertPublicUrl(candidateUrl);
-      const safeValue = {
-        canResolve: true,
-        title: normalizeWhitespace(candidate?.title || ''),
-        reason: normalizeWhitespace(candidate?.reason || 'gemini-candidates'),
-        url: safeUrl,
-      };
-      cacheKeys.forEach((cacheKey) => {
-        siteResolutionCache.set(cacheKey, { value: safeValue, timestamp: Date.now() });
-      });
-      return safeValue;
-    } catch (error) {
-      checkedFailures.push({
-        url: candidateUrl,
-        reason: error.message || 'не прошёл проверку',
-      });
     }
   }
 

@@ -84,14 +84,16 @@ app.put('/api/app-config', async (req, res) => {
 });
 
 app.post('/api/browser/intent', async (req, res) => {
+  const startedAt = Date.now();
   try {
     const config = await loadAppConfig();
     const transcript = String(req.body?.transcript || '');
     const sessionHistory = Array.isArray(req.body?.sessionHistory) ? req.body.sessionHistory : [];
+    const sharedContextHint = String(config?.characters?.[0]?.systemPrompt || '');
     console.log('[browser-intent] request', JSON.stringify({ transcript }));
     const intent = await detectBrowserIntent({
       transcript,
-      contextHint: '',
+      contextHint: sharedContextHint,
       sessionHistory,
       webProviders: config.webProviders,
     });
@@ -100,6 +102,7 @@ app.post('/api/browser/intent', async (req, res) => {
       type: intent?.type || 'none',
       url: intent?.url || '',
       error: intent?.error || '',
+      ms: Date.now() - startedAt,
     }));
     res.json(intent);
   } catch (error) {
@@ -109,6 +112,7 @@ app.post('/api/browser/intent', async (req, res) => {
 });
 
 app.post('/api/browser/open', async (req, res) => {
+  const startedAt = Date.now();
   try {
     const intent = req.body || {};
     if (!intent.url) {
@@ -127,6 +131,7 @@ app.post('/api/browser/open', async (req, res) => {
       url: result?.url || '',
       embeddable: Boolean(result?.embeddable),
       title: result?.title || '',
+      ms: Date.now() - startedAt,
     }));
     res.json(result);
   } catch (error) {
