@@ -6,6 +6,7 @@ import { BrowserPanel } from './components/BrowserPanel';
 import { SettingsDrawer } from './components/SettingsDrawer';
 import { useAppConfig } from './hooks/useAppConfig';
 import { useGeminiLive } from './hooks/useGeminiLive';
+import { useSpeechSidecar } from './hooks/useSpeechSidecar';
 import { AudioStreamPlayer } from './utils/AudioStreamPlayer';
 
 const DEFAULT_PANEL_STATE = {
@@ -22,6 +23,7 @@ const DEFAULT_PANEL_STATE = {
 const INTERIM_BROWSER_TRIGGER_DELAY_MS = 320;
 const MAX_SESSION_WEB_HISTORY_ENTRIES = 8;
 const MAX_SESSION_WEB_PROMPT_ENTRIES = 5;
+const SIDECAR_BOT_VOLUME_GUARD = 0.06;
 
 const BACKGROUND_PRESETS = {
   aurora: {
@@ -681,6 +683,25 @@ function App() {
     }
   }, [appendSessionWebHistory, getSessionHistoryPayload, getSessionHistorySummary, restoreBrowserPanelSnapshot, selectedCharacter, sendTextTurn, showEarlyBrowserFeedback]);
 
+  const handleSidecarTranscript = React.useCallback((transcript) => {
+    const normalized = String(transcript || '').trim();
+    if (!normalized || !isLikelyBrowserIntent(normalized) || isAssistantBrowserNarration(normalized)) {
+      return;
+    }
+
+    if ((audioPlayer?.getVolume?.() || 0) > SIDECAR_BOT_VOLUME_GUARD) {
+      return;
+    }
+
+    void handleBrowserTranscript(normalized);
+  }, [audioPlayer, handleBrowserTranscript]);
+
+  const { isListening: sidecarListening } = useSpeechSidecar({
+    enabled: status === 'connected',
+    onFinalTranscript: handleSidecarTranscript,
+    language: 'ru-RU',
+  });
+
   useEffect(() => {
     if (status !== 'connected' || !isStableInterimBrowserCandidate(liveInputTranscript)) {
       if (liveTranscriptTimerRef.current) {
@@ -763,7 +784,7 @@ function App() {
               </Canvas>
             </div>
 
-            <LiveStatusPill status={status} audioPlayer={audioPlayer} getUserVolume={getUserVolume} sidecarListening={false} />
+            <LiveStatusPill status={status} audioPlayer={audioPlayer} getUserVolume={getUserVolume} sidecarListening={sidecarListening} />
           </div>
 
           <CharacterArrow direction="right" onClick={() => handleCharacterStep(1)} />
