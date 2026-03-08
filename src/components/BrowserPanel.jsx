@@ -15,7 +15,6 @@ export function BrowserPanel({ panel }) {
         <div className={`browser-panel__state browser-panel__state--loading${panel.url && !isResolving ? ' browser-panel__state--overlay' : ''}`} aria-live="polite">
           <div className="browser-panel__spinner" />
           <strong>{isResolving ? 'Ищу сайт...' : 'Открывается сайт...'}</strong>
-          <p>{panel.title || (isResolving ? 'Подбираю точный адрес сайта' : 'Подготавливаю страницу')}</p>
           {panel.url && !isResolving && <span className="browser-panel__meta">{panel.url}</span>}
         </div>
       </section>
