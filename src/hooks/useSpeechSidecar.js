@@ -5,7 +5,13 @@ function getSpeechRecognitionConstructor() {
   return window.SpeechRecognition || window.webkitSpeechRecognition || null;
 }
 
-export function useSpeechSidecar({ enabled, onFinalTranscript, language = 'ru-RU' }) {
+export function useSpeechSidecar({
+  enabled,
+  onFinalTranscript,
+  onInterimTranscript,
+  onSpeechStart,
+  language = 'ru-RU',
+}) {
   const [isSupported] = useState(() => Boolean(getSpeechRecognitionConstructor()));
   const [isListening, setIsListening] = useState(false);
   const [interimTranscript, setInterimTranscript] = useState('');
@@ -13,11 +19,16 @@ export function useSpeechSidecar({ enabled, onFinalTranscript, language = 'ru-RU
   const recognitionRef = useRef(null);
   const enabledRef = useRef(enabled);
   const onFinalTranscriptRef = useRef(onFinalTranscript);
+  const onInterimTranscriptRef = useRef(onInterimTranscript);
+  const onSpeechStartRef = useRef(onSpeechStart);
+  const speakingRef = useRef(false);
 
   useEffect(() => {
     enabledRef.current = enabled;
     onFinalTranscriptRef.current = onFinalTranscript;
-  }, [enabled, onFinalTranscript]);
+    onInterimTranscriptRef.current = onInterimTranscript;
+    onSpeechStartRef.current = onSpeechStart;
+  }, [enabled, onFinalTranscript, onInterimTranscript, onSpeechStart]);
 
   useEffect(() => {
     const Recognition = getSpeechRecognitionConstructor();
@@ -46,20 +57,29 @@ export function useSpeechSidecar({ enabled, onFinalTranscript, language = 'ru-RU
 
     recognition.onresult = (event) => {
       let interim = '';
+      let producedSpeech = false;
 
       for (let index = event.resultIndex; index < event.results.length; index += 1) {
         const result = event.results[index];
         const transcript = result[0]?.transcript?.trim();
         if (!transcript) continue;
+        producedSpeech = true;
 
         if (result.isFinal) {
+          speakingRef.current = false;
           onFinalTranscriptRef.current?.(transcript);
         } else {
           interim = transcript;
         }
       }
 
+      if (producedSpeech && !speakingRef.current) {
+        speakingRef.current = true;
+        onSpeechStartRef.current?.();
+      }
+
       setInterimTranscript(interim);
+      onInterimTranscriptRef.current?.(interim);
     };
 
     recognition.onerror = (event) => {
@@ -72,6 +92,7 @@ export function useSpeechSidecar({ enabled, onFinalTranscript, language = 'ru-RU
     recognition.onend = () => {
       setIsListening(false);
       setInterimTranscript('');
+      speakingRef.current = false;
 
       if (enabledRef.current) {
         try {
@@ -97,6 +118,7 @@ export function useSpeechSidecar({ enabled, onFinalTranscript, language = 'ru-RU
       recognition.onerror = null;
       recognition.stop();
       recognitionRef.current = null;
+      speakingRef.current = false;
     };
   }, [enabled, language]);
 

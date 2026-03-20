@@ -2,39 +2,60 @@ import dns from 'dns/promises';
 import https from 'https';
 import net from 'net';
 import { chromium } from 'playwright';
+import { logRuntime } from './runtimeLogger.js';
 
 const MAX_READER_TEXT_LENGTH = 4000;
 const DEFAULT_TIMEOUT_MS = 15000;
-const GEMINI_REQUEST_TIMEOUT_MS = 16000;
+const GEMINI_REQUEST_TIMEOUT_MS = 6000;
 const parsedSiteResolutionTimeoutMs = Number.parseInt(process.env.SITE_RESOLUTION_TIMEOUT_MS || '', 10);
 const SITE_RESOLUTION_TIMEOUT_MS = Number.isFinite(parsedSiteResolutionTimeoutMs) && parsedSiteResolutionTimeoutMs >= 4000
   ? parsedSiteResolutionTimeoutMs
-  : 16000;
+  : 6000;
 const SITE_RESOLUTION_CACHE_TTL_MS = 12 * 60 * 60 * 1000;
+const SITE_SEARCH_TIMEOUT_MS = 3500;
+const SITE_SEARCH_RESULT_LIMIT = 5;
 const PAGE_SETTLE_MS = 400;
 const SCREENSHOT_SETTLE_MS = 250;
+const SCREENSHOT_CAPTURE_TIMEOUT_MS = 4500;
+const DOMCONTENTLOADED_TIMEOUT_MS = 2500;
+const MIN_RESOLUTION_STEP_TIMEOUT_MS = 900;
+const SESSION_CONTEXT_TEXT_LENGTH = 4200;
+const SESSION_QUERY_TEXT_LENGTH = 9000;
+const VIEWPORT_WIDTH = 1600;
+const VIEWPORT_HEIGHT = 900;
+const BROWSER_VIEW_REFRESH_MS = 9000;
+const MAX_ACTIONABLE_ELEMENTS = 40;
+const MAX_ACTION_LABEL_LENGTH = 120;
 const parsedBrowserIdleTimeoutMs = Number.parseInt(process.env.BROWSER_IDLE_TIMEOUT_MS || '', 10);
 const BROWSER_IDLE_TIMEOUT_MS = Number.isFinite(parsedBrowserIdleTimeoutMs) && parsedBrowserIdleTimeoutMs >= 0
   ? parsedBrowserIdleTimeoutMs
   : 30000;
+const parsedSessionTtlMs = Number.parseInt(process.env.BROWSER_SESSION_TTL_MS || '', 10);
+const BROWSER_SESSION_TTL_MS = Number.isFinite(parsedSessionTtlMs) && parsedSessionTtlMs >= 30000
+  ? parsedSessionTtlMs
+  : 10 * 60 * 1000;
 const DIRECT_URL_REGEX = /\bhttps?:\/\/[^\s]+/i;
 const DOMAIN_REGEX = /\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}\b/i;
 const WEATHER_RESULT_URL_PATTERN = /https:\/\/www\.gismeteo\.by\/weather-[^/]+-\d+\/?/i;
+const SITE_RESOLUTION_MIN_SCORE = 0.42;
+const SITE_RESOLUTION_MIN_MARGIN = 0.08;
+const KNOWLEDGE_RESOLUTION_MIN_SCORE = 0.58;
+const KNOWLEDGE_RESOLUTION_MIN_MARGIN = 0.06;
 
 const WEATHER_MEMORY = [
-  { aliases: ['минск'], url: 'https://www.gismeteo.by/weather-minsk-4248/' },
-  { aliases: ['брест'], url: 'https://www.gismeteo.by/weather-brest-4912/' },
-  { aliases: ['гродно'], url: 'https://www.gismeteo.by/weather-grodno-4243/' },
-  { aliases: ['гомель'], url: 'https://www.gismeteo.by/weather-gomel-4918/' },
-  { aliases: ['витебск'], url: 'https://www.gismeteo.by/weather-vitebsk-4218/' },
-  { aliases: ['могилев', 'могилёв'], url: 'https://www.gismeteo.by/weather-mogilev-4251/' },
+  { aliases: ['минск', 'минске'], url: 'https://yandex.by/pogoda/ru/minsk' },
+  { aliases: ['брест'], url: 'https://yandex.by/pogoda/ru/brest' },
+  { aliases: ['гродно'], url: 'https://yandex.by/pogoda/ru/grodno' },
+  { aliases: ['гомель'], url: 'https://yandex.by/pogoda/ru/gomel' },
+  { aliases: ['витебск'], url: 'https://yandex.by/pogoda/ru/vitebsk' },
+  { aliases: ['могилев', 'могилёв'], url: 'https://yandex.by/pogoda/ru/mogilev' },
 ];
 
 let browserPromise = null;
 let browserInstance = null;
 let browserIdleTimer = null;
-let activePage = null;
-let activePageContext = null;
+let activeBrowserSession = null;
+let sessionCleanupTimer = null;
 let activeRequestId = 0;
 let geminiApiKey = '';
 let geminiAgent = null;
@@ -53,22 +74,36 @@ function normalizeWhitespace(input) {
     .trim();
 }
 
+function normalizeCommandTranscript(input) {
+  return normalizeWhitespace(
+    String(input || '')
+      .replace(/\bairfox\b/giu, 'arfox')
+      .replace(/\bаирфокс\b/giu, 'арфокс')
+      .replace(/\bэйрфокс\b/giu, 'арфокс')
+      .replace(/<[^>]{1,24}>/g, ' ')
+      .replace(/(^|\s)(?:noise|шум)(?=\s|$)/giu, ' ')
+      .replace(/[?!.;,:"«»()[\]{}]/g, ' ')
+      .replace(/(^|\s)(?:блядь|блять|сука|нахуй|нахер|пиздец|ёпт|ебать)(?=\s|$)/giu, ' ')
+      .replace(/(^|\s)(?:прошу|прашу|пожалуйста|калі\s+ласка|спасибо|спс|благодарю|благодарствую|мерси|thanks|thank\s+you)(?=\s|$)/giu, ' ')
+  );
+}
+
 function stripCommandWords(transcript) {
   return normalizeWhitespace(
-    String(transcript || '')
-      .replace(/^(ну|пожалуйста|слушай|смотри)\s+/i, '')
-      .replace(/(^|\s)(можешь|могла бы|поищи|найди|посмотри|покажи|открой|открыть|зайди|зайти|перейди|перейти|скажи|узнай)(?=\s|$)/gi, ' ')
+    normalizeCommandTranscript(transcript)
+      .replace(/^(ну|пожалуйста|слушай|смотри|спасибо|благодарю|thanks|привет|здравствуй(?:те)?|добрый\s+день|добрый\s+вечер|доброе\s+утро)\s+/i, '')
+      .replace(/(^|\s)(можешь|могла бы|поищи|найди|посмотри|покажи|открой|открыть|зайди|зайти|перейди|перейти|скажи|узнай|адкрый|адкрыць|адкрыйце|зайдзі|зайсці|перайдзі|перайсці)(?=\s|$)/gi, ' ')
       .replace(/(^|\s)(в интернете|на сайте|по сайту|для меня)(?=\s|$)/gi, ' ')
-      .replace(/[?!.]/g, ' ')
+      .replace(/(^|\s)(а|ну|сам|сама|само|самим|самой|давай|ладно|хорошо|просто|спасибо|благодарю|thanks|компания|компании|фирма|фирмы|бренд|бренда|привет|здравствуй(?:те)?|добрый|доброе|день|вечер|утро|николай|олеся|алеся|батюшка)(?=\s|$)/gi, ' ')
   );
 }
 
 function extractSiteLookupQuery(transcript) {
   return normalizeWhitespace(
-    String(transcript || '')
-      .replace(/(^|\s)(можешь|могла бы|открой|открыть|зайди|зайти|перейди|перейти|покажи|посмотри|найди|скажи|узнай)(?=\s|$)/gi, ' ')
-      .replace(/(^|\s)(сайт|сайта|страницу|страница|странице|главную|главную страницу|официальный|официального|официальную|домашнюю|домашнюю страницу)(?=\s|$)/gi, ' ')
-      .replace(/[?!.]/g, ' ')
+    normalizeCommandTranscript(transcript)
+      .replace(/(^|\s)(можешь|могла бы|открой|открыть|зайди|зайти|перейди|перейти|покажи|посмотри|найди|скажи|узнай|адкрый|адкрыць|адкрыйце|зайдзі|зайсці|перайдзі|перайсці)(?=\s|$)/gi, ' ')
+      .replace(/(^|\s)(сайт|сайта|страницу|страница|странице|старонку|старонка|старонцы|главную|главную страницу|официальный|официального|официальную|домашнюю|домашнюю страницу|компания|компании|фирма|фирмы|бренд|бренда)(?=\s|$)/gi, ' ')
+      .replace(/(^|\s)(а|ну|сам|сама|само|самим|самой|я|мне|тебе|ты|давай|ладно|хорошо|просто|спасибо|благодарю|thanks|привет|здравствуй(?:те)?|добрый|доброе|день|вечер|утро|николай|олеся|алеся|батюшка)(?=\s|$)/gi, ' ')
   );
 }
 
@@ -90,27 +125,55 @@ function isExplicitSiteOpenRequest(lower) {
   return hasKeyword(lower, [
     'открой',
     'открыть',
+    'открою',
+    'откроем',
+    'откроешь',
     'зайди',
     'зайти',
+    'зайду',
+    'зайдём',
     'перейди',
     'перейти',
+    'перейду',
+    'перейдём',
+    'адкрый',
+    'адкрыць',
+    'адкрыйце',
+    'зайдзі',
+    'зайсці',
+    'перайдзі',
+    'перайсці',
     'открой сайт',
     'открыть сайт',
+    'открою сайт',
+    'адкрый сайт',
+    'адкрыць сайт',
     'открой страницу',
     'зайди на сайт',
     'можешь открыть',
     'можешь зайти',
     'можешь перейти',
+    'прошу открыть',
+    'прошу открыть сайт',
+    'прашу адкрыць',
+    'прашу адкрыць сайт',
   ]);
+}
+
+function hasSiteWord(transcript) {
+  return /(^|\s)(сайт|сайта|страниц[аеиуыу]?|старонк[аеиуыу]?|домен|адрес)(?=\s|$)/i.test(
+    normalizeCommandTranscript(transcript)
+  );
 }
 
 function normalizeQueryValue(input) {
   return normalizeWhitespace(
-    String(input || '')
-      .replace(/(^|\s)(какая|какой|какие|каково|можешь|мне|пожалуйста|сейчас|будет|будут|есть|ли)(?=\s|$)/gi, ' ')
-      .replace(/(^|\s)(сайт|сайта|страницу|страница|странице)(?=\s|$)/gi, ' ')
+    normalizeCommandTranscript(input)
+      .replace(/(^|\s)(какая|какой|какие|каково|можешь|мне|сейчас|будет|будут|есть|ли)(?=\s|$)/gi, ' ')
+      .replace(/(^|\s)(сайт|сайта|страницу|страница|странице|старонку|старонка|старонцы)(?=\s|$)/gi, ' ')
       .replace(/(^|\s)(погод[а-яё]*|прогноз[а-яё]*)(?=\s|$)/gi, ' ')
       .replace(/(^|\s)(в|во|на|по|с|со)(?=\s|$)/gi, ' ')
+      .replace(/(^|\s)(а|ну|сам|сама|само|самим|самой|я|мне|тебе|открою|открой|открыть|адкрый|адкрыць|покажи|посмотри)(?=\s|$)/gi, ' ')
   );
 }
 
@@ -155,6 +218,501 @@ function simplifyLookup(input) {
     .toLowerCase()
     .replace(/[^a-zа-яё0-9]+/gi, '')
     .replace(/[еёуюаяыиоьй]$/i, '');
+}
+
+function transliterateToLatin(input) {
+  const map = {
+    а: 'a', б: 'b', в: 'v', г: 'g', д: 'd', е: 'e', ё: 'e', ж: 'zh', з: 'z', и: 'i', й: 'y',
+    к: 'k', л: 'l', м: 'm', н: 'n', о: 'o', п: 'p', р: 'r', с: 's', т: 't', у: 'u', ф: 'f',
+    х: 'h', ц: 'c', ч: 'ch', ш: 'sh', щ: 'sch', ъ: '', ы: 'y', ь: '', э: 'e', ю: 'yu', я: 'ya',
+  };
+  return String(input || '')
+    .toLowerCase()
+    .split('')
+    .map((char) => map[char] ?? char)
+    .join('')
+    .replace(/ks/g, 'x')
+    .replace(/ii/g, 'i');
+}
+
+const LOOKUP_NOISE_STEMS = new Set([
+  'саит',
+  'страниц',
+  'откро',
+  'заид',
+  'переид',
+  'покаж',
+  'посмотр',
+  'наид',
+  'пожалуист',
+  'спасиб',
+  'благодар',
+  'thanks',
+  'thank',
+  'компан',
+  'фирм',
+  'бренд',
+]);
+
+function isLookupNoiseStem(stem) {
+  if (!stem) return true;
+  if (LOOKUP_NOISE_STEMS.has(stem)) return true;
+  if (stem.startsWith('спасиб')) return true;
+  if (stem.startsWith('благодар')) return true;
+  if (stem.startsWith('thank')) return true;
+  return false;
+}
+
+function collectLookupStems(input) {
+  return Array.from(new Set(
+    normalizeWhitespace(input)
+      .toLowerCase()
+      .split(/\s+/)
+      .map((token) => token.trim())
+      .filter(Boolean)
+      .filter((token) => token.length >= 3)
+      .filter((token) => ![
+        'сайт',
+        'страница',
+        'открой',
+        'открыть',
+        'открою',
+        'зайди',
+        'зайти',
+        'зайду',
+        'перейди',
+        'перейти',
+        'перейду',
+        'покажи',
+        'посмотри',
+        'найди',
+      ].includes(token))
+      .map((token) => simplifyLookup(token))
+      .filter((token) => token.length >= 2)
+      .filter((token) => !isLookupNoiseStem(token))
+  ));
+}
+
+function extractCandidateStems(title, url) {
+  const stems = new Set(collectLookupStems(title));
+  try {
+    const parsed = new URL(url);
+    const hostname = parsed.hostname.replace(/^www\./i, '');
+    const hostTokens = hostname.split('.').filter(Boolean).slice(0, -1);
+    hostTokens.forEach((token) => stems.add(simplifyLookup(token)));
+    parsed.pathname.split('/').filter(Boolean).forEach((token) => {
+      const normalized = simplifyLookup(decodeURIComponent(token));
+      if (normalized.length >= 2) {
+        stems.add(normalized);
+      }
+    });
+  } catch {
+    // Ignore URL parse failures here; assertPublicUrl handles strict validation.
+  }
+  return Array.from(stems).filter(Boolean);
+}
+
+function scoreResolvedCandidate(siteQuery, transcript, title, url) {
+  const sourceStems = collectLookupStems(siteQuery);
+  const fallbackStems = sourceStems.length ? sourceStems : collectLookupStems(transcript);
+  const candidateStems = extractCandidateStems(title, url);
+
+  if (!fallbackStems.length || !candidateStems.length) {
+    return 0;
+  }
+
+  const scoreSum = fallbackStems.reduce((acc, sourceStem) => {
+    const sourceStemLatin = transliterateToLatin(sourceStem);
+    const bestCandidateScore = candidateStems.reduce((best, candidateStem) => {
+      const candidateStemLatin = transliterateToLatin(candidateStem);
+      const similarity = Math.max(
+        computeStemSimilarity(sourceStem, candidateStem),
+        computeStemSimilarity(sourceStemLatin, candidateStemLatin),
+      );
+      return similarity > best ? similarity : best;
+    }, 0);
+    return acc + bestCandidateScore;
+  }, 0);
+
+  return Number((scoreSum / fallbackStems.length).toFixed(3));
+}
+
+function extractDomainGuessStem(siteQuery) {
+  const tokens = normalizeWhitespace(siteQuery)
+    .toLowerCase()
+    .split(/\s+/)
+    .map((token) => transliterateToLatin(token))
+    .map((token) => token.replace(/[^a-z0-9-]+/gi, ''))
+    .filter(Boolean)
+    .filter((token) => token.length >= 1)
+    .filter((token) => !['сайт', 'официальный', 'главная', 'страница'].includes(token));
+
+  if (!tokens.length) {
+    return '';
+  }
+
+  const singleLetters = tokens.filter((token) => token.length === 1).join('');
+  const longerTokens = tokens.filter((token) => token.length >= 2);
+
+  if (singleLetters.length >= 1 && longerTokens.length >= 1) {
+    const merged = `${singleLetters}${longerTokens[0]}`.replace(/-+/g, '-').replace(/^-|-$/g, '');
+    if (merged.length >= 3) {
+      return merged;
+    }
+  }
+
+  const compact = tokens.join('').replace(/-+/g, '-').replace(/^-|-$/g, '');
+  if (compact.length >= 3) {
+    return compact;
+  }
+
+  const primary = tokens.sort((left, right) => right.length - left.length)[0];
+  return primary.length >= 3 ? primary : '';
+}
+
+function buildDomainGuessStems(siteQuery) {
+  const primaryStem = extractDomainGuessStem(siteQuery);
+  if (!primaryStem) {
+    return [];
+  }
+
+  const variants = new Set([primaryStem]);
+  if (primaryStem.includes('ks')) {
+    variants.add(primaryStem.replace(/ks/g, 'x'));
+  }
+  if (primaryStem.includes('iy')) {
+    variants.add(primaryStem.replace(/iy/g, 'y'));
+  }
+  if (primaryStem.includes('ii')) {
+    variants.add(primaryStem.replace(/ii/g, 'i'));
+  }
+  if (primaryStem.includes('oo')) {
+    variants.add(primaryStem.replace(/oo/g, 'o'));
+  }
+
+  return Array.from(variants).filter((value) => value.length >= 3);
+}
+
+function shouldPreferFastDomainGuess(siteQuery, transcript = '') {
+  const normalizedQuery = normalizeWhitespace(siteQuery);
+  if (!normalizedQuery) {
+    return false;
+  }
+
+  const queryTokens = normalizedQuery.split(/\s+/).filter(Boolean);
+  if (queryTokens.length === 0 || queryTokens.length > 2) {
+    return false;
+  }
+
+  const normalizedTranscript = normalizeWhitespace(String(transcript || '').toLowerCase());
+  if (!looksLikeStandaloneSiteMention(normalizedQuery) && !isExplicitSiteOpenRequest(normalizedTranscript)) {
+    return false;
+  }
+
+  const genericTokens = new Set([
+    'сайт',
+    'страница',
+    'официальный',
+    'официальная',
+    'официальное',
+    'официальные',
+    'главная',
+    'домашняя',
+    'открой',
+    'открыть',
+    'адкрый',
+    'адкрыць',
+    'перайдзі',
+    'перайсці',
+    'зайди',
+    'зайти',
+    'зайдзі',
+    'зайсці',
+    'перейди',
+    'перейти',
+    'найди',
+    'найти',
+    'покажи',
+    'посмотри',
+  ]);
+
+  const hasOnlyMeaningfulTokens = queryTokens.every((token) => {
+    const simplified = simplifyLookup(token);
+    return simplified.length >= 3 && !genericTokens.has(simplified);
+  });
+  if (!hasOnlyMeaningfulTokens) {
+    return false;
+  }
+
+  const hasSpokenTld = /\b(?:точка\s*)?(?:by|ru)\b/i.test(normalizedTranscript);
+  if (hasSpokenTld) {
+    return true;
+  }
+
+  const hasSplitBrandTokens = queryTokens.length === 2
+    && queryTokens.some((token) => token.length === 1)
+    && queryTokens.some((token) => token.length >= 3);
+
+  if (hasSplitBrandTokens) {
+    return true;
+  }
+
+  return queryTokens.length === 1 && queryTokens[0].length >= 5;
+}
+
+function isTriviallyGenericSiteQuery(siteQuery) {
+  const genericTokens = new Set([
+    'сайт',
+    'сайта',
+    'страница',
+    'страницу',
+    'странице',
+    'главная',
+    'главную',
+    'домой',
+    'домашняя',
+    'домашнюю',
+    'официальный',
+    'официальную',
+    'официального',
+    'на',
+    'в',
+    'во',
+    'по',
+    'к',
+    'для',
+    'мне',
+    'пожалуйста',
+    'открой',
+    'открыть',
+    'открою',
+    'откроем',
+    'адкрый',
+    'адкрый',
+    'адкрыць',
+    'зайди',
+    'зайти',
+    'зайду',
+    'зайдзі',
+    'зайсці',
+    'перейди',
+    'перейти',
+    'перейду',
+    'перайдзі',
+    'перайсці',
+    'покажи',
+    'посмотри',
+    'найди',
+    'найти',
+  ]);
+
+  const meaningfulTokens = normalizeWhitespace(siteQuery)
+    .toLowerCase()
+    .split(/\s+/)
+    .map((token) => token.replace(/[^a-zа-яё0-9-]+/gi, ''))
+    .filter(Boolean)
+    .filter((token) => token.length >= 3)
+    .filter((token) => !genericTokens.has(token));
+
+  return meaningfulTokens.length === 0;
+}
+
+function isLikelyInPageNavigationRequest(transcript) {
+  const normalized = normalizeWhitespace(transcript).toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+
+  const hasNavigationVerb = /(перейди|перейти|вернись|вернуться|иди|зайди|зайти|открой|открыть|перайдзі|перайсці|зайдзі|зайсці|адкрый|адкрыць)/i.test(normalized);
+  const hasNavigationTarget = /(главн(ая|ую|ой)|главную страницу|домой|домашн(яя|юю)\s+страниц(а|у)|назад|вперед|впер[её]д|обнови|перезагрузи)/i
+    .test(normalized);
+  return hasNavigationVerb && hasNavigationTarget;
+}
+
+async function resolveSiteByDomainGuess(siteQuery) {
+  const stems = buildDomainGuessStems(siteQuery);
+  if (!stems.length) {
+    return null;
+  }
+
+  for (const stem of stems) {
+    const guessUrls = [
+      `https://${stem}.by/`,
+      `https://www.${stem}.by/`,
+      `https://${stem}.ru/`,
+      `https://www.${stem}.ru/`,
+    ];
+
+    for (const guessUrl of guessUrls) {
+      try {
+        const safeUrl = await assertPublicUrl(guessUrl);
+        return {
+          canResolve: true,
+          title: stem,
+          reason: 'domain-guess',
+          url: safeUrl,
+          score: 0.6,
+        };
+      } catch {
+        // Ignore non-resolving domain guesses.
+      }
+    }
+  }
+
+  return null;
+}
+
+function decodeHtmlEntities(input) {
+  return String(input || '')
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, '\'')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>');
+}
+
+function extractDuckDuckGoCandidates(html) {
+  const candidates = [];
+  const pattern = /<a[^>]+class="[^"]*result__a[^"]*"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
+  let match = pattern.exec(html);
+  while (match) {
+    const href = decodeHtmlEntities(match[1] || '');
+    const title = decodeHtmlEntities(match[2] || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    let targetUrl = href;
+
+    try {
+      if (href.startsWith('//duckduckgo.com/l/')) {
+        const parsed = new URL(`https:${href}`);
+        targetUrl = decodeURIComponent(parsed.searchParams.get('uddg') || '');
+      } else if (href.startsWith('https://duckduckgo.com/l/')) {
+        const parsed = new URL(href);
+        targetUrl = decodeURIComponent(parsed.searchParams.get('uddg') || '');
+      }
+    } catch {
+      // Ignore result URL decode failures and keep raw href.
+    }
+
+    if (targetUrl) {
+      candidates.push({
+        title,
+        url: targetUrl,
+      });
+    }
+    match = pattern.exec(html);
+  }
+
+  return candidates;
+}
+
+function buildSiteSearchQuery(siteQuery) {
+  return `${normalizeWhitespace(siteQuery)} site:by OR site:ru`;
+}
+
+async function searchPublicSiteCandidates(siteQuery, {
+  timeoutMs = SITE_SEARCH_TIMEOUT_MS,
+  deadlineAt = 0,
+} = {}) {
+  const remainingBudget = deadlineAt > 0 ? (deadlineAt - Date.now()) : timeoutMs;
+  const effectiveTimeoutMs = Math.min(
+    timeoutMs,
+    Math.max(MIN_RESOLUTION_STEP_TIMEOUT_MS, remainingBudget - 160),
+  );
+  if (!Number.isFinite(effectiveTimeoutMs) || effectiveTimeoutMs < MIN_RESOLUTION_STEP_TIMEOUT_MS) {
+    return [];
+  }
+
+  const searchUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(buildSiteSearchQuery(siteQuery))}`;
+  const html = await requestText(searchUrl, {
+    agent: geminiAgent,
+    timeoutMs: effectiveTimeoutMs,
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (compatible; AlesiaAI/1.0; +https://alesia-ai.constitution.of.by)',
+      'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.7',
+    },
+  });
+
+  const rawCandidates = extractDuckDuckGoCandidates(html).slice(0, SITE_SEARCH_RESULT_LIMIT * 2);
+  const validated = [];
+
+  for (const candidate of rawCandidates) {
+    if (deadlineAt > 0 && Date.now() >= deadlineAt - 120) {
+      break;
+    }
+    try {
+      const safeUrl = await assertPublicUrl(candidate.url);
+      validated.push({
+        title: candidate.title || safeUrl,
+        url: safeUrl,
+      });
+    } catch {
+      // Skip non-public or disallowed URLs.
+    }
+    if (validated.length >= SITE_SEARCH_RESULT_LIMIT) {
+      break;
+    }
+  }
+
+  return validated;
+}
+
+function scoreSearchCandidates(siteQuery, transcript, candidates = []) {
+  return (Array.isArray(candidates) ? candidates : [])
+    .map((candidate) => {
+      const baseScore = scoreResolvedCandidate(siteQuery, transcript, candidate.title, candidate.url);
+      const hostScore = scoreResolvedCandidate(siteQuery, transcript, '', candidate.url);
+      let penalty = 0;
+
+      try {
+        const parsed = new URL(candidate.url);
+        const pathSegments = parsed.pathname.split('/').filter(Boolean);
+        if (pathSegments.length > 1) {
+          penalty += 0.24;
+        }
+        if (pathSegments.some((segment) => /\d{2,}/.test(segment) || segment.length >= 24)) {
+          penalty += 0.12;
+        }
+        if (/\.(html?|php|aspx?)$/i.test(parsed.pathname)) {
+          penalty += 0.12;
+        }
+      } catch {
+        penalty += 0.2;
+      }
+
+      const score = Number(Math.max(0, Math.min(1, (hostScore * 0.72) + (baseScore * 0.28) - penalty)).toFixed(3));
+      return {
+        ...candidate,
+        score,
+      };
+    })
+    .filter((candidate) => candidate.score >= 0.32)
+    .sort((left, right) => right.score - left.score);
+}
+
+function resolveBestScoredCandidate(scoredCandidates = []) {
+  const best = scoredCandidates[0] || null;
+  const second = scoredCandidates[1] || null;
+  if (!best) {
+    return null;
+  }
+
+  const confidenceMargin = Number((best.score - (second?.score || 0)).toFixed(3));
+  const hasMargin = !second || confidenceMargin >= SITE_RESOLUTION_MIN_MARGIN;
+  if (best.score < SITE_RESOLUTION_MIN_SCORE || !hasMargin) {
+    return null;
+  }
+
+  return {
+    title: best.title || best.url,
+    url: best.url,
+    reason: 'search-fallback',
+    score: best.score,
+    margin: confidenceMargin,
+    candidates: scoredCandidates.slice(0, SITE_SEARCH_RESULT_LIMIT).map((candidate) => ({
+      title: candidate.title,
+      url: candidate.url,
+      score: candidate.score,
+    })),
+  };
 }
 
 function sanitizeSessionHistory(sessionHistory) {
@@ -252,14 +810,396 @@ function resolveWeatherMemoryUrl(query) {
   return matched?.url || null;
 }
 
-function extractWeatherQuery(transcript) {
-  const normalized = normalizeWhitespace(transcript);
-  const locationMatch = normalized.match(/(?:^|\s)(?:в|во|на)\s+([а-яёa-z0-9\s-]+?)(?:\s+(?:сегодня|завтра|послезавтра|на выходных|будет|будут))?[?!.]*$/i);
-  if (locationMatch?.[1]) {
-    return normalizeQueryValue(locationMatch[1]);
+function extractKnowledgeSourceTokens(source) {
+  const tokens = new Set();
+  const values = [
+    source?.title || '',
+    ...(Array.isArray(source?.tags) ? source.tags : []),
+    ...(Array.isArray(source?.aliases) ? source.aliases : []),
+  ];
+
+  values.forEach((value) => {
+    collectLookupStems(value).forEach((token) => tokens.add(token));
+  });
+
+  try {
+    const hostname = new URL(String(source?.canonicalUrl || '')).hostname.replace(/^www\./i, '');
+    hostname
+      .split('.')
+      .filter(Boolean)
+      .slice(0, -1)
+      .forEach((token) => {
+        const normalized = simplifyLookup(token);
+        if (normalized.length >= 2) {
+          tokens.add(normalized);
+          if (normalized.length >= 5) {
+            tokens.add(normalized.slice(1));
+          }
+          if (normalized.length >= 6) {
+            tokens.add(normalized.slice(2));
+          }
+        }
+      });
+  } catch {
+    // Ignore invalid knowledge source URLs here.
   }
 
-  return normalizeQueryValue(stripCommandWords(normalized));
+  return Array.from(tokens).filter(Boolean);
+}
+
+function scoreKnowledgeSourceMatch(siteQuery, transcript, source) {
+  const sourceTokens = extractKnowledgeSourceTokens(source);
+  if (!sourceTokens.length) {
+    return 0;
+  }
+
+  const queryTokens = collectLookupStems(siteQuery).length
+    ? collectLookupStems(siteQuery)
+    : collectLookupStems(transcript);
+
+  if (!queryTokens.length) {
+    return 0;
+  }
+
+  const total = queryTokens.reduce((acc, queryToken) => {
+    const queryTokenLatin = transliterateToLatin(queryToken);
+    const bestScore = sourceTokens.reduce((best, sourceToken) => {
+      const sourceTokenLatin = transliterateToLatin(sourceToken);
+      const similarity = Math.max(
+        computeStemSimilarity(queryToken, sourceToken),
+        computeStemSimilarity(queryTokenLatin, sourceTokenLatin),
+      );
+      return similarity > best ? similarity : best;
+    }, 0);
+    return acc + bestScore;
+  }, 0);
+
+  return Number((total / queryTokens.length).toFixed(3));
+}
+
+function resolveFromKnowledgeSources(siteQuery, transcript, knowledgeSources = []) {
+  const candidates = Array.isArray(knowledgeSources) ? knowledgeSources : [];
+  if (!candidates.length) {
+    return null;
+  }
+
+  const scored = candidates
+    .map((source) => ({
+      source,
+      score: scoreKnowledgeSourceMatch(siteQuery, transcript, source),
+    }))
+    .filter((entry) => entry.score >= KNOWLEDGE_RESOLUTION_MIN_SCORE)
+    .sort((left, right) => right.score - left.score);
+
+  const best = scored[0];
+  const second = scored[1];
+  if (!best?.source?.canonicalUrl) {
+    return null;
+  }
+
+  const margin = Number((best.score - (second?.score || 0)).toFixed(3));
+  if (second && margin < KNOWLEDGE_RESOLUTION_MIN_MARGIN) {
+    return null;
+  }
+
+  return {
+    title: best.source.title || best.source.canonicalUrl,
+    url: best.source.canonicalUrl,
+    reason: 'knowledge-source',
+    score: best.score,
+    margin,
+    candidates: scored.slice(0, SITE_SEARCH_RESULT_LIMIT).map((entry) => ({
+      title: entry.source?.title || entry.source?.canonicalUrl || '',
+      url: entry.source?.canonicalUrl || '',
+      score: entry.score,
+    })),
+  };
+}
+
+function sanitizeRecentTurnsForResolver(recentTurns = []) {
+  if (!Array.isArray(recentTurns)) {
+    return [];
+  }
+
+  return recentTurns
+    .slice(-8)
+    .map((turn) => ({
+      role: turn?.role === 'assistant' ? 'assistant' : 'user',
+      text: normalizeWhitespace(turn?.text || '').slice(0, 240),
+    }))
+    .filter((turn) => turn.text.length >= 2);
+}
+
+function extractStrongSourceStems(source) {
+  const stems = new Set();
+  const aliases = Array.isArray(source?.aliases) ? source.aliases : [];
+  aliases.forEach((alias) => {
+    const normalized = simplifyLookup(alias);
+    if (normalized.length >= 4) {
+      stems.add(normalized);
+    }
+  });
+
+  try {
+    const hostname = new URL(String(source?.canonicalUrl || '')).hostname.replace(/^www\./i, '');
+    const hostStem = simplifyLookup(hostname.split('.')[0] || '');
+    if (hostStem.length >= 4) {
+      stems.add(hostStem);
+    }
+  } catch {
+    // Ignore malformed canonical URLs.
+  }
+
+  return Array.from(stems);
+}
+
+function resolveMentionedKnowledgeSourceFromTurns(recentTurns = [], knowledgeSources = []) {
+  const turnsText = sanitizeRecentTurnsForResolver(recentTurns).map((turn) => turn.text).join(' ');
+  const compactText = simplifyLookup(turnsText);
+  if (!compactText) {
+    return null;
+  }
+
+  let best = null;
+  (Array.isArray(knowledgeSources) ? knowledgeSources : []).forEach((source) => {
+    const strongStems = extractStrongSourceStems(source);
+    strongStems.forEach((stem) => {
+      if (!compactText.includes(stem)) {
+        return;
+      }
+      const score = Math.min(1, 0.7 + Math.min(0.25, stem.length / 40));
+      if (!best || score > best.score) {
+        best = { source, score, matchedStem: stem };
+      }
+    });
+  });
+
+  if (!best?.source?.canonicalUrl) {
+    return null;
+  }
+
+  return {
+    title: best.source.title || best.source.canonicalUrl,
+    url: best.source.canonicalUrl,
+    score: Number(best.score.toFixed(3)),
+    matchedStem: best.matchedStem,
+  };
+}
+
+function resolveFromRecentTurns(transcript, siteQuery, recentTurns = [], knowledgeSources = []) {
+  const normalizedTurns = sanitizeRecentTurnsForResolver(recentTurns);
+  if (!normalizedTurns.length) {
+    return null;
+  }
+
+  const normalizedTranscript = normalizeWhitespace(transcript);
+  const referencesPreviousSite = /(сам|сама|это|этот|эту|того|тот|тот же|этот же|его|е[её]|предыдущ|последн|снова|обратно)/i
+    .test(normalizedTranscript);
+  if (!referencesPreviousSite) {
+    return null;
+  }
+
+  const explicitMention = resolveMentionedKnowledgeSourceFromTurns(normalizedTurns, knowledgeSources);
+  if (explicitMention?.url) {
+    return {
+      title: explicitMention.title,
+      url: explicitMention.url,
+      reason: 'recent-turn-mention',
+      score: explicitMention.score,
+      margin: explicitMention.score,
+      candidates: [{
+        title: explicitMention.title,
+        url: explicitMention.url,
+        score: explicitMention.score,
+      }],
+    };
+  }
+
+  const recentTurnsText = normalizedTurns.map((turn) => turn.text).join('\n');
+  const match = resolveFromKnowledgeSources('', recentTurnsText, knowledgeSources);
+  if (!match?.url) {
+    return null;
+  }
+
+  return {
+    title: match.title || match.url,
+    url: match.url,
+    reason: 'recent-turn-context',
+    score: Number((Math.max(0.62, match.score || 0.62)).toFixed(3)),
+    margin: match.margin ?? (match.score || 0.62),
+    candidates: Array.isArray(match.candidates) ? match.candidates : [],
+  };
+}
+
+function buildKnowledgeSourceHint(siteQuery, transcript, knowledgeSources = []) {
+  const candidates = Array.isArray(knowledgeSources) ? knowledgeSources : [];
+  if (!candidates.length) {
+    return '';
+  }
+
+  const scored = candidates
+    .map((source) => ({
+      source,
+      score: scoreKnowledgeSourceMatch(siteQuery, transcript, source),
+    }))
+    .sort((left, right) => right.score - left.score);
+
+  const best = scored[0];
+  const second = scored[1];
+  if (!best?.source || best.score < 0.62) {
+    return '';
+  }
+  if (second && (best.score - second.score) < 0.08) {
+    return '';
+  }
+
+  try {
+    const hostname = new URL(String(best.source.canonicalUrl || '')).hostname.replace(/^www\./i, '');
+    const stem = simplifyLookup(hostname.split('.')[0] || '');
+    if (stem.length >= 3) {
+      return stem;
+    }
+  } catch {
+    // Ignore malformed URLs; use aliases/title fallback.
+  }
+
+  const fallbackToken = extractKnowledgeSourceTokens(best.source).sort((left, right) => right.length - left.length)[0] || '';
+  return fallbackToken.length >= 3 ? fallbackToken : '';
+}
+
+function normalizeTranscriptForSiteLookup(transcript, knowledgeSources = [], sessionHistory = []) {
+  const normalized = normalizeWhitespace(transcript);
+  if (!normalized) {
+    return {
+      transcript: '',
+      siteHint: '',
+      usedHistoryHint: false,
+      usedKnowledgeHint: false,
+    };
+  }
+
+  const lowered = normalized.toLowerCase()
+    .replace(/\bточка\s+бай\b/gi, '.by')
+    .replace(/\bточка\s+ру\b/gi, '.ru');
+
+  const historyMatch = resolveFromSessionHistory(lowered, sessionHistory);
+  if (historyMatch?.url && /(тот|тот же|предыдущ|прошл|последн|снова|обратно)/i.test(lowered)) {
+    const parsed = parseHistoryUrl(historyMatch.url);
+    const hostStem = simplifyLookup(parsed?.hostname?.replace(/^www\./i, '').split('.')[0] || '');
+    return {
+      transcript: lowered,
+      siteHint: hostStem,
+      usedHistoryHint: Boolean(hostStem),
+      usedKnowledgeHint: false,
+    };
+  }
+
+  const siteQuery = extractSiteLookupQuery(lowered) || stripCommandWords(lowered) || lowered;
+  const knowledgeHint = buildKnowledgeSourceHint(siteQuery, lowered, knowledgeSources);
+  return {
+    transcript: lowered,
+    siteHint: knowledgeHint,
+    usedHistoryHint: false,
+    usedKnowledgeHint: Boolean(knowledgeHint),
+  };
+}
+
+function extractWeatherQuery(transcript) {
+  const normalized = normalizeWhitespace(transcript);
+  const lowered = normalized.toLowerCase();
+
+  const knownCity = WEATHER_MEMORY.find((entry) => entry.aliases
+    .some((alias) => simplifyLookup(lowered).includes(simplifyLookup(alias))));
+  if (knownCity?.aliases?.[0]) {
+    return normalizeQueryValue(knownCity.aliases[0]);
+  }
+
+  const locationMatch = normalized.match(/(?:^|\s)(?:в|во|на)\s+([а-яёa-z0-9\s-]+?)(?:\s+(?:сегодня|завтра|послезавтра|на выходных|будет|будут))?[?!.]*$/i);
+  if (locationMatch?.[1]) {
+    const normalizedLocation = normalizeQueryValue(locationMatch[1]);
+    if (normalizedLocation.length >= 2) {
+      return normalizedLocation;
+    }
+  }
+
+  const fallbackValue = normalizeQueryValue(stripCommandWords(normalized));
+  if (fallbackValue.length < 2) {
+    return '';
+  }
+  if (/(^|\s)(открою|открой|открыть|покажи|посмотри|найди|перейди|зайди)(\s|$)/i.test(fallbackValue)) {
+    return '';
+  }
+
+  return fallbackValue;
+}
+
+function normalizeSpokenDomainLabel(label) {
+  const cleaned = normalizeWhitespace(
+    String(label || '')
+      .toLowerCase()
+      .replace(/[.,;!?()[\]{}"«»]/g, ' ')
+      .replace(/(^|\s)(?:открой|открыть|зайди|зайти|перейди|перейти|найди|найти|покажи|посмотри|иди|вернись|вернуться|переход|навигац[а-яё]*)(?=\s|$)/giu, ' ')
+      .replace(/(^|\s)(?:сайт|сайта|страниц[ауые]?|домен|адрес|точка|на|в|во|к|по|с|со|для)(?=\s|$)/giu, ' ')
+      .replace(/(^|\s)(?:главн(ая|ую|ой|ое)|домой|домашн(яя|юю|ей|ее)|страниц(а|у|е|ой))(?=\s|$)/giu, ' ')
+      .replace(/(^|\s)(?:ну|а|и|ладно|тогда|просто|давай|прошу|пожалуйста|калі|ласка|мне|нам|сам|сама|само|этот|эта|эту|тот|та|ту)(?=\s|$)/giu, ' ')
+      .replace(/(^|\s)(?:официальн[а-яё]*|компан[а-яё]*|фирм[а-яё]*|бренд[а-яё]*)(?=\s|$)/giu, ' ')
+  );
+  if (!cleaned) {
+    return '';
+  }
+
+  const tokens = cleaned
+    .split(/\s+/)
+    .map((token) => transliterateToLatin(token))
+    .map((token) => token.replace(/[^a-z0-9-]+/gi, ''))
+    .filter(Boolean);
+
+  if (!tokens.length) {
+    return '';
+  }
+
+  return tokens.join('').replace(/-+/g, '-').replace(/^-|-$/g, '');
+}
+
+function extractSpokenDomain(transcript) {
+  const source = String(transcript || '').toLowerCase();
+  if (!source) {
+    return null;
+  }
+
+  const normalized = source
+    .replace(/[«»"']/g, ' ')
+    .replace(/[!?;:,()[\]{}]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (!normalized) {
+    return null;
+  }
+
+  const patterns = [
+    /([a-zа-яё0-9-]+(?:\s+[a-zа-яё0-9-]+){0,4})\s*(?:\.|точка)\s*(by|ru)\b/giu,
+    /([a-zа-яё0-9-]+\s+[a-zа-яё0-9-]+(?:\s+[a-zа-яё0-9-]+){0,3})\s+(by|ru)\b/giu,
+  ];
+  const candidates = [];
+
+  patterns.forEach((pattern) => {
+    let match = pattern.exec(normalized);
+    while (match) {
+      const label = normalizeSpokenDomainLabel(match[1]);
+      const tld = String(match[2] || '').toLowerCase();
+      if (label.length >= 2 && (tld === 'by' || tld === 'ru')) {
+        candidates.push(`https://${label}.${tld}`);
+      }
+      match = pattern.exec(normalized);
+    }
+  });
+
+  if (!candidates.length) {
+    return null;
+  }
+
+  return candidates.at(-1);
 }
 
 function extractUrlOrDomain(transcript) {
@@ -273,9 +1213,9 @@ function extractUrlOrDomain(transcript) {
     return `https://${domainMatch[0]}`;
   }
 
-  const spokenDomainMatch = transcript.toLowerCase().match(/\b([a-z0-9-]{2,})\s+(by|ru)\b/);
-  if (spokenDomainMatch) {
-    return `https://${spokenDomainMatch[1]}.${spokenDomainMatch[2]}`;
+  const spokenDomain = extractSpokenDomain(transcript);
+  if (spokenDomain) {
+    return spokenDomain;
   }
 
   return null;
@@ -311,6 +1251,9 @@ function parseJsonText(text) {
 
 function requestText(url, { method = 'GET', headers = {}, body = null, agent, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
   return new Promise((resolve, reject) => {
+    const hardTimeoutId = setTimeout(() => {
+      request.destroy(new Error(`Истек таймаут запроса к ${url}`));
+    }, Math.max(1000, timeoutMs));
     const request = https.request(url, {
       method,
       headers,
@@ -324,6 +1267,7 @@ function requestText(url, { method = 'GET', headers = {}, body = null, agent, ti
       });
       response.on('end', () => {
         try {
+          clearTimeout(hardTimeoutId);
           if (response.statusCode < 200 || response.statusCode >= 300) {
             return reject(new Error(`HTTP ${response.statusCode}`));
           }
@@ -335,9 +1279,13 @@ function requestText(url, { method = 'GET', headers = {}, body = null, agent, ti
     });
 
     request.on('timeout', () => {
+      clearTimeout(hardTimeoutId);
       request.destroy(new Error(`Истек таймаут запроса к ${url}`));
     });
-    request.on('error', reject);
+    request.on('error', (error) => {
+      clearTimeout(hardTimeoutId);
+      reject(error);
+    });
     if (body) {
       request.write(body);
     }
@@ -412,32 +1360,6 @@ function normalizeResolvedUrl(domain, url) {
   return '';
 }
 
-function extractQuotedPhrases(text) {
-  return Array.from(String(text || '').matchAll(/["«](.+?)["»]/g))
-    .map((match) => normalizeWhitespace(match[1]))
-    .filter(Boolean);
-}
-
-function isGenericSiteCategoryQuery(input) {
-  return hasKeywordFragment(input, [
-    'тур',
-    'путев',
-    'отел',
-    'отдых',
-    'виз',
-    'погод',
-    'новост',
-    'курс',
-    'карт',
-    'справк',
-    'объявлен',
-    'машин',
-    'авто',
-    'недвиж',
-    'билет',
-  ]);
-}
-
 function looksLikeStandaloneSiteMention(transcript) {
   const normalized = normalizeWhitespace(transcript);
   if (!normalized || normalized.length < 4) {
@@ -460,31 +1382,40 @@ function looksLikeStandaloneSiteMention(transcript) {
   return /^[\p{L}\p{N}\s.-]+$/u.test(normalized);
 }
 
-function buildLookupVariants(siteQuery, contextHint, transcript = '') {
-  const queryStem = simplifyLookup(siteQuery);
+function buildLookupVariants(siteQuery, _contextHint = '', transcript = '') {
   const variants = new Set();
-  const shouldUseContextBrands = isGenericSiteCategoryQuery(siteQuery) || isGenericSiteCategoryQuery(transcript);
+  const normalizedSiteQuery = normalizeWhitespace(siteQuery);
+  const normalizedTranscript = normalizeWhitespace(transcript);
 
-  if (siteQuery) {
-    variants.add(normalizeWhitespace(siteQuery));
+  if (normalizedSiteQuery) {
+    variants.add(normalizedSiteQuery);
   }
 
-  const quotedPhrases = extractQuotedPhrases(contextHint);
-  quotedPhrases.forEach((phrase) => {
-    const phraseStem = simplifyLookup(phrase);
-    if (
-      shouldUseContextBrands ||
-      (queryStem && phraseStem && (phraseStem.includes(queryStem) || queryStem.includes(phraseStem)))
-    ) {
-      variants.add(phrase);
+  const spokenDomain = extractSpokenDomain(`${normalizedSiteQuery} ${normalizedTranscript}`);
+  if (spokenDomain) {
+    try {
+      variants.add(new URL(spokenDomain).hostname.replace(/^www\./i, ''));
+    } catch {
+      // ignore spoken-domain parse failures
+    }
+  }
+
+  const collapsedSpokenQuery = normalizeSpokenDomainLabel(normalizedSiteQuery);
+  if (collapsedSpokenQuery.length >= 3) {
+    variants.add(collapsedSpokenQuery);
+  }
+
+  collectLookupStems(normalizedSiteQuery).forEach((stem) => {
+    if (stem.length >= 2) {
+      variants.add(stem);
     }
   });
 
-  if (queryStem && queryStem.length >= 3 && queryStem !== simplifyLookup(siteQuery)) {
-    variants.add(queryStem);
+  if (!variants.size && normalizedTranscript) {
+    variants.add(normalizedTranscript);
   }
 
-  return Array.from(variants).filter(Boolean);
+  return Array.from(variants).filter(Boolean).slice(0, 6);
 }
 
 function buildBigrams(stem) {
@@ -513,29 +1444,6 @@ function computeStemSimilarity(left, right) {
   return union > 0 ? intersection / union : 0;
 }
 
-function pickContextBrandHint(siteQuery, contextHint) {
-  const queryStem = simplifyLookup(siteQuery);
-  if (!queryStem) {
-    return '';
-  }
-
-  const phrases = extractQuotedPhrases(contextHint);
-  let best = { phrase: '', score: 0 };
-
-  phrases.forEach((phrase) => {
-    const phraseStem = simplifyLookup(phrase);
-    if (!phraseStem) {
-      return;
-    }
-    const score = computeStemSimilarity(queryStem, phraseStem);
-    if (score > best.score) {
-      best = { phrase, score };
-    }
-  });
-
-  return best.score >= 0.16 ? best.phrase : '';
-}
-
 function buildSiteResolverPrompt(transcript, siteQuery, contextHint, sessionHistory = [], checkedFailures = []) {
   const previousFailuresBlock = checkedFailures.length > 0
     ? `\nУже проверенные и неподходящие варианты:
@@ -556,7 +1464,7 @@ ${checkedFailures.map((failure, index) => `${index + 1}. ${failure.url} -> ${fai
 4. Верни JSON без markdown и без пояснений.
 5. Если пользователь назвал именно раздел или бренд сайта, можешь вернуть конкретный URL раздела, но только если уверен.
 6. Название сайта может быть в косвенном падеже, разговорной форме, сокращении или неполным.
-7. Если запрос общий по смыслу, например "сайт с турами", а в контексте активного персонажа явно есть компания или бренд, сначала попробуй определить официальный сайт этой компании.
+7. Не подставляй бренд из контекста персонажа, если пользователь явно не назвал этот бренд в запросе.
 8. Если знаешь несколько реальных вариантов, верни лучший вариант в url, а остальные в candidateUrls.
 
 Формат ответа JSON:
@@ -585,16 +1493,28 @@ ${checkedFailures.map((failure, index) => `${index + 1}. ${failure.url} -> ${fai
 ${sessionHistoryBlock}${previousFailuresBlock}`;
 }
 
-async function resolveSiteWithGemini(transcript, siteQuery, contextHint, sessionHistory = []) {
+async function resolveSiteWithGemini(
+  transcript,
+  siteQuery,
+  contextHint,
+  sessionHistory = [],
+  traceId = '',
+  { totalBudgetMs = SITE_RESOLUTION_TIMEOUT_MS } = {},
+) {
   const startedAt = Date.now();
-  const getRemainingBudget = () => SITE_RESOLUTION_TIMEOUT_MS - (Date.now() - startedAt);
-  const toGeminiTimeout = () => Math.min(GEMINI_REQUEST_TIMEOUT_MS, Math.max(2500, getRemainingBudget()));
+  const getRemainingBudget = () => totalBudgetMs - (Date.now() - startedAt);
+  const toGeminiTimeout = () => {
+    const remainingBudget = getRemainingBudget();
+    if (remainingBudget <= MIN_RESOLUTION_STEP_TIMEOUT_MS) {
+      return 0;
+    }
+    return Math.min(
+      GEMINI_REQUEST_TIMEOUT_MS,
+      Math.max(MIN_RESOLUTION_STEP_TIMEOUT_MS, remainingBudget - 120),
+    );
+  };
 
-  let lookupVariants = buildLookupVariants(siteQuery, contextHint, transcript);
-  const contextBrandHint = pickContextBrandHint(siteQuery, contextHint);
-  if (contextBrandHint) {
-    lookupVariants = Array.from(new Set([contextBrandHint, ...lookupVariants]));
-  }
+  const lookupVariants = buildLookupVariants(siteQuery, contextHint, transcript);
   const cacheKeys = Array.from(new Set(
     [siteQuery, transcript]
       .map((value) => simplifyLookup(value))
@@ -604,6 +1524,11 @@ async function resolveSiteWithGemini(transcript, siteQuery, contextHint, session
   for (const cacheKey of cacheKeys) {
     const cached = siteResolutionCache.get(cacheKey);
     if (cached && cached.value?.url && (Date.now() - cached.timestamp) < SITE_RESOLUTION_CACHE_TTL_MS) {
+      logRuntime('browser.resolve.cache-hit', {
+        traceId,
+        cacheKey,
+        url: cached.value.url,
+      });
       return cached.value;
     }
   }
@@ -630,13 +1555,23 @@ async function resolveSiteWithGemini(transcript, siteQuery, contextHint, session
         };
       }
 
+      const geminiTimeoutMs = toGeminiTimeout();
+      if (geminiTimeoutMs <= 0) {
+        return {
+          canResolve: false,
+          title: '',
+          reason: 'Истек таймаут определения сайта',
+          url: '',
+        };
+      }
+
       const resolved = await requestGeminiJson(buildSiteResolverPrompt(
         transcript,
         lookupVariant,
         contextHint,
         sessionHistory,
         checkedFailures,
-      ), toGeminiTimeout());
+      ), geminiTimeoutMs);
       const title = normalizeWhitespace(resolved?.title || '');
       const reason = normalizeWhitespace(resolved?.reason || '');
       const primaryUrl = normalizeResolvedUrl(resolved?.domain, resolved?.url);
@@ -658,14 +1593,31 @@ async function resolveSiteWithGemini(transcript, siteQuery, contextHint, session
       for (const candidateUrl of candidateUrls) {
         try {
           const safeUrl = await assertPublicUrl(candidateUrl);
+          const relevanceScore = scoreResolvedCandidate(siteQuery, transcript, title, safeUrl);
+          if (relevanceScore < SITE_RESOLUTION_MIN_SCORE) {
+            checkedFailures.push({
+              url: safeUrl,
+              reason: `низкая релевантность (${relevanceScore})`,
+            });
+            continue;
+          }
+
           const safeValue = {
             canResolve: true,
             title,
             reason,
             url: safeUrl,
+            score: relevanceScore,
           };
           cacheKeys.forEach((cacheKey) => {
             siteResolutionCache.set(cacheKey, { value: safeValue, timestamp: Date.now() });
+          });
+          logRuntime('browser.resolve.gemini-match', {
+            traceId,
+            lookupVariant,
+            url: safeUrl,
+            score: relevanceScore,
+            ms: Date.now() - startedAt,
           });
           return safeValue;
         } catch (error) {
@@ -693,13 +1645,28 @@ async function resolveSiteWithGemini(transcript, siteQuery, contextHint, session
   };
 }
 
-async function classifyTranscript(transcript, webProviders, contextHint, sessionHistory = []) {
-  const normalized = normalizeWhitespace(transcript);
+async function classifyTranscript(
+  transcript,
+  webProviders,
+  contextHint,
+  sessionHistory = [],
+  traceId = '',
+  knowledgeSources = [],
+  recentTurns = [],
+) {
+  const normalizedSessionHistory = sanitizeSessionHistory(sessionHistory);
+  const normalizedInput = normalizeTranscriptForSiteLookup(transcript, knowledgeSources, normalizedSessionHistory);
+  const normalized = normalizeWhitespace(normalizedInput.transcript);
   const lower = normalized.toLowerCase();
   const directUrl = extractUrlOrDomain(normalized);
   const searchQuery = stripCommandWords(normalized) || normalized;
-  const siteLookupQuery = extractSiteLookupQuery(normalized) || searchQuery;
-  const normalizedSessionHistory = sanitizeSessionHistory(sessionHistory);
+  let siteLookupQuery = extractSiteLookupQuery(normalized) || searchQuery;
+  if (normalizedInput.siteHint) {
+    const queryTokens = collectLookupStems(siteLookupQuery);
+    if (!queryTokens.includes(normalizedInput.siteHint)) {
+      siteLookupQuery = normalizeWhitespace(`${siteLookupQuery} ${normalizedInput.siteHint}`);
+    }
+  }
 
   if (!normalized || normalized.length < 4) {
     return { type: 'none', reason: 'too-short' };
@@ -719,7 +1686,7 @@ async function classifyTranscript(transcript, webProviders, contextHint, session
     const weatherQuery = extractWeatherQuery(normalized);
     const weatherUrl = weatherQuery
       ? resolveWeatherMemoryUrl(weatherQuery) || buildUrlFromTemplate(webProviders.weather.urlTemplate, weatherQuery)
-      : getProviderHomeUrl(webProviders.weather.urlTemplate);
+      : (WEATHER_MEMORY[0]?.url || getProviderHomeUrl(webProviders.weather.urlTemplate));
     return {
       type: 'provider-template',
       providerKey: 'weather',
@@ -778,7 +1745,57 @@ async function classifyTranscript(transcript, webProviders, contextHint, session
     };
   }
 
-  if (isExplicitSiteOpenRequest(lower) || /\bсайт\b/i.test(lower) || looksLikeStandaloneSiteMention(normalized)) {
+  if (
+    isLikelyInPageNavigationRequest(normalized)
+    && !hasSiteWord(normalized)
+    && !looksLikeStandaloneSiteMention(normalized)
+    && isTriviallyGenericSiteQuery(siteLookupQuery)
+  ) {
+    return { type: 'none', reason: 'in-page-navigation-command' };
+  }
+
+  if (isExplicitSiteOpenRequest(lower) || hasSiteWord(normalized) || looksLikeStandaloneSiteMention(normalized)) {
+    const recentTurnMatch = resolveFromRecentTurns(normalized, siteLookupQuery, recentTurns, knowledgeSources);
+    if (recentTurnMatch?.url) {
+      logRuntime('browser.resolve.recent-turn-match', {
+        traceId,
+        query: siteLookupQuery,
+        url: recentTurnMatch.url,
+        score: recentTurnMatch.score,
+      });
+      return {
+        type: 'direct-site',
+        query: siteLookupQuery,
+        url: recentTurnMatch.url,
+        sourceType: 'recent-turn-context',
+        titleHint: recentTurnMatch.title,
+        resolutionSource: 'recent-turn-context',
+        confidence: recentTurnMatch.score,
+        confidenceMargin: recentTurnMatch.margin ?? recentTurnMatch.score ?? 0,
+        candidates: recentTurnMatch.candidates || [{
+          title: recentTurnMatch.title,
+          url: recentTurnMatch.url,
+          score: recentTurnMatch.score,
+        }],
+      };
+    }
+
+    const resolutionDeadlineAt = Date.now() + SITE_RESOLUTION_TIMEOUT_MS;
+    const getResolutionBudget = () => resolutionDeadlineAt - Date.now();
+    const hasResolutionBudget = (reserveMs = 0) => getResolutionBudget() > reserveMs;
+
+    if (isTriviallyGenericSiteQuery(siteLookupQuery)) {
+      return {
+        type: 'unresolved-site',
+        query: siteLookupQuery,
+        error: 'Не услышала название сайта. Назовите его точнее.',
+        errorReason: 'resolve_low_confidence',
+        confidence: 0,
+        confidenceMargin: 0,
+        candidates: [],
+      };
+    }
+
     const historyMatch = resolveFromSessionHistory(normalized, normalizedSessionHistory);
     if (historyMatch?.url) {
       const historyUrl = parseHistoryUrl(historyMatch.url);
@@ -788,37 +1805,208 @@ async function classifyTranscript(transcript, webProviders, contextHint, session
         url: historyMatch.url,
         sourceType: 'direct-site',
         titleHint: historyMatch.title || historyUrl?.hostname || historyMatch.url,
+        resolutionSource: 'session-history',
+        confidence: 0.72,
+        confidenceMargin: 0.72,
+        candidates: [{
+          title: historyMatch.title || historyUrl?.hostname || historyMatch.url,
+          url: historyMatch.url,
+          score: 0.72,
+        }],
       };
     }
 
-    try {
-      const resolved = await resolveSiteWithGemini(normalized, siteLookupQuery, contextHint, normalizedSessionHistory);
-      if (resolved.canResolve && resolved.url) {
-        siteResolutionCache.set(simplifyLookup(siteLookupQuery), {
-          value: {
-            canResolve: true,
-            title: resolved.title || new URL(resolved.url).hostname,
-            reason: resolved.reason || 'gemini',
-            url: resolved.url,
-          },
-          timestamp: Date.now(),
+    const knowledgeMatch = resolveFromKnowledgeSources(siteLookupQuery, normalized, knowledgeSources);
+    if (knowledgeMatch?.url) {
+      logRuntime('browser.resolve.knowledge-source-match', {
+        traceId,
+        query: siteLookupQuery,
+        url: knowledgeMatch.url,
+        score: knowledgeMatch.score,
+      });
+      return {
+        type: 'direct-site',
+        query: siteLookupQuery,
+        url: knowledgeMatch.url,
+        sourceType: 'knowledge-source',
+        titleHint: knowledgeMatch.title,
+        resolutionSource: 'knowledge-source',
+        confidence: knowledgeMatch.score,
+        confidenceMargin: knowledgeMatch.margin ?? knowledgeMatch.score ?? 0,
+        candidates: knowledgeMatch.candidates || [{
+          title: knowledgeMatch.title,
+          url: knowledgeMatch.url,
+          score: knowledgeMatch.score,
+        }],
+      };
+    }
+
+    if (shouldPreferFastDomainGuess(siteLookupQuery, normalized)) {
+      const guessedFast = await resolveSiteByDomainGuess(siteLookupQuery);
+      if (guessedFast?.url) {
+        logRuntime('browser.resolve.fast-domain-guess', {
+          traceId,
+          query: siteLookupQuery,
+          url: guessedFast.url,
         });
         return {
           type: 'direct-site',
           query: siteLookupQuery,
-          url: resolved.url,
+          url: guessedFast.url,
           sourceType: 'direct-site',
-          titleHint: resolved.title || new URL(resolved.url).hostname,
+          titleHint: guessedFast.title || new URL(guessedFast.url).hostname,
+          resolutionSource: 'domain-guess',
+          confidence: guessedFast.score ?? 0.6,
+          confidenceMargin: guessedFast.score ?? 0.6,
+          candidates: [{
+            title: guessedFast.title || new URL(guessedFast.url).hostname,
+            url: guessedFast.url,
+            score: guessedFast.score ?? 0.6,
+          }],
         };
       }
-    } catch (error) {
-      console.error('Failed to resolve site with Gemini', error);
     }
 
+    let fallbackCandidates = [];
+    let resolutionTimedOut = false;
+    try {
+      if (hasResolutionBudget(MIN_RESOLUTION_STEP_TIMEOUT_MS + 120)) {
+        const searchTimeoutMs = Math.min(
+          SITE_SEARCH_TIMEOUT_MS,
+          Math.max(
+            MIN_RESOLUTION_STEP_TIMEOUT_MS,
+            getResolutionBudget() - (MIN_RESOLUTION_STEP_TIMEOUT_MS + 120),
+          ),
+        );
+        const searchCandidates = await searchPublicSiteCandidates(siteLookupQuery, {
+          timeoutMs: searchTimeoutMs,
+          deadlineAt: resolutionDeadlineAt,
+        });
+        const scoredCandidates = scoreSearchCandidates(siteLookupQuery, normalized, searchCandidates);
+        fallbackCandidates = scoredCandidates.slice(0, SITE_SEARCH_RESULT_LIMIT).map((candidate) => ({
+          title: candidate.title,
+          url: candidate.url,
+          score: candidate.score,
+        }));
+        const searchResolved = resolveBestScoredCandidate(scoredCandidates);
+        if (searchResolved?.url) {
+          logRuntime('browser.resolve.search-fallback-match', {
+            traceId,
+            query: siteLookupQuery,
+            url: searchResolved.url,
+            score: searchResolved.score,
+          });
+          return {
+            type: 'direct-site',
+            query: siteLookupQuery,
+            url: searchResolved.url,
+            sourceType: 'search-fallback',
+            titleHint: searchResolved.title || new URL(searchResolved.url).hostname,
+            resolutionSource: 'search-fallback',
+            confidence: searchResolved.score,
+            confidenceMargin: searchResolved.margin ?? searchResolved.score ?? 0,
+            candidates: searchResolved.candidates || [],
+          };
+        }
+
+        const bestGuess = scoredCandidates[0];
+        if (bestGuess?.url && bestGuess.score >= SITE_RESOLUTION_MIN_SCORE) {
+          const secondGuess = scoredCandidates[1];
+          const bestGuessMargin = Number((bestGuess.score - (secondGuess?.score || 0)).toFixed(3));
+          logRuntime('browser.resolve.search-best-guess', {
+            traceId,
+            query: siteLookupQuery,
+            url: bestGuess.url,
+            score: bestGuess.score,
+            margin: bestGuessMargin,
+          });
+          return {
+            type: 'direct-site',
+            query: siteLookupQuery,
+            url: bestGuess.url,
+            sourceType: 'search-fallback',
+            titleHint: bestGuess.title || new URL(bestGuess.url).hostname,
+            resolutionSource: 'search-best-guess',
+            confidence: bestGuess.score,
+            confidenceMargin: bestGuessMargin,
+            candidates: fallbackCandidates,
+          };
+        }
+      } else {
+        resolutionTimedOut = true;
+      }
+    } catch (error) {
+      logRuntime('browser.resolve.search-fallback-error', {
+        traceId,
+        query: siteLookupQuery,
+        error,
+      }, 'error');
+    }
+
+    let geminiTimedOut = false;
+    if (hasResolutionBudget(180)) {
+      try {
+        const resolved = await resolveSiteWithGemini(
+          normalized,
+          siteLookupQuery,
+          contextHint,
+          normalizedSessionHistory,
+          traceId,
+          { totalBudgetMs: Math.max(180, getResolutionBudget()) },
+        );
+        if (resolved.canResolve && resolved.url) {
+          siteResolutionCache.set(simplifyLookup(siteLookupQuery), {
+            value: {
+              canResolve: true,
+              title: resolved.title || new URL(resolved.url).hostname,
+              reason: resolved.reason || 'gemini',
+              url: resolved.url,
+              score: resolved.score ?? null,
+            },
+            timestamp: Date.now(),
+          });
+          return {
+            type: 'direct-site',
+            query: siteLookupQuery,
+            url: resolved.url,
+            sourceType: 'direct-site',
+            titleHint: resolved.title || new URL(resolved.url).hostname,
+            resolutionSource: resolved.reason || 'gemini',
+            confidence: resolved.score ?? SITE_RESOLUTION_MIN_SCORE,
+            confidenceMargin: resolved.score ?? SITE_RESOLUTION_MIN_SCORE,
+            candidates: [{
+              title: resolved.title || new URL(resolved.url).hostname,
+              url: resolved.url,
+              score: resolved.score ?? SITE_RESOLUTION_MIN_SCORE,
+            }],
+          };
+        }
+      } catch (error) {
+        geminiTimedOut = /таймаут|timeout/i.test(String(error?.message || ''));
+        logRuntime('browser.resolve.gemini-error', {
+          traceId,
+          query: siteLookupQuery,
+          error,
+        }, 'error');
+      }
+    } else {
+      resolutionTimedOut = true;
+    }
+
+    if (getResolutionBudget() <= 0) {
+      resolutionTimedOut = true;
+    }
+    const errorReason = (geminiTimedOut || resolutionTimedOut) ? 'resolve_timeout' : 'resolve_low_confidence';
     return {
       type: 'unresolved-site',
       query: siteLookupQuery,
-      error: 'Не удалось надёжно определить сайт по названию.',
+      error: geminiTimedOut
+        ? 'Не успела определить сайт вовремя. Повторите запрос точнее.'
+        : 'Не удалось уверенно определить сайт. Назовите его точнее.',
+      errorReason,
+      confidence: 0,
+      confidenceMargin: 0,
+      candidates: fallbackCandidates,
     };
   }
 
@@ -893,33 +2081,67 @@ function clearBrowserIdleTimer() {
   }
 }
 
-function resetBrowserState() {
-  clearBrowserIdleTimer();
-  browserPromise = null;
-  browserInstance = null;
-  activePage = null;
-  activePageContext = null;
+function clearSessionCleanupTimer() {
+  if (sessionCleanupTimer) {
+    clearTimeout(sessionCleanupTimer);
+    sessionCleanupTimer = null;
+  }
 }
 
-async function closeActivePage() {
-  const context = activePageContext;
-  const page = activePage;
-  activePage = null;
-  activePageContext = null;
+function buildBrowserSessionId() {
+  return `browser-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`;
+}
+
+function hasActiveSession() {
+  return Boolean(activeBrowserSession?.page && !activeBrowserSession.page.isClosed());
+}
+
+function resetBrowserState(reason = 'browser-disconnected') {
+  if (activeBrowserSession?.id) {
+    logRuntime('browser.session.reset', {
+      reason,
+      browserSessionId: activeBrowserSession.id,
+      url: activeBrowserSession.url || '',
+    }, 'error');
+  }
+  clearBrowserIdleTimer();
+  clearSessionCleanupTimer();
+  browserPromise = null;
+  browserInstance = null;
+  activeBrowserSession = null;
+}
+
+async function closeActivePage(reason = 'unknown') {
+  clearSessionCleanupTimer();
+  const session = activeBrowserSession;
+  const context = session?.context || null;
+  const page = session?.page || null;
+  if (session?.id) {
+    logRuntime('browser.session.close', {
+      reason,
+      browserSessionId: session.id,
+      url: session.url || '',
+    });
+  }
+  activeBrowserSession = null;
 
   if (context) {
     await context.close().catch(() => {});
+    scheduleBrowserShutdown();
     return;
   }
 
   if (page && !page.isClosed()) {
     await page.close().catch(() => {});
   }
+
+  scheduleBrowserShutdown();
 }
 
 export async function closeBrowser() {
   clearBrowserIdleTimer();
-  await closeActivePage();
+  clearSessionCleanupTimer();
+  await closeActivePage('close-browser');
 
   const browser = browserInstance || await browserPromise?.catch(() => null);
   browserPromise = null;
@@ -932,14 +2154,58 @@ export async function closeBrowser() {
 
 function scheduleBrowserShutdown() {
   clearBrowserIdleTimer();
-  if (!browserPromise || activePage) {
+  if (!browserPromise || hasActiveSession()) {
     return;
   }
 
   browserIdleTimer = setTimeout(() => {
+    browserIdleTimer = null;
+    if (hasActiveSession()) {
+      return;
+    }
     void closeBrowser();
   }, BROWSER_IDLE_TIMEOUT_MS);
   browserIdleTimer.unref?.();
+}
+
+function scheduleSessionCleanup() {
+  clearSessionCleanupTimer();
+  if (!activeBrowserSession) {
+    scheduleBrowserShutdown();
+    return;
+  }
+
+  const elapsedMs = Date.now() - activeBrowserSession.lastAccessAt;
+  const remainingMs = Math.max(1000, BROWSER_SESSION_TTL_MS - elapsedMs);
+  sessionCleanupTimer = setTimeout(() => {
+    if (!activeBrowserSession) {
+      scheduleBrowserShutdown();
+      return;
+    }
+
+    const idleMs = Date.now() - activeBrowserSession.lastAccessAt;
+    if (idleMs >= BROWSER_SESSION_TTL_MS) {
+      logRuntime('browser.session.expired', {
+        browserSessionId: activeBrowserSession.id,
+        idleMs,
+      });
+      void closeActivePage('session-ttl-expired');
+      return;
+    }
+
+    scheduleSessionCleanup();
+  }, remainingMs);
+  sessionCleanupTimer.unref?.();
+}
+
+function touchBrowserSession(session) {
+  if (!session || activeBrowserSession?.id !== session.id) {
+    return;
+  }
+
+  clearBrowserIdleTimer();
+  session.lastAccessAt = Date.now();
+  scheduleSessionCleanup();
 }
 
 async function getBrowser() {
@@ -950,15 +2216,408 @@ async function getBrowser() {
       args: ['--disable-dev-shm-usage', '--no-sandbox', '--disable-gpu', '--mute-audio'],
     }).then((browser) => {
       browserInstance = browser;
-      browser.on('disconnected', resetBrowserState);
+      browser.on('disconnected', () => resetBrowserState('playwright-browser-disconnected'));
       return browser;
     }).catch((error) => {
-      resetBrowserState();
+      resetBrowserState('browser-launch-failed');
       throw error;
     });
   }
 
   return browserPromise;
+}
+
+function safeHostnameFromUrl(url, fallback = '') {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return fallback;
+  }
+}
+
+function toHttpFallbackUrl(url) {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'https:') {
+      return '';
+    }
+    parsed.protocol = 'http:';
+    return parsed.toString();
+  } catch {
+    return '';
+  }
+}
+
+function shouldRetryWithHttpFallback(url, error) {
+  if (!/^https:\/\//i.test(String(url || ''))) {
+    return false;
+  }
+
+  const message = String(error?.message || '').toLowerCase();
+  if (!message) {
+    return false;
+  }
+
+  return message.includes('err_connection_refused')
+    || message.includes('err_connection_reset')
+    || message.includes('err_ssl')
+    || message.includes('ssl')
+    || message.includes('certificate');
+}
+
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function getRegistrableDomain(url) {
+  try {
+    const hostname = new URL(url).hostname.toLowerCase();
+    const parts = hostname.split('.').filter(Boolean);
+    if (parts.length <= 2) {
+      return hostname;
+    }
+    return parts.slice(-2).join('.');
+  } catch {
+    return '';
+  }
+}
+
+function isSameSiteUrl(left, right) {
+  const leftDomain = getRegistrableDomain(left);
+  const rightDomain = getRegistrableDomain(right);
+  return Boolean(leftDomain) && Boolean(rightDomain) && leftDomain === rightDomain;
+}
+
+function truncateText(value, maxLength = 360) {
+  const normalized = normalizeWhitespace(value);
+  if (!normalized || normalized.length <= maxLength) {
+    return normalized;
+  }
+  return `${normalized.slice(0, Math.max(1, maxLength - 1)).trimEnd()}…`;
+}
+
+async function readPageText(page) {
+  return normalizeWhitespace(
+    await page.evaluate(() => document.body?.innerText || '')
+  );
+}
+
+async function extractActionableElements(page) {
+  const elements = await page.evaluate(({ maxItems, maxLabelLength }) => {
+    const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim().slice(0, maxLabelLength);
+    const isVisible = (element) => {
+      const style = window.getComputedStyle(element);
+      if (!style || style.visibility === 'hidden' || style.display === 'none' || style.opacity === '0') {
+        return false;
+      }
+      const rect = element.getBoundingClientRect();
+      return rect.width >= 8 && rect.height >= 8 && rect.bottom > 0 && rect.right > 0;
+    };
+
+    const hrefLabel = (element) => {
+      try {
+        const url = new URL(element.href, window.location.href);
+        const pathname = decodeURIComponent(url.pathname || '').split('/').filter(Boolean).pop() || '';
+        return normalize(pathname.replace(/[-_]+/g, ' '));
+      } catch {
+        return '';
+      }
+    };
+
+    const items = [];
+    const candidates = Array.from(document.querySelectorAll('a[href], button, [role="button"], summary, input[type="button"], input[type="submit"]'));
+    for (const element of candidates) {
+      if (!isVisible(element)) {
+        continue;
+      }
+
+      const rect = element.getBoundingClientRect();
+      const label = normalize(
+        element.getAttribute('aria-label')
+        || element.getAttribute('title')
+        || element.textContent
+        || element.getAttribute('value')
+        || element.getAttribute('alt')
+        || hrefLabel(element)
+        || ''
+      );
+      if (!label) {
+        continue;
+      }
+
+      items.push({
+        label,
+        role: normalize(element.getAttribute('role') || element.tagName || '').toLowerCase(),
+        href: normalize(element.href || ''),
+        x: Math.round(rect.left),
+        y: Math.round(rect.top),
+        width: Math.round(rect.width),
+        height: Math.round(rect.height),
+      });
+
+      if (items.length >= maxItems) {
+        break;
+      }
+    }
+
+    return items;
+  }, {
+    maxItems: MAX_ACTIONABLE_ELEMENTS,
+    maxLabelLength: MAX_ACTION_LABEL_LENGTH,
+  }).catch(() => []);
+
+  return Array.isArray(elements) ? elements : [];
+}
+
+async function refreshBrowserSessionSnapshot(session, {
+  includeScreenshot = false,
+  readerTextLimit = MAX_READER_TEXT_LENGTH,
+  queryTextLimit = SESSION_QUERY_TEXT_LENGTH,
+} = {}) {
+  if (!session?.page || session.page.isClosed()) {
+    throw new Error('Веб-сессия недоступна');
+  }
+
+  const page = session.page;
+  const [titleRaw, textRaw] = await Promise.all([
+    page.title().catch(() => ''),
+    readPageText(page).catch(() => ''),
+  ]);
+
+  session.url = page.url();
+  session.title = normalizeWhitespace(titleRaw) || session.title || safeHostnameFromUrl(session.url, 'Сайт');
+  session.readerText = textRaw.slice(0, readerTextLimit);
+  session.queryText = textRaw.slice(0, queryTextLimit);
+  session.actionableElements = await extractActionableElements(page);
+  session.lastUpdatedAt = Date.now();
+
+  if (includeScreenshot) {
+    await page.waitForTimeout(SCREENSHOT_SETTLE_MS).catch(() => {});
+    const screenshotResult = await new Promise((resolve) => {
+      let finished = false;
+      const timerId = setTimeout(() => {
+        if (!finished) {
+          finished = true;
+          resolve({ ok: false, reason: 'timeout' });
+        }
+      }, SCREENSHOT_CAPTURE_TIMEOUT_MS);
+
+      page.screenshot({
+        type: 'jpeg',
+        quality: 78,
+      })
+        .then((buffer) => {
+          if (finished) {
+            return;
+          }
+          finished = true;
+          clearTimeout(timerId);
+          resolve({ ok: true, buffer });
+        })
+        .catch((error) => {
+          if (finished) {
+            return;
+          }
+          finished = true;
+          clearTimeout(timerId);
+          resolve({ ok: false, reason: String(error?.message || 'screenshot-failed') });
+        });
+    });
+
+    if (screenshotResult?.ok && screenshotResult.buffer) {
+      session.screenshotUrl = `data:image/jpeg;base64,${screenshotResult.buffer.toString('base64')}`;
+      session.lastScreenshotAt = Date.now();
+    } else {
+      logRuntime('browser.session.screenshot.skipped', {
+        browserSessionId: session.id,
+        url: session.url,
+        reason: screenshotResult?.reason || 'unknown',
+      });
+    }
+  }
+
+  session.revision = Number(session.revision || 0) + 1;
+
+  return session;
+}
+
+function requireActiveBrowserSession(sessionId = '') {
+  if (!activeBrowserSession) {
+    throw new Error('Нет активного открытого сайта');
+  }
+
+  if (sessionId && activeBrowserSession.id !== sessionId) {
+    throw new Error('Открытый сайт устарел. Откройте сайт заново.');
+  }
+
+  if (!activeBrowserSession.page || activeBrowserSession.page.isClosed()) {
+    void closeActivePage('page-closed-check');
+    throw new Error('Сессия сайта завершена');
+  }
+
+  return activeBrowserSession;
+}
+
+const QUERY_STOP_WORDS = new Set([
+  'что',
+  'это',
+  'этот',
+  'эта',
+  'этом',
+  'на',
+  'в',
+  'во',
+  'по',
+  'для',
+  'про',
+  'сайт',
+  'страница',
+  'странице',
+  'страницу',
+  'сейчас',
+  'там',
+  'тут',
+  'здесь',
+  'низу',
+  'который',
+  'которая',
+  'которые',
+  'какой',
+  'какая',
+  'какие',
+]);
+
+function tokenizeQuestion(question) {
+  return normalizeWhitespace(String(question || '').toLowerCase())
+    .split(/\s+/)
+    .map((token) => token.replace(/[^a-zа-яё0-9-]+/gi, ''))
+    .map((token) => simplifyLookup(token))
+    .filter((token) => token.length >= 2 && !QUERY_STOP_WORDS.has(token));
+}
+
+function splitContextSentences(text) {
+  return String(text || '')
+    .split(/(?<=[.!?])\s+|\n+/)
+    .map((chunk) => normalizeWhitespace(chunk))
+    .filter((chunk) => chunk.length >= 20);
+}
+
+function scoreSentenceAgainstTokens(sentence, tokens) {
+  if (!sentence || !tokens.length) {
+    return 0;
+  }
+
+  const sentenceStem = simplifyLookup(sentence);
+  if (!sentenceStem) {
+    return 0;
+  }
+
+  return tokens.reduce((score, token) => {
+    if (sentenceStem.includes(token)) {
+      return score + 1;
+    }
+    return score;
+  }, 0);
+}
+
+function selectRelevantContext(text, question) {
+  const sentences = splitContextSentences(text);
+  if (!sentences.length) {
+    return '';
+  }
+
+  const tokens = tokenizeQuestion(question);
+  if (!tokens.length) {
+    return truncateText(sentences.slice(0, 3).join(' '), 420);
+  }
+
+  const ranked = sentences
+    .map((sentence) => ({
+      sentence,
+      score: scoreSentenceAgainstTokens(sentence, tokens),
+    }))
+    .filter((entry) => entry.score > 0)
+    .sort((left, right) => right.score - left.score)
+    .slice(0, 3)
+    .map((entry) => entry.sentence);
+
+  if (!ranked.length) {
+    return truncateText(sentences.slice(0, 2).join(' '), 420);
+  }
+
+  return truncateText(ranked.join(' '), 420);
+}
+
+function buildSessionQueryAnswer(question, session) {
+  const contextSnippet = selectRelevantContext(session.queryText || session.readerText, question);
+  if (!contextSnippet) {
+    return {
+      answer: 'На текущей странице пока не вижу читаемого текста.',
+      contextSnippet: '',
+    };
+  }
+
+  return {
+    answer: `На странице ${session.title ? `"${session.title}"` : 'сайта'}: ${contextSnippet}`,
+    contextSnippet,
+  };
+}
+
+function serializeSession(session) {
+  const view = {
+    imageUrl: session.screenshotUrl || null,
+    width: session.viewport?.width || VIEWPORT_WIDTH,
+    height: session.viewport?.height || VIEWPORT_HEIGHT,
+    revision: session.revision || 0,
+    actionableElements: Array.isArray(session.actionableElements) ? session.actionableElements : [],
+  };
+
+  return {
+    status: 'ready',
+    browserSessionId: session.id,
+    sourceType: session.sourceType,
+    title: session.title,
+    url: session.url,
+    embeddable: Boolean(session.embeddable),
+    readerText: session.readerText || '',
+    screenshotUrl: session.screenshotUrl || null,
+    error: null,
+    query: session.query || '',
+    lastUpdated: session.lastUpdatedAt,
+    revision: session.revision || 0,
+    view,
+  };
+}
+
+function scoreActionableElement(target, element) {
+  const normalizedTarget = simplifyLookup(target);
+  const normalizedLabel = simplifyLookup(element?.label || '');
+  if (!normalizedTarget || !normalizedLabel) {
+    return 0;
+  }
+
+  const direct = computeStemSimilarity(normalizedTarget, normalizedLabel);
+  if (normalizedLabel.includes(normalizedTarget) || normalizedTarget.includes(normalizedLabel)) {
+    return Math.max(direct, 0.92);
+  }
+  return direct;
+}
+
+function findBestActionableElement(session, label) {
+  const elements = Array.isArray(session?.actionableElements) ? session.actionableElements : [];
+  if (!elements.length) {
+    return null;
+  }
+
+  const ranked = elements
+    .map((element) => ({
+      element,
+      score: scoreActionableElement(label, element),
+    }))
+    .filter((entry) => entry.score >= 0.58)
+    .sort((left, right) => right.score - left.score);
+
+  return ranked[0]?.element || null;
 }
 
 async function resolveInternalProviderPage(page, intent) {
@@ -996,86 +2655,491 @@ async function resolveInternalProviderPage(page, intent) {
   }
 }
 
-export async function detectBrowserIntent({ transcript, webProviders, contextHint = '', sessionHistory = [] }) {
+export async function detectBrowserIntent({
+  transcript,
+  webProviders,
+  knowledgeSources = [],
+  recentTurns = [],
+  contextHint = '',
+  sessionHistory = [],
+  traceId = '',
+}) {
   const normalizedSessionHistory = sanitizeSessionHistory(sessionHistory);
-  return classifyTranscript(transcript, webProviders, contextHint, normalizedSessionHistory);
+  const result = await classifyTranscript(
+    transcript,
+    webProviders,
+    contextHint,
+    normalizedSessionHistory,
+    traceId,
+    knowledgeSources,
+    recentTurns,
+  );
+  const normalizedResult = result?.type === 'direct-site' || result?.type === 'provider-template'
+    ? {
+      ...result,
+      resolutionSource: result?.resolutionSource || result?.sourceType || result?.type || 'direct-site',
+      confidence: Number.isFinite(result?.confidence) ? result.confidence : (result?.type === 'provider-template' ? 1 : 0.8),
+      candidates: Array.isArray(result?.candidates) ? result.candidates : (result?.url ? [{
+        title: result?.titleHint || result?.url,
+        url: result.url,
+        score: Number.isFinite(result?.confidence) ? result.confidence : (result?.type === 'provider-template' ? 1 : 0.8),
+      }] : []),
+    }
+    : {
+      ...result,
+      confidence: Number.isFinite(result?.confidence) ? result.confidence : 0,
+      candidates: Array.isArray(result?.candidates) ? result.candidates : [],
+    };
+  const topCandidate = normalizedResult.candidates?.[0] || null;
+  const secondCandidate = normalizedResult.candidates?.[1] || null;
+  const confidenceMargin = Number.isFinite(normalizedResult?.confidenceMargin)
+    ? Number(normalizedResult.confidenceMargin)
+    : Number((((topCandidate?.score ?? normalizedResult?.confidence ?? 0) - (secondCandidate?.score ?? 0)) || 0).toFixed(3));
+  const candidateCount = Array.isArray(normalizedResult.candidates) ? normalizedResult.candidates.length : 0;
+  const resultWithContract = {
+    ...normalizedResult,
+    intentType: normalizedResult?.type || 'none',
+    confidenceMargin,
+    candidateCount,
+    errorReason: normalizedResult?.errorReason || '',
+  };
+  logRuntime('browser.intent.classified', {
+    traceId,
+    transcript,
+    type: resultWithContract?.type || 'none',
+    url: resultWithContract?.url || '',
+    error: resultWithContract?.error || '',
+    errorReason: resultWithContract?.errorReason || '',
+    resolutionSource: resultWithContract?.resolutionSource || '',
+    confidence: resultWithContract?.confidence ?? 0,
+    confidenceMargin: resultWithContract?.confidenceMargin ?? 0,
+    candidateCount,
+  });
+  return resultWithContract;
 }
 
 export async function openBrowserIntent(intent) {
-  activeRequestId += 1;
-  const requestId = activeRequestId;
+  const traceId = String(intent?.traceId || '');
+  const startedAt = Date.now();
   const safeUrl = await assertPublicUrl(intent.url);
+  logRuntime('browser.open.phase', {
+    traceId,
+    phase: 'validated-url',
+    url: safeUrl,
+    ms: Date.now() - startedAt,
+  });
   const browser = await getBrowser();
+  logRuntime('browser.open.phase', {
+    traceId,
+    phase: 'browser-ready',
+    ms: Date.now() - startedAt,
+  });
 
-  await closeActivePage();
+  await closeActivePage('open-replace');
 
   const context = await browser.newContext({
-    viewport: { width: 1440, height: 920 },
+    viewport: { width: VIEWPORT_WIDTH, height: VIEWPORT_HEIGHT },
     userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
     reducedMotion: 'reduce',
     serviceWorkers: 'block',
   });
   const page = await context.newPage();
-  activePageContext = context;
-  activePage = page;
+  const browserSession = {
+    id: buildBrowserSessionId(),
+    context,
+    page,
+    sourceType: intent.sourceType || intent.type || 'direct-site',
+    query: normalizeWhitespace(intent.query || ''),
+    title: '',
+    url: safeUrl,
+    embeddable: true,
+    readerText: '',
+    queryText: '',
+    screenshotUrl: null,
+    actionableElements: [],
+    viewport: { width: VIEWPORT_WIDTH, height: VIEWPORT_HEIGHT },
+    revision: 0,
+    lastScreenshotAt: 0,
+    createdAt: Date.now(),
+    lastAccessAt: Date.now(),
+    lastUpdatedAt: Date.now(),
+  };
+  activeBrowserSession = browserSession;
+  clearBrowserIdleTimer();
+  browserSession.page.on('close', () => {
+    if (activeBrowserSession?.id !== browserSession.id) {
+      return;
+    }
+    logRuntime('browser.session.page.closed', {
+      browserSessionId: browserSession.id,
+      url: browserSession.url || '',
+    }, 'error');
+    activeBrowserSession = null;
+    scheduleBrowserShutdown();
+  });
+  browserSession.page.on('crash', () => {
+    if (activeBrowserSession?.id !== browserSession.id) {
+      return;
+    }
+    logRuntime('browser.session.page.crashed', {
+      browserSessionId: browserSession.id,
+      url: browserSession.url || '',
+    }, 'error');
+    activeBrowserSession = null;
+    scheduleBrowserShutdown();
+  });
+  browserSession.context.on('close', () => {
+    if (activeBrowserSession?.id !== browserSession.id) {
+      return;
+    }
+    logRuntime('browser.session.context.closed', {
+      browserSessionId: browserSession.id,
+      url: browserSession.url || '',
+    }, 'error');
+    activeBrowserSession = null;
+    scheduleBrowserShutdown();
+  });
+  activeRequestId += 1;
+  const requestId = activeRequestId;
+  logRuntime('browser.open.phase', {
+    traceId,
+    phase: 'page-created',
+    browserSessionId: browserSession.id,
+    ms: Date.now() - startedAt,
+  });
 
   try {
+    let targetUrl = safeUrl;
     let response = null;
     try {
-      response = await page.goto(safeUrl, {
+      response = await page.goto(targetUrl, {
         waitUntil: 'commit',
         timeout: DEFAULT_TIMEOUT_MS,
       });
     } catch (error) {
-      if (error?.name !== 'TimeoutError' || page.url() === 'about:blank') {
+      const fallbackUrl = toHttpFallbackUrl(targetUrl);
+      if (fallbackUrl && shouldRetryWithHttpFallback(targetUrl, error)) {
+        const validatedFallbackUrl = await assertPublicUrl(fallbackUrl).catch(() => '');
+        if (validatedFallbackUrl) {
+          logRuntime('browser.open.phase', {
+            traceId,
+            phase: 'goto-http-fallback',
+            from: targetUrl,
+            to: validatedFallbackUrl,
+            ms: Date.now() - startedAt,
+          });
+          targetUrl = validatedFallbackUrl;
+          await page.goto('about:blank', {
+            waitUntil: 'commit',
+            timeout: Math.min(DEFAULT_TIMEOUT_MS, 3000),
+          }).catch(() => {});
+
+          try {
+            response = await page.goto(targetUrl, {
+              waitUntil: 'commit',
+              timeout: DEFAULT_TIMEOUT_MS,
+            });
+          } catch (fallbackError) {
+            const interruptedByErrorPage = /interrupted by another navigation|chrome-error/i
+              .test(String(fallbackError?.message || ''));
+            if (!interruptedByErrorPage) {
+              throw fallbackError;
+            }
+            try {
+              response = await page.goto(targetUrl, {
+                waitUntil: 'domcontentloaded',
+                timeout: DEFAULT_TIMEOUT_MS,
+              });
+            } catch (retryFallbackError) {
+              const retryMessage = String(retryFallbackError?.message || '');
+              const interruptedBySameSite = /interrupted by another navigation/i.test(retryMessage)
+                && isSameSiteUrl(page.url(), targetUrl)
+                && !/chrome-error/i.test(page.url());
+              if (!interruptedBySameSite) {
+                throw retryFallbackError;
+              }
+              await page.waitForLoadState('domcontentloaded', {
+                timeout: Math.min(DEFAULT_TIMEOUT_MS, DOMCONTENTLOADED_TIMEOUT_MS),
+              }).catch(() => {});
+              response = null;
+            }
+          }
+        } else if (error?.name !== 'TimeoutError' || page.url() === 'about:blank') {
+          throw error;
+        }
+      } else if (error?.name !== 'TimeoutError' || page.url() === 'about:blank') {
         throw error;
       }
     }
+    logRuntime('browser.open.phase', {
+      traceId,
+      phase: 'goto-commit',
+      browserSessionId: browserSession.id,
+      currentUrl: page.url(),
+      ms: Date.now() - startedAt,
+    });
 
     await page.waitForLoadState('domcontentloaded', {
-      timeout: Math.min(DEFAULT_TIMEOUT_MS, 6000),
+      timeout: Math.min(DEFAULT_TIMEOUT_MS, DOMCONTENTLOADED_TIMEOUT_MS),
     }).catch(() => {});
 
     await resolveInternalProviderPage(page, intent);
     await page.waitForTimeout(PAGE_SETTLE_MS);
 
     const headers = response?.headers() || {};
-    const title = normalizeWhitespace(await page.title()) || intent.titleHint || new URL(safeUrl).hostname;
-    const embeddable = isEmbeddable(headers);
-    let readerText = '';
+    browserSession.embeddable = isEmbeddable(headers);
+    browserSession.url = page.url() || targetUrl;
+    browserSession.title = normalizeWhitespace(await page.title()) || intent.titleHint || new URL(targetUrl).hostname;
+    logRuntime('browser.open.phase', {
+      traceId,
+      phase: 'page-classified',
+      browserSessionId: browserSession.id,
+      embeddable: browserSession.embeddable,
+      title: browserSession.title,
+      currentUrl: page.url(),
+      ms: Date.now() - startedAt,
+    });
+    await refreshBrowserSessionSnapshot(browserSession, {
+      includeScreenshot: true,
+      readerTextLimit: MAX_READER_TEXT_LENGTH,
+      queryTextLimit: SESSION_QUERY_TEXT_LENGTH,
+    });
+    touchBrowserSession(browserSession);
 
-    let screenshotUrl = null;
-    if (embeddable) {
-      readerText = normalizeWhitespace(
-        await page.evaluate(() => document.body?.innerText || '')
-      ).slice(0, MAX_READER_TEXT_LENGTH);
-    } else {
-      await page.waitForTimeout(SCREENSHOT_SETTLE_MS);
-      const screenshot = await page.screenshot({
-        type: 'jpeg',
-        quality: 78,
-      });
-      screenshotUrl = `data:image/jpeg;base64,${screenshot.toString('base64')}`;
+    logRuntime('browser.open.phase', {
+      traceId,
+      phase: 'session-ready',
+      browserSessionId: browserSession.id,
+      readerTextLength: browserSession.readerText.length,
+      screenshot: Boolean(browserSession.screenshotUrl),
+      ms: Date.now() - startedAt,
+    });
+
+    if (activeRequestId !== requestId || activeBrowserSession?.id !== browserSession.id) {
+      throw new Error('Открытие было прервано более новым запросом');
     }
 
-    return {
-      status: 'ready',
-      sourceType: intent.sourceType,
-      title,
-      url: page.url(),
-      embeddable,
-      readerText,
-      screenshotUrl,
-      error: null,
-      query: intent.query || '',
-    };
-  } finally {
+    return serializeSession(browserSession);
+  } catch (error) {
+    if (activeBrowserSession?.id === browserSession.id) {
+      activeBrowserSession = null;
+    }
     await context.close().catch(() => {});
-
-    if (activeRequestId === requestId && activePage === page) {
-      activePage = null;
-      activePageContext = null;
-      scheduleBrowserShutdown();
-    }
+    scheduleBrowserShutdown();
+    throw error;
   }
+}
+
+export async function getBrowserSessionContext(sessionId) {
+  const session = requireActiveBrowserSession(String(sessionId || '').trim());
+  await refreshBrowserSessionSnapshot(session, {
+    includeScreenshot: false,
+    readerTextLimit: SESSION_CONTEXT_TEXT_LENGTH,
+    queryTextLimit: SESSION_QUERY_TEXT_LENGTH,
+  });
+  touchBrowserSession(session);
+
+  logRuntime('browser.session.context', {
+    browserSessionId: session.id,
+    title: session.title,
+    url: session.url,
+    textLength: session.readerText.length,
+  });
+
+  return {
+    browserSessionId: session.id,
+    title: session.title,
+    url: session.url,
+    embeddable: Boolean(session.embeddable),
+    readerText: session.readerText,
+    lastUpdated: session.lastUpdatedAt,
+    revision: session.revision || 0,
+    actionableElements: Array.isArray(session.actionableElements) ? session.actionableElements : [],
+  };
+}
+
+export async function queryBrowserSession({ sessionId, question }) {
+  const session = requireActiveBrowserSession(String(sessionId || '').trim());
+  const normalizedQuestion = normalizeWhitespace(question);
+  if (!normalizedQuestion) {
+    throw new Error('Вопрос к странице не передан');
+  }
+
+  await refreshBrowserSessionSnapshot(session, {
+    includeScreenshot: false,
+    readerTextLimit: SESSION_CONTEXT_TEXT_LENGTH,
+    queryTextLimit: SESSION_QUERY_TEXT_LENGTH,
+  });
+  const answer = buildSessionQueryAnswer(normalizedQuestion, session);
+  touchBrowserSession(session);
+
+  logRuntime('browser.session.query', {
+    browserSessionId: session.id,
+    question: normalizedQuestion,
+    answerLength: answer.answer.length,
+    contextLength: answer.contextSnippet.length,
+  });
+
+  return {
+    browserSessionId: session.id,
+    title: session.title,
+    url: session.url,
+    answer: answer.answer,
+    contextSnippet: answer.contextSnippet,
+    lastUpdated: session.lastUpdatedAt,
+    revision: session.revision || 0,
+    actionableElements: Array.isArray(session.actionableElements) ? session.actionableElements : [],
+  };
+}
+
+export async function getBrowserSessionView(sessionId, { refresh = false } = {}) {
+  const session = requireActiveBrowserSession(String(sessionId || '').trim());
+  const shouldRefresh = refresh
+    || !session.screenshotUrl
+    || (Date.now() - Number(session.lastScreenshotAt || 0)) >= BROWSER_VIEW_REFRESH_MS;
+
+  if (shouldRefresh) {
+    await refreshBrowserSessionSnapshot(session, {
+      includeScreenshot: true,
+      readerTextLimit: MAX_READER_TEXT_LENGTH,
+      queryTextLimit: SESSION_QUERY_TEXT_LENGTH,
+    });
+  } else {
+    touchBrowserSession(session);
+  }
+
+  logRuntime('browser.session.view', {
+    browserSessionId: session.id,
+    revision: session.revision || 0,
+    refreshed: shouldRefresh,
+  });
+
+  return {
+    browserSessionId: session.id,
+    title: session.title,
+    url: session.url,
+    lastUpdated: session.lastUpdatedAt,
+    revision: session.revision || 0,
+    imageUrl: session.screenshotUrl || null,
+    width: session.viewport?.width || VIEWPORT_WIDTH,
+    height: session.viewport?.height || VIEWPORT_HEIGHT,
+    actionableElements: Array.isArray(session.actionableElements) ? session.actionableElements : [],
+  };
+}
+
+async function waitForNavigationAfterAction(page, previousUrl) {
+  await Promise.race([
+    page.waitForLoadState('domcontentloaded', { timeout: 3000 }).catch(() => {}),
+    page.waitForTimeout(500),
+  ]);
+  await page.waitForTimeout(PAGE_SETTLE_MS).catch(() => {});
+
+  const nextUrl = page.url();
+  if (previousUrl && nextUrl && previousUrl !== nextUrl && !isSameSiteUrl(previousUrl, nextUrl)) {
+    await page.goBack({ waitUntil: 'domcontentloaded', timeout: DEFAULT_TIMEOUT_MS }).catch(() => {});
+    await page.waitForTimeout(PAGE_SETTLE_MS).catch(() => {});
+    throw new Error('Переход на другой сайт без явной команды запрещен');
+  }
+}
+
+export async function performBrowserSessionAction({ sessionId, action }) {
+  const session = requireActiveBrowserSession(String(sessionId || '').trim());
+  const page = session.page;
+  const actionType = normalizeWhitespace(action?.type || '').toLowerCase();
+
+  if (!actionType) {
+    throw new Error('Тип browser action не передан');
+  }
+
+  await refreshBrowserSessionSnapshot(session, {
+    includeScreenshot: false,
+    readerTextLimit: MAX_READER_TEXT_LENGTH,
+    queryTextLimit: SESSION_QUERY_TEXT_LENGTH,
+  });
+
+  const previousUrl = page.url();
+
+  if (actionType === 'click') {
+    const xRatio = Number(action?.xRatio);
+    const yRatio = Number(action?.yRatio);
+    if (!Number.isFinite(xRatio) || !Number.isFinite(yRatio)) {
+      throw new Error('Координаты клика не переданы');
+    }
+
+    const targetX = Math.round(clamp(xRatio, 0, 1) * (session.viewport?.width || VIEWPORT_WIDTH));
+    const targetY = Math.round(clamp(yRatio, 0, 1) * (session.viewport?.height || VIEWPORT_HEIGHT));
+    await page.mouse.click(targetX, targetY, { delay: 40 });
+    await waitForNavigationAfterAction(page, previousUrl);
+  } else if (actionType === 'wheel' || actionType === 'scroll') {
+    const deltaY = clamp(Number(action?.deltaY) || 0, -2200, 2200);
+    if (!deltaY) {
+      throw new Error('Смещение scroll не передано');
+    }
+    await page.mouse.wheel(0, deltaY);
+    await page.waitForTimeout(240);
+  } else if (actionType === 'back') {
+    await page.goBack({ waitUntil: 'domcontentloaded', timeout: DEFAULT_TIMEOUT_MS }).catch(() => {});
+    await page.waitForTimeout(PAGE_SETTLE_MS).catch(() => {});
+  } else if (actionType === 'forward') {
+    await page.goForward({ waitUntil: 'domcontentloaded', timeout: DEFAULT_TIMEOUT_MS }).catch(() => {});
+    await page.waitForTimeout(PAGE_SETTLE_MS).catch(() => {});
+  } else if (actionType === 'reload') {
+    await page.reload({ waitUntil: 'domcontentloaded', timeout: DEFAULT_TIMEOUT_MS }).catch(() => {});
+    await page.waitForTimeout(PAGE_SETTLE_MS).catch(() => {});
+  } else if (actionType === 'home') {
+    const currentUrl = page.url();
+    let homeUrl = '';
+    try {
+      homeUrl = `${new URL(currentUrl).origin}/`;
+    } catch {
+      throw new Error('Не удалось определить главную страницу текущего сайта');
+    }
+    await page.goto(homeUrl, { waitUntil: 'domcontentloaded', timeout: DEFAULT_TIMEOUT_MS });
+    await page.waitForTimeout(PAGE_SETTLE_MS).catch(() => {});
+  } else if (actionType === 'open-url') {
+    const safeUrl = await assertPublicUrl(String(action?.url || '').trim());
+    await page.goto(safeUrl, { waitUntil: 'domcontentloaded', timeout: DEFAULT_TIMEOUT_MS });
+    await page.waitForTimeout(PAGE_SETTLE_MS).catch(() => {});
+  } else if (actionType === 'click-label') {
+    const label = normalizeWhitespace(action?.label || '');
+    if (!label) {
+      throw new Error('Не передана подпись элемента');
+    }
+    const target = findBestActionableElement(session, label);
+    if (!target) {
+      throw new Error('Не нашла на текущей странице подходящую кнопку или ссылку');
+    }
+    const x = clamp(target.x + Math.round(target.width / 2), 1, session.viewport?.width || VIEWPORT_WIDTH);
+    const y = clamp(target.y + Math.round(target.height / 2), 1, session.viewport?.height || VIEWPORT_HEIGHT);
+    await page.mouse.click(x, y, { delay: 40 });
+    await waitForNavigationAfterAction(page, previousUrl);
+  } else {
+    throw new Error('Неподдерживаемое действие на странице');
+  }
+
+  await refreshBrowserSessionSnapshot(session, {
+    includeScreenshot: true,
+    readerTextLimit: MAX_READER_TEXT_LENGTH,
+    queryTextLimit: SESSION_QUERY_TEXT_LENGTH,
+  });
+  touchBrowserSession(session);
+
+  logRuntime('browser.session.action', {
+    browserSessionId: session.id,
+    type: actionType,
+    url: session.url,
+    revision: session.revision || 0,
+  });
+
+  return {
+    browserSessionId: session.id,
+    title: session.title,
+    url: session.url,
+    lastUpdated: session.lastUpdatedAt,
+    revision: session.revision || 0,
+    imageUrl: session.screenshotUrl || null,
+    width: session.viewport?.width || VIEWPORT_WIDTH,
+    height: session.viewport?.height || VIEWPORT_HEIGHT,
+    actionableElements: Array.isArray(session.actionableElements) ? session.actionableElements : [],
+  };
 }

@@ -27,3 +27,28 @@ Environment variables are loaded from `/.env.production.local` (file is intentio
 Let’s Encrypt does **not** issue certificates for hostnames that contain underscores.
 
 For production HTTPS, use a hostname without underscores, for example `alesia-ai.constitution.of.by`, or issue a wildcard cert (DNS-01) for `*.constitution.of.by`.
+
+## Safe rollout and rollback
+
+Runtime settings are stored in `/app/data/app-config.json` (host path: `./runtime-data/app-config.json`).
+
+New safety controls:
+
+- `safetySwitches.safeSpeechFlowEnabled`:
+  - `true` - safer anti-cutoff speech flow enabled.
+  - `false` - fallback to legacy speech flow.
+- `speechStabilityProfile`: `legacy` | `balanced` | `strict`.
+- `prayerReadMode`: `knowledge-only` | `hybrid` | `free`.
+
+Recommended phased rollout:
+
+1. Keep `safeSpeechFlowEnabled: true` and `speechStabilityProfile: balanced` on staging.
+2. Validate the demo script.
+3. Promote same config to production.
+
+Fast rollback without rebuild:
+
+1. Set `safeSpeechFlowEnabled` to `false` and `speechStabilityProfile` to `legacy` in app config.
+2. Restart container: `docker compose up -d`.
+
+Config snapshots are auto-saved to `runtime-data/safety-snapshots/`.

@@ -17,10 +17,10 @@ export default defineConfig({
         globPatterns: ['**/*.{js,css,html,ico,png,svg,glb,mp3}'],
         runtimeCaching: [
           {
-            urlPattern: /\.(?:png|jpg|jpeg|svg|glb|mp3)$/,
+            urlPattern: /\.(?:png|jpg|jpeg|svg|mp3)$/,
             handler: 'CacheFirst',
             options: {
-              cacheName: 'assets-cache',
+              cacheName: 'assets-cache-v2',
               expiration: {
                 maxEntries: 50,
                 maxAgeSeconds: 30 * 24 * 60 * 60, // 30 Days

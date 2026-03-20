@@ -2,12 +2,15 @@ export class AudioStreamPlayer {
     constructor(sampleRate = 24000) {
         this.audioContext = null;
         this.queue = [];
-        this.isPlaying = false;
         this.sampleRate = sampleRate; // Gemini default usually 24kHz or determined by handshake
         this.nextStartTime = 0;
         this.analyser = null;
         this.gainNode = null;
         this.dataArray = null;
+        this.activeSources = new Set();
+        this.playbackGeneration = 0;
+        this.bufferedUntil = 0;
+        this.lastChunkAt = 0;
     }
 
     async initialize() {
@@ -31,8 +34,9 @@ export class AudioStreamPlayer {
 
         const buffer = this.audioContext.createBuffer(1, float32Array.length, this.sampleRate);
         buffer.getChannelData(0).set(float32Array);
-
-        this.queue.push(buffer);
+        const generation = this.playbackGeneration;
+        this.queue.push({ buffer, generation });
+        this.lastChunkAt = performance.now();
         this.scheduleQueue();
     }
 
@@ -46,13 +50,46 @@ export class AudioStreamPlayer {
         }
 
         while (this.queue.length > 0) {
-            const buffer = this.queue.shift();
+            const queued = this.queue.shift();
+            if (!queued) {
+                continue;
+            }
+            const { buffer, generation } = queued;
+            if (generation !== this.playbackGeneration) {
+                continue;
+            }
             const source = this.audioContext.createBufferSource();
             source.buffer = buffer;
             source.connect(this.gainNode);
+            source.onended = () => {
+                this.activeSources.delete(source);
+            };
+            this.activeSources.add(source);
             source.start(this.nextStartTime);
             this.nextStartTime += buffer.duration;
+            this.bufferedUntil = Math.max(this.bufferedUntil, this.nextStartTime);
         }
+    }
+
+    stop() {
+        this.playbackGeneration += 1;
+        this.queue = [];
+        this.nextStartTime = this.audioContext ? this.audioContext.currentTime : 0;
+        this.bufferedUntil = this.nextStartTime;
+        this.activeSources.forEach((source) => {
+            try {
+                source.stop(0);
+            } catch {
+                // Ignore sources that already ended.
+            }
+        });
+        this.activeSources.clear();
+    }
+
+    getBufferedMs() {
+        if (!this.audioContext) return 0;
+        const remaining = Math.max(0, this.bufferedUntil - this.audioContext.currentTime);
+        return Math.round(remaining * 1000);
     }
 
     getVolume() {
@@ -70,9 +107,13 @@ export class AudioStreamPlayer {
     }
 
     async close() {
+        this.stop();
         if (this.audioContext) {
             await this.audioContext.close();
             this.audioContext = null;
         }
+        this.analyser = null;
+        this.gainNode = null;
+        this.dataArray = null;
     }
 }
