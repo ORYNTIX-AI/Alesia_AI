@@ -11,6 +11,10 @@ node_modules
 dist
 dist-ssr
 *.local
+.runtime-data/
+runtime-data/
+.env.production.local.backup.*
+server/*.backup.*
 
 # Editor directories and files
 .vscode/*

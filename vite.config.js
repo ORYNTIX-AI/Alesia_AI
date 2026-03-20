@@ -10,6 +10,9 @@ export default defineConfig({
       registerType: 'autoUpdate',
       includeAssets: ['favicon.ico', 'apple-touch-icon.png', 'mask-icon.svg'],
       workbox: {
+        cleanupOutdatedCaches: true,
+        skipWaiting: true,
+        clientsClaim: true,
         maximumFileSizeToCacheInBytes: 50 * 1024 * 1024, // 50 MiB for GLB
         globPatterns: ['**/*.{js,css,html,ico,png,svg,glb,mp3}'],
         runtimeCaching: [
@@ -27,11 +30,11 @@ export default defineConfig({
         ],
       },
       manifest: {
-        name: 'Alesya AI',
-        short_name: 'Alesya',
-        description: 'Real-time Voice Avatar',
-        theme_color: '#000000',
-        background_color: '#000000',
+        name: 'Алеся ИИ',
+        short_name: 'Алеся',
+        description: 'Голосовой аватар с веб-панелью и наборами персонажей',
+        theme_color: '#0ea5a4',
+        background_color: '#060a0f',
         display: 'standalone',
         orientation: 'landscape',
         icons: [

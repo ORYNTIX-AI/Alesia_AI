@@ -1,13 +1,11 @@
 {
   "name": "protohuman",
   "private": true,
-  "version": "0.0.0",
+  "version": "0.0.1",
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "dev": "vite",
     "build": "vite build",
-    "lint": "eslint .",
     "lint": "eslint .",
     "preview": "vite preview"
   },
@@ -16,8 +14,10 @@
     "@react-three/fiber": "^9.4.2",
     "express": "^5.2.1",
     "https-proxy-agent": "^7.0.6",
+    "playwright": "^1.58.2",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
+    "socks-proxy-agent": "^8.0.5",
     "three": "^0.182.0",
     "ws": "^8.18.3"
   },

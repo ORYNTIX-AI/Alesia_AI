@@ -1,0 +1,23 @@
+name: ALesia_AI
+services:
+  app:
+    container_name: ALesia_AI
+    build:
+      context: .
+    environment:
+      PORT: "3000"
+      APP_CONFIG_PATH: /app/data/app-config.json
+    env_file:
+      - .env.production.local
+    restart: unless-stopped
+    networks:
+      - alesia_ai_net
+    ports:
+      - "127.0.0.1:8200:3000"
+    volumes:
+      - ./runtime-data:/app/data
+
+networks:
+  alesia_ai_net:
+    name: alesia_ai_net
+    driver: bridge
