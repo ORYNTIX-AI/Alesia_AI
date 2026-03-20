@@ -7,10 +7,10 @@ import { createServer } from 'http';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 
 // Proxy Configuration
-const PROXY_HOST = process.env.PROXY_HOST || '208.214.162.56';
-const PROXY_PORT = process.env.PROXY_PORT || 59100;
-const PROXY_USER = process.env.PROXY_USER || 'fxHrisftnZ';
-const PROXY_PASS = process.env.PROXY_PASS || 'Shbwy2NdKx';
+const PROXY_HOST = process.env.PROXY_HOST || '150.241.224.122';
+const PROXY_PORT = process.env.PROXY_PORT || 4210;
+const PROXY_USER = process.env.PROXY_USER || 'user340699';
+const PROXY_PASS = process.env.PROXY_PASS || '671nvc';
 
 const PROXY_URL = `http://${PROXY_USER}:${PROXY_PASS}@${PROXY_HOST}:${PROXY_PORT}`;
 const proxyAgent = new HttpsProxyAgent(PROXY_URL);
