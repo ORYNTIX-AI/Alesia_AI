@@ -4,7 +4,8 @@
 class MicProcessor extends AudioWorkletProcessor {
     constructor() {
         super();
-        this.bufferSize = 4096;
+        // 1024 samples at 48 kHz is about 21 ms, which keeps realtime latency low.
+        this.bufferSize = 1024;
         this.buffer = new Float32Array(this.bufferSize);
         this.bufferIndex = 0;
     }

@@ -5,7 +5,15 @@ import { clone } from 'three/examples/jsm/utils/SkeletonUtils.js';
 import { useLipSync } from '../hooks/useLipSync';
 
 // ARKit and Oculus Visemes are required for specific lip-sync morphs
-export const DEFAULT_AVATAR_MODEL_URL = 'https://models.readyplayer.me/6940682e5917bffe25eb75ed.glb?morphTargets=ARKit,Oculus+Visemes';
+export const DEFAULT_AVATAR_MODEL_URL = 'avatars/alesya.glb';
+const DEFAULT_IDLE_MOTION_PROFILE = {
+    yawAmplitude: 0.03,
+    yawSpeed: 0.5,
+    pitchAmplitude: 0.02,
+    pitchSpeed: 0.3,
+    bobAmplitude: 0.012,
+    bobSpeed: 0.42,
+};
 
 function cloneAvatarScene(sourceScene, instanceId) {
     const nextScene = clone(sourceScene);
@@ -28,10 +36,18 @@ function cloneAvatarScene(sourceScene, instanceId) {
     return nextScene;
 }
 
-export function Avatar({ audioPlayer, modelUrl = DEFAULT_AVATAR_MODEL_URL, instanceId }) {
+export function Avatar({
+    audioPlayer,
+    modelUrl = DEFAULT_AVATAR_MODEL_URL,
+    instanceId,
+    scale = 1.3,
+    idleMotion = true,
+    idleMotionProfile = DEFAULT_IDLE_MOTION_PROFILE,
+}) {
     const { scene } = useGLTF(modelUrl);
     const analyser = audioPlayer?.analyser;
     const avatarRef = React.useRef();
+    const baseYRef = React.useRef(0);
     const avatarScene = useMemo(() => cloneAvatarScene(scene, instanceId), [scene, instanceId]);
 
     // Custom Hook for Spectral Lip-Sync
@@ -39,11 +55,22 @@ export function Avatar({ audioPlayer, modelUrl = DEFAULT_AVATAR_MODEL_URL, insta
 
     // Idle Animation: Subtle breathing/sway
     useFrame((state) => {
-        if (avatarRef.current) {
+        if (avatarRef.current && idleMotion) {
             const t = state.clock.getElapsedTime();
+            const yawAmplitude = Number.isFinite(idleMotionProfile?.yawAmplitude) ? idleMotionProfile.yawAmplitude : DEFAULT_IDLE_MOTION_PROFILE.yawAmplitude;
+            const yawSpeed = Number.isFinite(idleMotionProfile?.yawSpeed) ? idleMotionProfile.yawSpeed : DEFAULT_IDLE_MOTION_PROFILE.yawSpeed;
+            const pitchAmplitude = Number.isFinite(idleMotionProfile?.pitchAmplitude) ? idleMotionProfile.pitchAmplitude : DEFAULT_IDLE_MOTION_PROFILE.pitchAmplitude;
+            const pitchSpeed = Number.isFinite(idleMotionProfile?.pitchSpeed) ? idleMotionProfile.pitchSpeed : DEFAULT_IDLE_MOTION_PROFILE.pitchSpeed;
+            const bobAmplitude = Number.isFinite(idleMotionProfile?.bobAmplitude) ? idleMotionProfile.bobAmplitude : DEFAULT_IDLE_MOTION_PROFILE.bobAmplitude;
+            const bobSpeed = Number.isFinite(idleMotionProfile?.bobSpeed) ? idleMotionProfile.bobSpeed : DEFAULT_IDLE_MOTION_PROFILE.bobSpeed;
             // Gentle Head/Body Sway
-            avatarRef.current.rotation.y = Math.sin(t * 0.5) * 0.03; // Left-Right slow
-            avatarRef.current.rotation.x = Math.sin(t * 0.3) * 0.02; // Up-Down breath
+            avatarRef.current.rotation.y = Math.sin(t * yawSpeed) * yawAmplitude;
+            avatarRef.current.rotation.x = Math.sin(t * pitchSpeed) * pitchAmplitude;
+            avatarRef.current.position.y = baseYRef.current + (Math.sin(t * bobSpeed) * bobAmplitude);
+        } else if (avatarRef.current) {
+            avatarRef.current.rotation.y = 0;
+            avatarRef.current.rotation.x = 0;
+            avatarRef.current.position.y = baseYRef.current;
         }
     });
 
@@ -52,7 +79,7 @@ export function Avatar({ audioPlayer, modelUrl = DEFAULT_AVATAR_MODEL_URL, insta
             ref={avatarRef}
             object={avatarScene}
             position={[0, 0, 0]}
-            scale={1.3}
+            scale={scale}
         />
     );
 }

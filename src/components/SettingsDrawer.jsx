@@ -3,6 +3,10 @@ const BACKGROUND_OPTIONS = [
   { value: 'sunset', label: 'Закат' },
   { value: 'midnight', label: 'Ночь' },
   { value: 'forest', label: 'Лес' },
+  { value: 'church', label: 'Церковь (мягкий)' },
+  { value: 'hotel', label: 'Отель' },
+  { value: 'beach', label: 'Пляж' },
+  { value: 'white', label: 'Белый' },
 ];
 
 function CloseIcon() {
@@ -46,47 +50,49 @@ export function SettingsDrawer({
           </button>
         </div>
 
-        <label className="settings-field">
-          <span>Имя</span>
-          <input name="displayName" value={draft.displayName} onChange={handleInputChange} />
-        </label>
+        <div className="settings-drawer__body">
+          <label className="settings-field">
+            <span>Имя</span>
+            <input name="displayName" value={draft.displayName} onChange={handleInputChange} />
+          </label>
 
-        <label className="settings-field">
-          <span>Модель голоса</span>
-          <input name="voiceModelId" value={draft.voiceModelId} onChange={handleInputChange} />
-        </label>
+          <label className="settings-field">
+            <span>Модель голоса</span>
+            <input name="voiceModelId" value={draft.voiceModelId} onChange={handleInputChange} />
+          </label>
 
-        <label className="settings-field">
-          <span>Голос</span>
-          <select name="voiceName" value={draft.voiceName} onChange={handleInputChange}>
-            {voiceOptions.map((option) => (
-              <option key={option.value} value={option.value}>
-                {option.label}
-              </option>
-            ))}
-          </select>
-        </label>
+          <label className="settings-field">
+            <span>Голос</span>
+            <select name="voiceName" value={draft.voiceName} onChange={handleInputChange}>
+              {voiceOptions.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
 
-        <label className="settings-field">
-          <span>Фон</span>
-          <select name="backgroundPreset" value={draft.backgroundPreset} onChange={handleInputChange}>
-            {BACKGROUND_OPTIONS.map((option) => (
-              <option key={option.value} value={option.value}>
-                {option.label}
-              </option>
-            ))}
-          </select>
-        </label>
+          <label className="settings-field">
+            <span>Фон</span>
+            <select name="backgroundPreset" value={draft.backgroundPreset} onChange={handleInputChange}>
+              {BACKGROUND_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
 
-        <label className="settings-field">
-          <span>Приветствие</span>
-          <input name="greetingText" value={draft.greetingText || ''} onChange={handleInputChange} />
-        </label>
+          <label className="settings-field">
+            <span>Приветствие</span>
+            <input name="greetingText" value={draft.greetingText || ''} onChange={handleInputChange} />
+          </label>
 
-        <label className="settings-field settings-field--textarea">
-          <span>Системный промпт</span>
-          <textarea name="systemPrompt" value={draft.systemPrompt} onChange={handleInputChange} />
-        </label>
+          <label className="settings-field settings-field--textarea">
+            <span>Системный промпт</span>
+            <textarea name="systemPrompt" value={draft.systemPrompt} onChange={handleInputChange} />
+          </label>
+        </div>
 
         <div className="settings-drawer__footer">
           <button className="settings-save-button" type="button" onClick={onSave} disabled={saving}>

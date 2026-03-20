@@ -6,7 +6,7 @@ import { BrowserPanel } from './components/BrowserPanel';
 import { SettingsDrawer } from './components/SettingsDrawer';
 import { useAppConfig } from './hooks/useAppConfig';
 import { useGeminiLive } from './hooks/useGeminiLive';
-import { useSpeechSidecar } from './hooks/useSpeechSidecar';
+import { useServerStt } from './hooks/useServerStt';
 import { AudioStreamPlayer } from './utils/AudioStreamPlayer';
 
 const DEFAULT_PANEL_STATE = {
@@ -17,15 +17,41 @@ const DEFAULT_PANEL_STATE = {
   embeddable: false,
   readerText: '',
   screenshotUrl: null,
+  revision: 0,
+  actionableElements: [],
+  view: null,
   error: null,
 };
 
-const INTERIM_BROWSER_TRIGGER_DELAY_MS = 320;
 const MAX_SESSION_WEB_HISTORY_ENTRIES = 8;
 const MAX_SESSION_WEB_PROMPT_ENTRIES = 5;
-const SIDECAR_BOT_VOLUME_GUARD = 0.06;
-const BROWSER_INTENT_TIMEOUT_MS = 15000;
-const BROWSER_OPEN_TIMEOUT_MS = 30000;
+const SIDECAR_BOT_VOLUME_GUARD = 0.08;
+const BROWSER_INTENT_TIMEOUT_MS = 9000;
+const BROWSER_INTENT_PENDING_SLA_MS = 8500;
+const BROWSER_OPEN_TIMEOUT_MS = 75000;
+const BROWSER_CONTEXT_TIMEOUT_MS = 5000;
+const BROWSER_ACTION_TIMEOUT_MS = 12000;
+const BROWSER_VIEW_POLL_MS = 2500;
+const AUTO_RECONNECT_BASE_DELAY_MS = 1200;
+const AUTO_RECONNECT_MAX_DELAY_MS = 10000;
+const AUTO_RECONNECT_MAX_ATTEMPTS = 8;
+const GOAWAY_RECONNECT_MIN_DELAY_MS = 250;
+const GOAWAY_RECONNECT_FALLBACK_DELAY_MS = 1500;
+const GOAWAY_RECONNECT_BUFFER_MS = 1500;
+const CONNECTING_WATCHDOG_TIMEOUT_MS = 20000;
+const RELOAD_WATCHDOG_TIMEOUT_MS = 12000;
+const BATYUSHKA_CHARACTER_ID = 'alesya-puck';
+const AVATAR_QUICK_TAP_COUNT = 4;
+const AVATAR_QUICK_TAP_WINDOW_MS = 900;
+const BROWSER_INTENT_RETRY_LIMIT = 1;
+const BROWSER_INTENT_RETRY_BACKOFF_MS = 180;
+const ASSISTANT_QUEUE_TURN_TIMEOUT_MS = 14000;
+const ASSISTANT_QUEUE_MAX_HARD_TIMEOUT_MS = 38000;
+const MAX_RECENT_INTENT_TURNS = 10;
+const BARGE_IN_MIN_GAP_MS = 1200;
+const ASSISTANT_BARGE_IN_WARMUP_MS = 320;
+const STOP_SPEECH_PATTERN = /(^|\s)(стоп|остановись|замолчи|хватит|тише|пауза|stop)(?=\s|$)/i;
+const USER_FINAL_DEDUP_WINDOW_MS = 4200;
 
 const BACKGROUND_PRESETS = {
   aurora: {
@@ -51,6 +77,30 @@ const BACKGROUND_PRESETS = {
     canvasBackground: '#3a7259',
     shadow: 'rgba(29, 74, 52, 0.3)',
     border: 'rgba(219, 255, 228, 0.38)',
+  },
+  church: {
+    stage: 'linear-gradient(180deg, rgba(248, 249, 250, 0.68) 0%, rgba(235, 236, 238, 0.72) 100%), url("/backgrounds/church-real.jpg") center center / cover no-repeat',
+    canvasBackground: null,
+    shadow: 'rgba(78, 84, 95, 0.18)',
+    border: 'rgba(216, 220, 226, 0.92)',
+  },
+  hotel: {
+    stage: 'linear-gradient(180deg, rgba(246, 247, 249, 0.62) 0%, rgba(230, 233, 238, 0.66) 100%), url("/backgrounds/hotel.jpg") center center / cover no-repeat',
+    canvasBackground: null,
+    shadow: 'rgba(66, 74, 87, 0.2)',
+    border: 'rgba(219, 225, 233, 0.9)',
+  },
+  beach: {
+    stage: 'linear-gradient(180deg, rgba(240, 248, 251, 0.45) 0%, rgba(217, 239, 247, 0.55) 100%), url("/backgrounds/beach.jpg") center center / cover no-repeat',
+    canvasBackground: null,
+    shadow: 'rgba(52, 97, 122, 0.22)',
+    border: 'rgba(205, 235, 247, 0.88)',
+  },
+  white: {
+    stage: 'linear-gradient(180deg, #ffffff 0%, #f5f5f5 100%)',
+    canvasBackground: '#ffffff',
+    shadow: 'rgba(0, 0, 0, 0.1)',
+    border: 'rgba(227, 227, 227, 0.9)',
   },
 };
 
@@ -105,6 +155,18 @@ function SettingsIcon() {
   );
 }
 
+function FullscreenIcon({ active }) {
+  return active ? (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M9 14H5v5h5v-2H7v-3h2v-2Zm10 0h-4v2h2v3h-3v2h5v-5Zm-9-9H5v5h2V7h3V5Zm9 0h-5v2h3v3h2V5Z" fill="currentColor" />
+    </svg>
+  ) : (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M7 14H5v5h5v-2H7v-3Zm12 5v-5h-2v3h-3v2h5ZM7 7h3V5H5v5h2V7Zm10 3h2V5h-5v2h3v3Z" fill="currentColor" />
+    </svg>
+  );
+}
+
 function ArrowIcon({ direction }) {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -124,6 +186,38 @@ function IconButton({ label, onClick, children, active = false }) {
   );
 }
 
+function parseTimeLeftMs(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value > 1000 ? value : value * 1000;
+  }
+
+  const text = String(value || '').trim().toLowerCase();
+  if (!text) {
+    return null;
+  }
+
+  if (/^\d+$/.test(text)) {
+    const numeric = Number(text);
+    return numeric > 1000 ? numeric : numeric * 1000;
+  }
+
+  const numeric = Number.parseFloat(text.replace(',', '.'));
+  if (!Number.isFinite(numeric)) {
+    return null;
+  }
+
+  if (text.endsWith('ms')) {
+    return numeric;
+  }
+  if (text.endsWith('m') || text.includes('min')) {
+    return numeric * 60000;
+  }
+  if (text.endsWith('s') || text.includes('sec')) {
+    return numeric * 1000;
+  }
+  return numeric > 1000 ? numeric : numeric * 1000;
+}
+
 function CharacterArrow({ direction, onClick }) {
   return (
     <button className={`character-arrow character-arrow--${direction}`} type="button" onClick={onClick} aria-label={direction === 'left' ? 'Предыдущий персонаж' : 'Следующий персонаж'}>
@@ -132,7 +226,7 @@ function CharacterArrow({ direction, onClick }) {
   );
 }
 
-function LiveStatusPill({ status, audioPlayer, getUserVolume, sidecarListening }) {
+function LiveStatusPill({ status, audioPlayer, getUserVolume, sidecarListening, isRecovering = false }) {
   const [volumes, setVolumes] = useState({ user: 0, bot: 0 });
 
   useEffect(() => {
@@ -147,11 +241,18 @@ function LiveStatusPill({ status, audioPlayer, getUserVolume, sidecarListening }
     return () => cancelAnimationFrame(frame);
   }, [audioPlayer, getUserVolume]);
 
-  const isConnected = status === 'connected';
-  const label = isConnected ? (sidecarListening ? 'Слушаю...' : 'Онлайн') : status === 'connecting' ? 'Подключение...' : status === 'error' ? 'Ошибка' : 'Отключено';
+  const effectiveStatus = isRecovering && status === 'disconnected' ? 'connecting' : status;
+  const isConnected = effectiveStatus === 'connected';
+  const label = isConnected
+    ? (sidecarListening ? 'Слушаю...' : 'Онлайн')
+    : effectiveStatus === 'connecting'
+      ? (isRecovering ? 'Восстановление...' : 'Подключение...')
+      : effectiveStatus === 'error'
+        ? 'Ошибка'
+        : 'Отключено';
 
   return (
-    <div className={`live-pill live-pill--${status}`}>
+    <div className={`live-pill live-pill--${effectiveStatus}`}>
       <span className="live-pill__dot" />
       <span className="live-pill__label">{label}</span>
       <span className="live-pill__meters">
@@ -162,9 +263,66 @@ function LiveStatusPill({ status, audioPlayer, getUserVolume, sidecarListening }
   );
 }
 
-function buildSignature(character) {
+function buildSignature(character, globalRuntimeConfig = {}) {
   if (!character) return '';
-  return [character.voiceModelId, character.voiceName, character.systemPrompt, character.greetingText].join('|');
+  return [
+    character.voiceModelId,
+    character.voiceName,
+    character.systemPrompt,
+    character.greetingText,
+    normalizeSpeechStabilityProfile(globalRuntimeConfig.speechStabilityProfile),
+    String(globalRuntimeConfig.prayerReadMode || 'knowledge-only').trim().toLowerCase(),
+    globalRuntimeConfig.safeSpeechFlowEnabled === false ? 'safe-off' : 'safe-on',
+  ].join('|');
+}
+
+function normalizeSpeechStabilityProfile(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (normalized === 'legacy' || normalized === 'presentation' || normalized === 'strict') {
+    return normalized;
+  }
+  return 'balanced';
+}
+
+function resolveSpeechStabilityConfig(profile, safeSpeechFlowEnabled) {
+  const normalizedProfile = normalizeSpeechStabilityProfile(profile);
+  if (!safeSpeechFlowEnabled || normalizedProfile === 'legacy') {
+    return {
+      profile: 'legacy',
+      bargeInHoldMs: 0,
+      minTranscriptLength: 1,
+      botVolumeGuard: SIDECAR_BOT_VOLUME_GUARD,
+      immediateOnSpeechStart: true,
+    };
+  }
+
+  if (normalizedProfile === 'strict') {
+    return {
+      profile: 'strict',
+      bargeInHoldMs: 320,
+      minTranscriptLength: 6,
+      botVolumeGuard: 0.09,
+      immediateOnSpeechStart: true,
+    };
+  }
+
+  if (normalizedProfile === 'presentation') {
+    return {
+      profile: 'presentation',
+      bargeInHoldMs: 260,
+      minTranscriptLength: 5,
+      botVolumeGuard: 0.085,
+      immediateOnSpeechStart: true,
+    };
+  }
+
+  return {
+    profile: 'balanced',
+    bargeInHoldMs: 180,
+    minTranscriptLength: 4,
+    botVolumeGuard: SIDECAR_BOT_VOLUME_GUARD,
+    immediateOnSpeechStart: true,
+  };
 }
 
 function normalizeTranscriptKey(transcript) {
@@ -177,6 +335,118 @@ function normalizeSpeechText(transcript) {
   return String(transcript || '')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+function isPrayerRequest(transcript) {
+  const normalized = normalizeSpeechText(transcript).toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+
+  return /(молитв|отче\s+наш|богородиц|символ\s+веры|господи\s+помилуй|прочти\s+молитву)/i.test(normalized);
+}
+
+function extractConfirmedPrayerExcerpt(text, question = '') {
+  const normalized = normalizeSpeechText(text);
+  if (!normalized) {
+    return '';
+  }
+
+  const lowerText = normalized.toLowerCase();
+  const lowerQuestion = normalizeSpeechText(question).toLowerCase();
+
+  if (/(богородиц|радуйся)/i.test(lowerQuestion) || /(богородиц|радуйся)/i.test(lowerText)) {
+    const start = lowerText.search(/богородице\s+дево[,!\s]+радуйся|радуйся[,!\s]+благодатная/i);
+    if (start >= 0) {
+      const tail = normalized.slice(start);
+      const endMatch = tail.match(/(?:ныне\s+и\s+присно(?:\s+и)?\s+во\s+веки\s+веков|аминь)[.!?]?/i);
+      const snippet = endMatch
+        ? tail.slice(0, Math.min(tail.length, endMatch.index + endMatch[0].length))
+        : tail.slice(0, 620);
+      return normalizeSpeechText(snippet);
+    }
+  }
+
+  if (/(отче\s+наш|молитв)/i.test(lowerQuestion) || /(отче\s+наш)/i.test(lowerText)) {
+    const start = lowerText.search(/отче\s+наш[,!\s]/i);
+    if (start >= 0) {
+      const tail = normalized.slice(start);
+      const endMatch = tail.match(/(?:но\s+избав(?:ь|и)\s+нас\s+от\s+лукав(?:ого|аго)|аминь)[.!?]?/i);
+      const snippet = endMatch
+        ? tail.slice(0, Math.min(tail.length, endMatch.index + endMatch[0].length))
+        : tail.slice(0, 760);
+      return normalizeSpeechText(snippet);
+    }
+  }
+
+  return '';
+}
+
+function pickPrayerReadingHit(hits = [], question = '') {
+  if (!Array.isArray(hits) || !hits.length) {
+    return null;
+  }
+
+  let bestHit = null;
+  let bestScore = 0;
+  let bestExcerpt = '';
+
+  for (const hit of hits) {
+    const text = normalizeSpeechText(hit?.text || '');
+    if (!text) {
+      continue;
+    }
+    const excerpt = extractConfirmedPrayerExcerpt(text, question);
+
+    let score = 0;
+    if (excerpt.length >= 90) score += 9;
+    if (/отче\s+наш[,!]/i.test(text)) score += 6;
+    if (/богородице\s+дево[,!]\s*радуйся/i.test(text)) score += 6;
+    if (/иже\s+еси\s+на\s+небес[её]х/i.test(text) || /который\s+на\s+небесах/i.test(text)) score += 4;
+    if (/благодатная\s+марие/i.test(text) || /благословенна\s+ты\s+в\s+женах/i.test(text)) score += 4;
+    if (Array.isArray(hit?.tags) && hit.tags.some((tag) => String(tag).toLowerCase().includes('prayer'))) score += 1;
+    if (text.length >= 100) score += 1;
+
+    if (score > bestScore) {
+      bestScore = score;
+      bestHit = hit;
+      bestExcerpt = excerpt;
+    }
+  }
+
+  if (!bestHit || bestExcerpt.length < 80) {
+    return null;
+  }
+
+  return {
+    hit: bestHit,
+    excerpt: bestExcerpt,
+  };
+}
+
+function normalizeBrowserCommandText(transcript) {
+  return normalizeSpeechText(transcript)
+    .toLowerCase()
+    .replace(/<[^>]{1,24}>/g, ' ')
+    .replace(/(^|\s)(?:noise|шум)(?=\s|$)/giu, ' ')
+    .replace(/[.,!?;:()[\]{}"']/g, ' ')
+    .replace(/(^|\s)(?:блядь|блять|сука|нахуй|нахер|пиздец|ебать|ёпт)(?=\s|$)/giu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function isGreetingOnlyTranscript(transcript) {
+  const normalized = normalizeSpeechText(transcript).toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+
+  const cleaned = normalized.replace(/[.,!?;:()[\]{}"']/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!cleaned) {
+    return false;
+  }
+
+  return /^(привет|здравствуйте|здравствуй|добрый день|доброе утро|добрый вечер|доброго дня|хай|hello|hi|hey)$/.test(cleaned);
 }
 
 function extractBrowserTarget(transcript) {
@@ -200,7 +470,7 @@ function extractBrowserTarget(transcript) {
     return spokenDomainMatch[1];
   }
 
-  const tailMatch = normalized.match(/(?:открой|открыть|зайди|зайти|перейди|перейти)\s+(?:мне\s+)?(?:сайт|страницу|домен|адрес)?\s*(.+)$/iu);
+  const tailMatch = normalized.match(/(?:открой|открыть|зайди|зайти|перейди|перейти|адкрый|адкрыць|адкрыйце|зайдзи|зайдзі|зайсці|перайдзи|перайдзі|перайсци|перайсці)\s+(?:мне\s+)?(?:сайт|страницу|домен|адрес)?\s*(.+)$/iu);
   if (tailMatch?.[1]) {
     return normalizeSpeechText(tailMatch[1]);
   }
@@ -211,6 +481,70 @@ function extractBrowserTarget(transcript) {
   }
 
   return normalized;
+}
+
+function isMainPagePhrase(value) {
+  const normalized = normalizeSpeechText(value).toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+
+  return /(главн(ая|ую|ой|ое)|главн(ую|ой|ое)?\s+страниц(у|а|е|ой)?|домой|домашн(яя|юю|ей|ее)\s+страниц(а|у|е|ой))/i
+    .test(normalized);
+}
+
+function extractMainPageSiteHint(value) {
+  const normalized = normalizeSpeechText(value).toLowerCase();
+  if (!normalized || !isMainPagePhrase(normalized)) {
+    return '';
+  }
+
+  return normalizeSpeechText(
+    normalized
+      .replace(/[.,!?;:()[\]{}"']/g, ' ')
+      .replace(/(^|\s)(?:ну|а|и|ладно|тогда|давай|слушай|смотри|прошу|пожалуйста|мне|нам|для|меня)(?=\s|$)/giu, ' ')
+      .replace(/(^|\s)(?:перейди|перейти|перейду|перейд[её]м|зайди|зайти|открой|открыть|иди|вернись|вернуться|переход|навигац[а-яё]*)(?=\s|$)/giu, ' ')
+      .replace(/(^|\s)(?:на|в|во|к|по|с|со)(?=\s|$)/giu, ' ')
+      .replace(/(^|\s)(?:сайт|сайта|страниц[ауые]?|домен|адрес)(?=\s|$)/giu, ' ')
+      .replace(/(^|\s)(?:главн(ая|ую|ой|ое)|домой|домашн(яя|юю|ей|ее)|страниц(а|у|е|ой))(?=\s|$)/giu, ' ')
+      .replace(/\s+/g, ' ')
+      .trim(),
+  );
+}
+
+function hasExplicitMainPageSiteTarget(value) {
+  const normalized = normalizeSpeechText(value).toLowerCase();
+  if (!normalized || !isMainPagePhrase(normalized)) {
+    return false;
+  }
+
+  const directTarget = extractBrowserTarget(normalized);
+  if (/\bhttps?:\/\/[^\s]+/i.test(directTarget)) return true;
+  if (/\b(?:[a-z0-9-]+\.)+(?:by|ru)\b/i.test(directTarget)) return true;
+  if (/\b[a-z0-9-]{2,}\s+(?:by|ru)\b/i.test(directTarget)) return true;
+
+  const hint = extractMainPageSiteHint(normalized);
+  if (!hint) {
+    return false;
+  }
+  return normalizeTranscriptKey(hint).length >= 4;
+}
+
+function isGenericNavigationTarget(target) {
+  const normalized = normalizeSpeechText(target).toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+
+  if (/^(на\s+)?(назад|вперед|впер[её]д|обнови|обновить|перезагрузи|перезагрузка)$/.test(normalized)) {
+    return true;
+  }
+
+  if (!isMainPagePhrase(normalized)) {
+    return false;
+  }
+
+  return !hasExplicitMainPageSiteTarget(normalized);
 }
 
 function isSimilarIntentKey(left, right) {
@@ -228,30 +562,46 @@ function buildBrowserIntentKey(transcript) {
 }
 
 function isExplicitBrowserRequest(transcript) {
-  const normalized = normalizeSpeechText(transcript).toLowerCase();
+  const normalized = normalizeBrowserCommandText(transcript);
   if (!normalized) return false;
 
   if (/\bhttps?:\/\/[^\s]+/i.test(normalized)) return true;
   if (/\b(?:[a-z0-9-]+\.)+(?:by|ru)\b/i.test(normalized)) return true;
   if (/\b[a-z0-9-]{2,}\s+(?:by|ru)\b/i.test(normalized)) return true;
 
-  const padded = ` ${normalized.replace(/[.,!?;:()[\]{}"']/g, ' ')} `;
-  const hasOpenVerb = /(?:^|\s)(открой|открыть|зайди|зайти|перейди|перейти)(?=\s|$)/iu.test(padded);
+  const padded = ` ${normalized} `;
+  const hasOpenVerb = /(?:^|\s)(открой|открыть|открою|откроем|откроешь|откроете|зайди|зайти|зайду|зайдём|зайдешь|зайдете|перейди|перейти|перейду|перейдём|перейдешь|перейдете|адкрый|адкрыць|адкрыйце|зайдзи|зайдзі|зайсці|перайдзи|перайдзі|перайсци|перайсці)(?=\s|$)/iu.test(padded);
+  const hasPoliteOpen = /(?:^|\s)(прошу|прашу|пожалуйста)\s+(?:[^ ]+\s+){0,4}(открой|открыть|зайди|зайти|перейди|перейти|адкрый|адкрыць|зайдзи|зайдзі|зайсці|перайдзи|перайдзі|перайсци|перайсці)(?=\s|$)/iu
+    .test(padded);
   const hasLookupVerb = /(?:^|\s)(найди|найти|покажи|посмотри)(?=\s|$)/iu.test(padded);
-  const hasWebNoun = /(?:^|\s)(сайт|сайта|страниц[ауые]?|домен|адрес|url|урл|веб|web)(?=\s|$)/iu.test(padded);
+  const hasWebNoun = /(?:^|\s)(сайт|сайта|страниц[ауые]?|старонк[ауые]?|домен|адрес|url|урл|веб|web)(?=\s|$)/iu.test(padded);
   const hasWebContext = /(?:^|\s)(в интернете|в сети|онлайн|online)(?=\s|$)/iu.test(padded);
+  const leadingSiteTargetMatch = normalized.match(/^(?:ну|а|и|слушай|смотри|пожалуйста|прошу)?\s*(?:мне\s+)?(?:сайт|сайта|страницу|страница|домен|адрес)\s+(.+)$/iu);
+  if (leadingSiteTargetMatch?.[1]) {
+    const target = normalizeSpeechText(leadingSiteTargetMatch[1]);
+    if (normalizeTranscriptKey(target).length >= 4 && !isGenericNavigationTarget(target)) {
+      return true;
+    }
+  }
+  const trailingSiteTargetMatch = normalized.match(/^(.+?)\s+(?:сайт|сайта|страницу|страница)$/iu);
+  if (trailingSiteTargetMatch?.[1]) {
+    const target = normalizeSpeechText(trailingSiteTargetMatch[1]);
+    if (normalizeTranscriptKey(target).length >= 4 && !isGenericNavigationTarget(target)) {
+      return true;
+    }
+  }
 
   if (hasLookupVerb && (hasWebNoun || hasWebContext)) {
     return true;
   }
 
-  if (hasOpenVerb && hasWebNoun) {
+  if ((hasOpenVerb || hasPoliteOpen) && hasWebNoun) {
     return true;
   }
 
-  if (hasOpenVerb) {
+  if (hasOpenVerb || hasPoliteOpen) {
     const target = extractBrowserTarget(normalized);
-    if (normalizeTranscriptKey(target).length >= 4) {
+    if (normalizeTranscriptKey(target).length >= 4 && !isGenericNavigationTarget(target)) {
       return true;
     }
   }
@@ -259,16 +609,21 @@ function isExplicitBrowserRequest(transcript) {
   return false;
 }
 
-function isStableInterimBrowserCandidate(transcript) {
-  const normalized = normalizeSpeechText(transcript);
-  if (!normalized || !isExplicitBrowserRequest(normalized)) return false;
-  if (normalized.length < 8) return false;
-  if (/^(открой|открыть|зайди|зайти|перейди|перейти|найди|найти|покажи|посмотри)\s*(сайт|страницу|домен|адрес)?\s*$/iu.test(normalized)) return false;
-  return true;
-}
-
 function isLikelyBrowserIntent(transcript) {
   return isExplicitBrowserRequest(transcript);
+}
+
+function classifyTranscriptIntent(transcript) {
+  if (isBrowserActionFollowupRequest(transcript)) {
+    return 'browser_action';
+  }
+  if (isBrowserContextFollowupRequest(transcript)) {
+    return 'page_query';
+  }
+  if (isLikelyBrowserIntent(transcript)) {
+    return 'site_open';
+  }
+  return 'chat';
 }
 
 function isAssistantBrowserNarration(transcript) {
@@ -281,13 +636,80 @@ function isAssistantBrowserNarration(transcript) {
     || /(не удалось открыть|не удалось определить сайт|сайт не открылся)/i.test(normalized);
 }
 
+function tokenizeSpeechForOverlap(value) {
+  return normalizeSpeechText(value)
+    .toLowerCase()
+    .split(/\s+/)
+    .map((token) => token.replace(/[^a-zа-яё0-9-]+/gi, ''))
+    .filter((token) => token.length >= 4);
+}
+
+function hasTranscriptOverlapWithAssistant(userTranscript, assistantTranscript) {
+  const normalizedUser = normalizeSpeechText(userTranscript).toLowerCase();
+  const normalizedAssistant = normalizeSpeechText(assistantTranscript).toLowerCase();
+  if (!normalizedUser || !normalizedAssistant) {
+    return false;
+  }
+
+  if (normalizedAssistant.includes(normalizedUser) || normalizedUser.includes(normalizedAssistant)) {
+    return true;
+  }
+
+  const userTokens = tokenizeSpeechForOverlap(normalizedUser);
+  const assistantTokens = new Set(tokenizeSpeechForOverlap(normalizedAssistant));
+  if (!userTokens.length || !assistantTokens.size) {
+    return false;
+  }
+
+  const matched = userTokens.filter((token) => assistantTokens.has(token)).length;
+  return matched >= Math.min(2, userTokens.length);
+}
+
+function isLikelyAssistantEchoFinal(transcript, assistantSample, botVolume, speechConfig) {
+  const normalized = normalizeSpeechText(transcript);
+  if (!normalized || STOP_SPEECH_PATTERN.test(normalized)) {
+    return false;
+  }
+
+  const latestAssistantText = normalizeSpeechText(assistantSample?.text || '');
+  const latestAssistantTs = Number(assistantSample?.timestamp || 0);
+  if (!latestAssistantText || !latestAssistantTs) {
+    return false;
+  }
+
+  if ((Date.now() - latestAssistantTs) > 15000) {
+    return false;
+  }
+
+  const guard = Number(speechConfig?.botVolumeGuard || SIDECAR_BOT_VOLUME_GUARD);
+  if ((Number(botVolume) || 0) <= (guard + 0.02)) {
+    return false;
+  }
+
+  return hasTranscriptOverlapWithAssistant(normalized, latestAssistantText)
+    || isAssistantBrowserNarration(normalized);
+}
+
+function isBrowserContextFollowupRequest(transcript) {
+  const normalized = normalizeSpeechText(transcript).toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+
+  if (isLikelyBrowserIntent(normalized)) {
+    return false;
+  }
+
+  return /(что\s+(внизу|на\s+этой\s+странице|на\s+сайте|здесь|там)|что\s+тут|что\s+видишь|о\s+ч[её]м\s+сайт|что\s+написано|что\s+сейчас\s+открыто)/i
+    .test(normalized);
+}
+
 function buildEarlyBrowserLoadingTitle(transcript) {
-  const normalized = String(transcript || '').replace(/\s+/g, ' ').trim().replace(/[?!.]+$/g, '');
+  const normalized = String(transcript || '').replace(/\s+/g, ' ').trim();
   if (!normalized) {
     return 'Подбираю адрес сайта';
   }
-
-  return `Подбираю адрес: ${truncatePromptValue(normalized, 96)}`;
+  return 'Подбираю адрес сайта';
 }
 
 function truncatePromptValue(value, maxLength = 180) {
@@ -323,56 +745,352 @@ function buildSessionHistorySummary(sessionHistory) {
     .join('\n');
 }
 
-function buildWebPendingPrompt(transcript, titleHint, historySummary) {
-  return `WEB_CONTEXT_PENDING:
-Служебное событие: browser-controller начал открывать сайт по запросу пользователя.
-Исходный запрос пользователя: "${transcript}"
-Цель открытия: ${titleHint || 'Сайт'}
-Недавняя веб-история этой сессии:
-${historySummary}
+function buildWebResultPrompt(transcript, panelState, historySummary) {
+  const pageSnippet = truncatePromptValue(panelState.readerText || '', 900);
+  return `WEB_CONTEXT_RESULT:
+Сайт уже подтверждённо открыт.
+Запрос: "${truncatePromptValue(transcript, 220)}"
+Источник: ${truncatePromptValue(panelState.title || 'Веб-страница', 140)}
+URL: ${truncatePromptValue(panelState.url || 'n/a', 180)}
+Краткий контекст страницы: ${pageSnippet || 'Текст страницы пока не извлечён.'}
+Недавняя веб-история:
+${truncatePromptValue(historySummary, 420)}
 
-Ответь одной короткой фразой, что ты открываешь сайт и смотришь страницу.`;
+Ответь коротко, естественно и только по факту этого контекста.`;
 }
 
-function buildWebResultPrompt(transcript, panelState, historySummary) {
-  return `WEB_CONTEXT_RESULT:
-Служебное событие: browser-controller уже успешно открыл сайт по запросу пользователя. Не говори, что ты не можешь открывать сайты.
-Исходный запрос пользователя: "${transcript}"
-Источник: ${panelState.title || 'Веб-страница'}
-URL: ${panelState.url || 'n/a'}
-Недавняя веб-история этой сессии:
-${historySummary}
-Содержимое страницы:
-${panelState.readerText || 'Содержимое страницы не удалось извлечь.'}
+function buildWebActivePrompt(question, contextResult, historySummary) {
+  const pageAnswer = truncatePromptValue(contextResult?.answer || 'Не удалось получить ответ.', 420);
+  const pageSnippet = truncatePromptValue(contextResult?.contextSnippet || contextResult?.readerText || 'Текст страницы недоступен.', 700);
+  return `WEB_CONTEXT_ACTIVE:
+Сайт уже открыт и вопрос относится к текущей странице.
+Вопрос: "${truncatePromptValue(question, 220)}"
+Источник: ${truncatePromptValue(contextResult?.title || 'Веб-страница', 140)}
+URL: ${truncatePromptValue(contextResult?.url || 'n/a', 180)}
+Краткий ответ по странице: ${pageAnswer}
+Контекст страницы: ${pageSnippet}
+Недавняя веб-история:
+${truncatePromptValue(historySummary, 420)}
 
-Ответь коротко и только на основе этого контекста.`;
+Ответь коротко и только по этому контексту.`;
 }
 
 function buildWebFailurePrompt(transcript, errorMessage, historySummary) {
   return `WEB_CONTEXT_ERROR:
-Служебное событие: browser-controller не смог открыть сайт по запросу пользователя. Не говори, что ты вообще не умеешь открывать сайты.
-Исходный запрос пользователя: "${transcript}"
-Причина: ${errorMessage || 'неизвестная ошибка'}
-Недавняя веб-история этой сессии:
-${historySummary}
+Сайт по этому запросу сейчас не подтверждён.
+Запрос: "${truncatePromptValue(transcript, 220)}"
+Причина: ${truncatePromptValue(errorMessage || 'неизвестная ошибка', 220)}
+Недавняя веб-история:
+${truncatePromptValue(historySummary, 420)}
 
-Коротко объясни, что именно в этот раз сайт не открылся, и попроси назвать сайт точнее без упоминания доменов .by или .ru.`;
+Коротко объясни, что именно не удалось, и попроси уточнить сайт без перечисления доменных зон.`;
+}
+
+function buildWebActionPrompt(transcript, result, historySummary) {
+  const pageSnippet = truncatePromptValue(result?.contextSnippet || result?.readerText || 'Текст страницы недоступен.', 700);
+  return `WEB_ACTION_RESULT:
+Действие на уже открытой странице подтверждённо выполнено.
+Команда: "${truncatePromptValue(transcript, 220)}"
+Источник: ${truncatePromptValue(result?.title || 'Веб-страница', 140)}
+URL: ${truncatePromptValue(result?.url || 'n/a', 180)}
+Контекст страницы после действия: ${pageSnippet}
+Недавняя веб-история:
+${truncatePromptValue(historySummary, 420)}
+
+Ответь коротко и только по факту результата.`;
+}
+
+function buildConversationSessionId() {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+
+  return `conversation-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function buildSessionBootstrapText(restorePayload, knowledgeContext) {
+  const parts = [];
+  const restore = restorePayload?.restore || null;
+
+  if (restore?.summary) {
+    parts.push(`Память разговора:\n${restore.summary}`);
+  }
+
+  if (Array.isArray(restore?.recentTurns) && restore.recentTurns.length) {
+    const recentTurns = restore.recentTurns
+      .slice(-6)
+      .map((turn) => `${turn.role === 'assistant' ? 'Ассистент' : 'Пользователь'}: ${truncatePromptValue(turn.text || '', 220)}`)
+      .join('\n');
+    parts.push(`Последние реплики:\n${recentTurns}`);
+  }
+
+  if (restore?.browserContext?.url) {
+    parts.push(`Текущий открытый сайт:\n${restore.browserContext.title || restore.browserContext.url}\n${restore.browserContext.url}`);
+  }
+
+  if (Array.isArray(restore?.knowledgeHits) && restore.knowledgeHits.length) {
+    const recentKnowledge = restore.knowledgeHits
+      .slice(0, 4)
+      .map((hit, index) => `${index + 1}. ${truncatePromptValue(hit.title || hit.canonicalUrl || 'Источник', 160)}${hit.canonicalUrl ? ` (${truncatePromptValue(hit.canonicalUrl, 160)})` : ''}\nФрагмент: ${truncatePromptValue(hit.text || '', 280)}`)
+      .join('\n\n');
+    parts.push(`Последние подтвержденные знания из этой сессии:\n${recentKnowledge}`);
+  }
+
+  if (knowledgeContext) {
+    parts.push(`Утвержденная база знаний:\n${knowledgeContext}`);
+  }
+
+  return parts.join('\n\n');
+}
+
+function buildRuntimeTurnPrompt(
+  question,
+  {
+    knowledgeHits = [],
+    activePageContext = null,
+    prayerReadMode = 'knowledge-only',
+  } = {},
+) {
+  const normalizedQuestion = truncatePromptValue(question, 320);
+  const hits = Array.isArray(knowledgeHits) ? knowledgeHits.slice(0, 3) : [];
+  const prayerMode = String(prayerReadMode || 'knowledge-only').trim().toLowerCase();
+  const prayerRequested = isPrayerRequest(normalizedQuestion);
+  const prayerReading = prayerRequested && prayerMode === 'knowledge-only'
+    ? pickPrayerReadingHit(hits, normalizedQuestion)
+    : null;
+  const prayerReadingHit = prayerReading?.hit || null;
+  const prayerReadingExcerpt = prayerReading?.excerpt || '';
+  const orderedHits = prayerReadingHit
+    ? [prayerReadingHit, ...hits.filter((hit) => hit !== prayerReadingHit)]
+    : hits;
+  const pageTitle = truncatePromptValue(activePageContext?.title || activePageContext?.url || 'Открытый сайт', 160);
+  const pageUrl = activePageContext?.url ? truncatePromptValue(activePageContext.url, 160) : '';
+  const pageContextSnippet = truncatePromptValue(
+    activePageContext?.contextSnippet || activePageContext?.readerText || '',
+    320,
+  );
+  const pageBlock = pageContextSnippet
+    ? `Контекст текущего открытого сайта:
+${pageTitle}${pageUrl ? ` (${pageUrl})` : ''}
+Фрагмент страницы: ${pageContextSnippet}`
+    : 'Контекст текущего открытого сайта сейчас не добавлен.';
+  const prayerRuleBlock = prayerMode === 'knowledge-only'
+    ? `Спец-режим молитв:
+1. Если пользователь просит прочитать молитву, используй только подтвержденные фрагменты из утвержденной базы знаний или открытой страницы.
+2. Если подтвержденного текста нет, честно скажи, что для точного чтения нужен источник, и предложи открыть страницу с текстом.`
+    : prayerMode === 'hybrid'
+      ? `Спец-режим молитв:
+1. Сначала опирайся на подтвержденные фрагменты из утвержденной базы знаний или открытой страницы.
+2. Если подтвержденного текста недостаточно, предупреждай об этом явно.`
+      : '';
+
+  if (!hits.length) {
+    return `RUNTIME_USER_TURN:
+Вопрос пользователя: "${normalizedQuestion}"
+${pageBlock}
+
+Утверждённых знаний по этому вопросу сейчас нет.
+
+Правила ответа:
+1. Если текущая открытая страница явно помогает, используй её.
+2. Если подтверждённых данных не хватает, скажи это прямо.
+3. Не обещай действие браузера без служебного подтверждения.
+4. ${prayerRequested && prayerMode === 'knowledge-only'
+    ? 'На запрос о молитве не выдумывай текст: коротко попроси источник или предложи открыть страницу с молитвой.'
+    : 'Ответь коротко, естественно и по делу.'}
+${prayerRuleBlock ? `\n\n${prayerRuleBlock}` : ''}`;
+  }
+
+  const knowledgeBlock = orderedHits
+    .map((hit, index) => `${index + 1}. ${truncatePromptValue(hit.title || hit.canonicalUrl || 'Источник', 140)}${hit.canonicalUrl ? ` (${truncatePromptValue(hit.canonicalUrl, 140)})` : ''}\nФрагмент: ${truncatePromptValue(hit.confirmedExcerpt || hit.text || '', 260)}`)
+    .join('\n\n');
+  const prayerReadingBlock = prayerReadingExcerpt
+    ? `Подтвержденный фрагмент для чтения молитвы:
+${truncatePromptValue(prayerReadingExcerpt, 900)}`
+    : '';
+
+  return `RUNTIME_USER_TURN:
+Вопрос пользователя: "${normalizedQuestion}"
+${pageBlock}
+
+Утвержденные знания по этому вопросу:
+${knowledgeBlock}
+${prayerReadingBlock ? `\n\n${prayerReadingBlock}` : ''}
+
+Правила ответа:
+1. Сначала используй контекст открытого сайта, если он явно подходит.
+2. Затем используй только утверждённые знания ниже.
+3. Не придумывай новые факты.
+4. Не обещай действие браузера без служебного подтверждения.
+5. ${prayerRequested && prayerMode === 'knowledge-only'
+    ? (
+      prayerReadingHit
+        ? 'В подтвержденных знаниях уже есть подходящий фрагмент молитвы: прочитай именно этот фрагмент полностью, спокойно, без отказа и без добавления текста от себя.'
+        : 'Если это чтение молитвы, используй только приведенные подтвержденные фрагменты без добавлений от себя.'
+    )
+    : 'Ответь кратко, естественно и по делу.'}
+${prayerRuleBlock ? `\n\n${prayerRuleBlock}` : ''}`;
+}
+
+function buildGreetingAckPrompt(greetingText) {
+  return `RUNTIME_GREETING_ACK:
+Ассистент уже поздоровался в этой сессии.
+Пользователь в ответ просто поздоровался: "${truncatePromptValue(greetingText, 120)}"
+
+Не здоровайся заново, не представляйся и не повторяй приветствие.
+Ответь одной короткой естественной фразой и сразу перейди к помощи, например в стиле "Чем могу помочь?"`;
+}
+
+function parseBrowserActionRequest(transcript) {
+  const normalized = normalizeSpeechText(transcript).toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+
+  if (isMainPagePhrase(normalized) && hasExplicitMainPageSiteTarget(normalized)) {
+    return null;
+  }
+
+  if (
+    /(перейди|перейти|открой|открыть|вернись|вернуться|иди|зайди|зайти|переход|навигац)/i.test(normalized)
+    && isMainPagePhrase(normalized)
+  ) {
+    return { type: 'home' };
+  }
+
+  if (isMainPagePhrase(normalized)) {
+    return { type: 'home' };
+  }
+
+  if (/(^|\s)(назад|вернись назад|вернуться назад)(?=\s|$)/i.test(normalized)) {
+    return { type: 'back' };
+  }
+
+  if (/(^|\s)(вперед|впер[её]д|далее)(?=\s|$)/i.test(normalized)) {
+    return { type: 'forward' };
+  }
+
+  if (/(^|\s)(обнови|перезагрузи|обновить страницу)(?=\s|$)/i.test(normalized)) {
+    return { type: 'reload' };
+  }
+
+  if (/(прокрути|листни|пролистай|скролл)/i.test(normalized)) {
+    return { type: 'wheel', deltaY: /(вверх|наверх)/i.test(normalized) ? -960 : 960 };
+  }
+
+  const clickMatch = normalized.match(/(?:нажми|кликни|перейди в раздел|открой раздел)\s+(.+)$/iu);
+  if (clickMatch?.[1]) {
+    const label = normalizeSpeechText(clickMatch[1]).replace(/[.?!]+$/g, '');
+    if (label) {
+      return { type: 'click-label', label };
+    }
+  }
+
+  return null;
+}
+
+function parseImplicitBrowserActionRequest(transcript) {
+  const normalized = normalizeSpeechText(transcript).toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+
+  if (isMainPagePhrase(normalized)) {
+    return { type: 'home' };
+  }
+  if (/(^|\s)(назад|вернись назад|вернуться назад)(?=\s|$)/i.test(normalized)) {
+    return { type: 'back' };
+  }
+  if (/(^|\s)(вперед|впер[её]д|далее)(?=\s|$)/i.test(normalized)) {
+    return { type: 'forward' };
+  }
+  if (/(^|\s)(обнови|перезагрузи|обновить страницу|перезагрузка)(?=\s|$)/i.test(normalized)) {
+    return { type: 'reload' };
+  }
+
+  return null;
+}
+
+function isBrowserActionFollowupRequest(transcript) {
+  return Boolean(parseBrowserActionRequest(transcript));
+}
+
+function isTransientIntentError(error) {
+  const message = String(error?.message || '').toLowerCase();
+  if (!message) {
+    return false;
+  }
+  return message.includes('таймаут')
+    || message.includes('timeout')
+    || message.includes('econnreset')
+    || message.includes('503')
+    || message.includes('network');
+}
+
+function classifyIntentErrorReason(error) {
+  if (isTransientIntentError(error)) {
+    return 'resolve_timeout';
+  }
+  return 'navigation_failed';
+}
+
+function classifyBrowserOpenErrorReason(error) {
+  const explicitCode = String(error?.code || '').trim();
+  if (explicitCode) {
+    return explicitCode;
+  }
+
+  const message = String(error?.message || '').toLowerCase();
+  if (message.includes('таймаут') || message.includes('timeout')) {
+    return 'network_timeout';
+  }
+  if (message.includes('запрещ') || message.includes('blocked') || message.includes('домен')) {
+    return 'navigation_blocked';
+  }
+  return 'navigation_failed';
 }
 
 async function jsonRequest(url, options = {}, timeoutMs = 15000) {
   const controller = new AbortController();
+  const externalSignal = options?.signal || null;
   const timeoutId = setTimeout(() => {
     controller.abort();
   }, timeoutMs);
 
+  const abortFromExternal = () => controller.abort();
+  externalSignal?.addEventListener?.('abort', abortFromExternal, { once: true });
+
   try {
+    const { signal: _ignoredSignal, ...restOptions } = options;
     const response = await fetch(url, {
-      ...options,
+      ...restOptions,
       signal: controller.signal,
     });
-    const payload = await response.json().catch(() => ({}));
+    const rawPayload = await response.text().catch(() => '');
+    let payload = {};
+    if (rawPayload) {
+      try {
+        payload = JSON.parse(rawPayload);
+      } catch {
+        const contentType = String(response.headers.get('content-type') || '').toLowerCase();
+        const requestError = new Error(
+          contentType.includes('text/html')
+            ? 'Сервер вернул HTML вместо данных API. Проверьте адрес и прокси.'
+            : 'Сервер вернул неверный формат ответа.',
+        );
+        requestError.code = 'invalid_response_format';
+        throw requestError;
+      }
+    }
     if (!response.ok) {
-      throw new Error(payload.error || 'Запрос не выполнен');
+      const requestError = new Error(payload.error || `Запрос не выполнен (HTTP ${response.status})`);
+      if (payload?.errorReason) {
+        requestError.code = String(payload.errorReason);
+      }
+      if (payload?.details && typeof payload.details === 'object') {
+        requestError.details = payload.details;
+      }
+      throw requestError;
     }
     return payload;
   } catch (error) {
@@ -382,7 +1100,21 @@ async function jsonRequest(url, options = {}, timeoutMs = 15000) {
     throw error;
   } finally {
     clearTimeout(timeoutId);
+    externalSignal?.removeEventListener?.('abort', abortFromExternal);
   }
+}
+
+function waitForNextPaint() {
+  return new Promise((resolve) => {
+    if (typeof window === 'undefined' || typeof window.requestAnimationFrame !== 'function') {
+      setTimeout(resolve, 32);
+      return;
+    }
+
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => resolve());
+    });
+  });
 }
 
 function App() {
@@ -391,9 +1123,16 @@ function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsDraft, setSettingsDraft] = useState(null);
   const [browserPanel, setBrowserPanel] = useState(DEFAULT_PANEL_STATE);
+  const [browserFlowState, setBrowserFlowState] = useState('idle');
+  const [activeBrowserSessionId, setActiveBrowserSessionId] = useState('');
+  const [conversationSessionId, setConversationSessionId] = useState('');
+  const [sessionBootstrapText, setSessionBootstrapText] = useState('');
+  const [sessionShouldSendGreeting, setSessionShouldSendGreeting] = useState(true);
   const [liveInputTranscript, setLiveInputTranscript] = useState('');
   const [saveError, setSaveError] = useState(null);
   const [appliedSessionSignature, setAppliedSessionSignature] = useState(null);
+  const [reconnectAttempt, setReconnectAttempt] = useState(0);
+  const [isFullscreen, setIsFullscreen] = useState(false);
   const {
     config,
     loading,
@@ -402,26 +1141,114 @@ function App() {
     persistConfig,
   } = useAppConfig();
   const browserRequestIdRef = useRef(0);
+  const browserFlowRequestIdRef = useRef(0);
+  const browserIntentAbortRef = useRef(null);
+  const browserFlowStateRef = useRef('idle');
+  const activeBrowserSessionIdRef = useRef('');
+  const conversationSessionIdRef = useRef('');
   const handledTranscriptsRef = useRef([]);
-  const liveTranscriptTimerRef = useRef(null);
   const sessionWebHistoryRef = useRef([]);
-  const browserPanelSnapshotRef = useRef(DEFAULT_PANEL_STATE);
-  const earlyBrowserFeedbackKeyRef = useRef('');
   const lastBrowserCommandRef = useRef({ key: '', transcript: '', timestamp: 0 });
   const browserSpeechGuardUntilRef = useRef(0);
   const browserIntentInFlightRef = useRef(false);
   const inFlightBrowserKeyRef = useRef('');
+  const pendingReconnectSignatureRef = useRef(null);
+  const reconnectTimerRef = useRef(null);
+  const goAwayReconnectTimerRef = useRef(null);
+  const reconnectAttemptRef = useRef(0);
+  const reloadWatchdogTimerRef = useRef(null);
+  const manualStopRef = useRef(false);
+  const avatarQuickTapTimestampsRef = useRef([]);
+  const browserTraceCounterRef = useRef(0);
+  const browserViewPollTimerRef = useRef(null);
+  const lastLiveFinalRef = useRef({ key: '', timestamp: 0 });
+  const activeDialogRequestRef = useRef(0);
+  const recentTurnsForIntentRef = useRef([]);
+  const normalTurnInFlightRef = useRef(false);
+  const pendingOrchestratedTurnRef = useRef(null);
+  const assistantTurnCountRef = useRef(0);
+  const sendTextTurnRef = useRef(null);
+  const cancelAssistantOutputRef = useRef(null);
+  const assistantPromptQueueRef = useRef([]);
+  const assistantPromptInFlightRef = useRef(false);
+  const assistantInFlightRequestIdRef = useRef(0);
+  const assistantPromptTimerRef = useRef(null);
+  const assistantPromptSeqRef = useRef(0);
+  const recordConversationActionRef = useRef(null);
+  const handleBrowserTranscriptRef = useRef(null);
+  const handleOrchestratedTurnRef = useRef(null);
+  const bargeInCandidateRef = useRef({ startedAt: 0, textKey: '' });
+  const lastBargeInAtRef = useRef(0);
+  const assistantTurnStartedAtRef = useRef(0);
+  const preferServerSttRef = useRef(false);
+  const lastAssistantTurnRef = useRef({ text: '', timestamp: 0 });
+  const dialogRequestStatesRef = useRef(new Map());
 
   const selectedCharacter = config?.characters?.find((character) => character.id === config.activeCharacterId) || config?.characters?.[0] || null;
-  const voiceOptions = (config?.supportedVoiceNames?.length ? config.supportedVoiceNames : ['Aoede', 'Kore', 'Puck'])
-    .map((voiceName) => ({ value: voiceName, label: voiceName }));
+  const safeSpeechFlowEnabled = config?.safetySwitches?.safeSpeechFlowEnabled !== false;
+  const speechStabilityProfile = normalizeSpeechStabilityProfile(config?.speechStabilityProfile);
+  const speechStabilityConfig = resolveSpeechStabilityConfig(speechStabilityProfile, safeSpeechFlowEnabled);
+  const prayerReadMode = String(config?.prayerReadMode || 'knowledge-only').trim().toLowerCase();
+  const voiceOptions = Array.isArray(config?.supportedVoices) && config.supportedVoices.length > 0
+    ? config.supportedVoices.map((voice) => ({
+      value: voice.name,
+      label: `${voice.name} (${voice.gender === 'male' ? 'мужской' : 'женский'})`,
+    }))
+    : (config?.supportedVoiceNames?.length ? config.supportedVoiceNames : ['Aoede', 'Kore', 'Puck'])
+      .map((voiceName) => ({ value: voiceName, label: voiceName }));
   const uiCharacter = settingsOpen && settingsDraft && selectedCharacter && settingsDraft.id === selectedCharacter.id
     ? { ...selectedCharacter, backgroundPreset: settingsDraft.backgroundPreset, displayName: settingsDraft.displayName }
     : selectedCharacter;
   const activeBackground = BACKGROUND_PRESETS[uiCharacter?.backgroundPreset] || BACKGROUND_PRESETS.aurora;
   const avatarModelUrl = uiCharacter?.avatarModelUrl || DEFAULT_AVATAR_MODEL_URL;
   const avatarInstanceId = uiCharacter?.avatarInstanceId || `avatar-${uiCharacter?.id || 'default'}`;
-  const avatarRenderKey = [avatarInstanceId, avatarModelUrl, uiCharacter?.backgroundPreset || 'aurora'].join('|');
+  const avatarFrame = uiCharacter?.id === BATYUSHKA_CHARACTER_ID
+    ? {
+      y: -1.2,
+      scale: 0.7,
+      camera: { position: [0, 0, 0.5], fov: 43 },
+      lights: { ambient: 1.22, directional: 1.02 },
+      idleMotion: true,
+      idleMotionProfile: {
+        yawAmplitude: 0.028,
+        yawSpeed: 0.36,
+        pitchAmplitude: 0.016,
+        pitchSpeed: 0.24,
+        bobAmplitude: 0.011,
+        bobSpeed: 0.38,
+      },
+    }
+    : {
+      y: -0.75,
+      scale: 1.3,
+      camera: { position: [0, 0, 0.64], fov: 45 },
+      lights: { ambient: 1.02, directional: 0.78 },
+      idleMotion: true,
+      idleMotionProfile: {
+        yawAmplitude: 0.03,
+        yawSpeed: 0.5,
+        pitchAmplitude: 0.02,
+        pitchSpeed: 0.3,
+      },
+    };
+  const avatarRenderKey = [
+    avatarInstanceId,
+    avatarModelUrl,
+    uiCharacter?.backgroundPreset || 'aurora',
+    avatarFrame.y,
+    avatarFrame.scale,
+    avatarFrame.camera.position[2],
+    avatarFrame.camera.fov,
+    avatarFrame.lights.ambient,
+    avatarFrame.lights.directional,
+    avatarFrame.idleMotion,
+    avatarFrame.idleMotionProfile?.yawAmplitude,
+    avatarFrame.idleMotionProfile?.yawSpeed,
+    avatarFrame.idleMotionProfile?.pitchAmplitude,
+    avatarFrame.idleMotionProfile?.pitchSpeed,
+    avatarFrame.idleMotionProfile?.bobAmplitude,
+    avatarFrame.idleMotionProfile?.bobSpeed,
+  ].join('|');
   const themeMode = config?.themeMode === 'dark' ? 'dark' : 'light';
   const runtimeConfig = selectedCharacter
     ? {
@@ -429,12 +1256,15 @@ function App() {
       voiceName: selectedCharacter.voiceName,
       systemPrompt: selectedCharacter.systemPrompt,
       greetingText: selectedCharacter.greetingText,
+      sessionContextText: sessionBootstrapText,
+      shouldSendGreeting: sessionShouldSendGreeting,
+      captureUserAudio: true,
+      characterId: selectedCharacter.id,
+      speechStabilityProfile,
+      prayerReadMode,
+      safeSpeechFlowEnabled,
     }
     : undefined;
-
-  const handleLiveInputTranscription = React.useCallback((transcript) => {
-    setLiveInputTranscript(String(transcript || '').trim());
-  }, []);
 
   const appendSessionWebHistory = React.useCallback((entry) => {
     const normalizedEntry = {
@@ -469,66 +1299,1258 @@ function App() {
     [],
   );
 
+  const clearAssistantPromptTimer = React.useCallback(() => {
+    if (assistantPromptTimerRef.current) {
+      clearTimeout(assistantPromptTimerRef.current);
+      assistantPromptTimerRef.current = null;
+    }
+  }, []);
+
   const resetSessionRuntimeState = React.useCallback(() => {
     sessionWebHistoryRef.current = [];
     handledTranscriptsRef.current = [];
     browserRequestIdRef.current = 0;
-    browserPanelSnapshotRef.current = DEFAULT_PANEL_STATE;
-    earlyBrowserFeedbackKeyRef.current = '';
+    browserFlowRequestIdRef.current = 0;
+    browserIntentAbortRef.current?.abort?.();
+    browserIntentAbortRef.current = null;
     lastBrowserCommandRef.current = { key: '', transcript: '', timestamp: 0 };
     browserSpeechGuardUntilRef.current = 0;
     browserIntentInFlightRef.current = false;
     inFlightBrowserKeyRef.current = '';
+    normalTurnInFlightRef.current = false;
+    pendingOrchestratedTurnRef.current = null;
+    activeDialogRequestRef.current = 0;
+    lastLiveFinalRef.current = { key: '', timestamp: 0 };
+    lastAssistantTurnRef.current = { text: '', timestamp: 0 };
+    assistantTurnCountRef.current = 0;
+    assistantPromptQueueRef.current = [];
+    assistantPromptInFlightRef.current = false;
+    assistantInFlightRequestIdRef.current = 0;
+    recentTurnsForIntentRef.current = [];
+    dialogRequestStatesRef.current = new Map();
+    bargeInCandidateRef.current = { startedAt: 0, textKey: '' };
+    lastBargeInAtRef.current = 0;
+    clearAssistantPromptTimer();
+    browserFlowStateRef.current = 'idle';
+    setBrowserFlowState('idle');
+    activeBrowserSessionIdRef.current = '';
+    setActiveBrowserSessionId('');
+    setBrowserPanel(DEFAULT_PANEL_STATE);
+    setSessionBootstrapText('');
+    setSessionShouldSendGreeting(true);
 
-    if (liveTranscriptTimerRef.current) {
-      clearTimeout(liveTranscriptTimerRef.current);
-      liveTranscriptTimerRef.current = null;
+    if (browserViewPollTimerRef.current) {
+      clearInterval(browserViewPollTimerRef.current);
+      browserViewPollTimerRef.current = null;
     }
+  }, [clearAssistantPromptTimer]);
+
+  const sendBrowserClientEvent = React.useCallback((event, details = {}) => {
+    void fetch('/api/browser/client-event', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ event, details }),
+    }).catch(() => {});
   }, []);
 
-  const showEarlyBrowserFeedback = React.useCallback((transcript) => {
-    const normalized = String(transcript || '').trim();
-    if (!isLikelyBrowserIntent(normalized)) {
+  const recordConversationAction = React.useCallback((event, details = {}) => {
+    const sessionId = conversationSessionIdRef.current;
+    if (!sessionId) {
       return;
     }
 
-    const feedbackKey = normalizeTranscriptKey(normalized);
-    if (feedbackKey && feedbackKey === earlyBrowserFeedbackKeyRef.current) {
+    void fetch(`/api/conversation/session/${encodeURIComponent(sessionId)}/action`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        event,
+        details,
+        characterId: selectedCharacter?.id || '',
+      }),
+    }).catch(() => {});
+  }, [selectedCharacter?.id]);
+
+  useEffect(() => {
+    recordConversationActionRef.current = recordConversationAction;
+  }, [recordConversationAction]);
+
+  const markDialogRequestState = React.useCallback((requestId, state, details = {}) => {
+    const safeRequestId = Number(requestId);
+    if (!Number.isInteger(safeRequestId) || safeRequestId <= 0) {
       return;
     }
 
-    earlyBrowserFeedbackKeyRef.current = feedbackKey;
-    setBrowserPanel((current) => {
-      if (current.status !== 'loading') {
-        browserPanelSnapshotRef.current = current;
+    const nextState = {
+      ...(dialogRequestStatesRef.current.get(safeRequestId) || {}),
+      requestId: safeRequestId,
+      state,
+      updatedAt: Date.now(),
+      ...details,
+    };
+    dialogRequestStatesRef.current.set(safeRequestId, nextState);
+    recordConversationAction('runtime.request.state', {
+      requestId: safeRequestId,
+      state,
+      ...details,
+    });
+  }, [recordConversationAction]);
+
+  const finalizeDialogRequest = React.useCallback((requestId, outcome, details = {}) => {
+    const safeRequestId = Number(requestId);
+    if (!Number.isInteger(safeRequestId) || safeRequestId <= 0) {
+      return;
+    }
+
+    const existing = dialogRequestStatesRef.current.get(safeRequestId) || null;
+    if (existing?.finalized) {
+      return;
+    }
+
+    const nextState = {
+      ...(existing || {}),
+      requestId: safeRequestId,
+      finalized: true,
+      outcome,
+      finalizedAt: Date.now(),
+      ...details,
+    };
+    dialogRequestStatesRef.current.set(safeRequestId, nextState);
+    recordConversationAction('runtime.request.final', {
+      requestId: safeRequestId,
+      outcome,
+      ...details,
+    });
+  }, [recordConversationAction]);
+
+  const drainAssistantPromptQueue = React.useCallback(() => {
+    if (assistantPromptInFlightRef.current) {
+      return;
+    }
+
+    let nextPrompt = null;
+    while (assistantPromptQueueRef.current.length > 0) {
+      const candidate = assistantPromptQueueRef.current.shift();
+      if (!candidate) {
+        continue;
+      }
+      if (
+        Number.isInteger(candidate.requestId)
+        && candidate.requestId > 0
+        && candidate.requestId !== activeDialogRequestRef.current
+      ) {
+        recordConversationAction('assistant.queue.drop', {
+          reason: 'stale-request',
+          source: candidate.source || '',
+          requestId: candidate.requestId,
+          activeRequestId: activeDialogRequestRef.current,
+        });
+        continue;
+      }
+      nextPrompt = candidate;
+      break;
+    }
+
+    if (!nextPrompt) {
+      return;
+    }
+
+    const sent = sendTextTurnRef.current?.(nextPrompt.text, { interrupt: nextPrompt.interrupt });
+    if (!sent) {
+      recordConversationAction('assistant.queue.drop', {
+        reason: 'send-failed',
+        source: nextPrompt.source || '',
+        requestId: nextPrompt.requestId || 0,
+      });
+      return;
+    }
+
+    assistantPromptInFlightRef.current = true;
+    assistantInFlightRequestIdRef.current = nextPrompt.requestId || activeDialogRequestRef.current;
+    clearAssistantPromptTimer();
+    const handleQueueTurnTimeout = () => {
+      const assistantTurnStartedAt = assistantTurnStartedAtRef.current;
+      const assistantTurnAgeMs = assistantTurnStartedAt > 0 ? (Date.now() - assistantTurnStartedAt) : 0;
+      if (assistantTurnStartedAt > 0 && assistantTurnAgeMs < ASSISTANT_QUEUE_MAX_HARD_TIMEOUT_MS) {
+        assistantPromptTimerRef.current = setTimeout(handleQueueTurnTimeout, ASSISTANT_QUEUE_TURN_TIMEOUT_MS);
+        return;
       }
 
-      return {
-        ...DEFAULT_PANEL_STATE,
-        status: 'loading',
-        title: buildEarlyBrowserLoadingTitle(normalized),
-        sourceType: 'intent-pending',
-      };
+      assistantPromptInFlightRef.current = false;
+      assistantInFlightRequestIdRef.current = 0;
+      assistantPromptTimerRef.current = null;
+      recordConversationAction('assistant.queue.timeout-release', {
+        source: nextPrompt.source || '',
+        requestId: nextPrompt.requestId || 0,
+      });
+      drainAssistantPromptQueue();
+    };
+    assistantPromptTimerRef.current = setTimeout(handleQueueTurnTimeout, ASSISTANT_QUEUE_TURN_TIMEOUT_MS);
+
+    recordConversationAction('assistant.queue.sent', {
+      source: nextPrompt.source || '',
+      textLength: nextPrompt.text.length,
+      queueSize: assistantPromptQueueRef.current.length,
+      requestId: nextPrompt.requestId || 0,
     });
+  }, [clearAssistantPromptTimer, recordConversationAction]);
+
+  const enqueueAssistantPrompt = React.useCallback((text, {
+    interrupt = true,
+    priority = 'normal',
+    source = 'runtime',
+    dedupeKey = '',
+    requestId = activeDialogRequestRef.current,
+  } = {}) => {
+    const normalizedText = normalizeSpeechText(text);
+    if (!normalizedText) {
+      return false;
+    }
+
+    const normalizedDedupeKey = normalizeSpeechText(dedupeKey || '').toLowerCase();
+    if (normalizedDedupeKey) {
+      const duplicateInQueue = assistantPromptQueueRef.current.some(
+        (entry) => entry.dedupeKey === normalizedDedupeKey && entry.requestId === requestId,
+      );
+      if (duplicateInQueue) {
+        return false;
+      }
+    }
+
+    const nextEntry = {
+      id: `assistant-prompt-${Date.now().toString(36)}-${(assistantPromptSeqRef.current += 1).toString(36)}`,
+      text: normalizedText,
+      interrupt: Boolean(interrupt),
+      source,
+      dedupeKey: normalizedDedupeKey,
+      requestId: Number.isInteger(requestId) ? requestId : activeDialogRequestRef.current,
+    };
+
+    if (priority === 'high') {
+      assistantPromptQueueRef.current.unshift(nextEntry);
+    } else {
+      assistantPromptQueueRef.current.push(nextEntry);
+    }
+
+    recordConversationAction('assistant.queue.enqueue', {
+      source,
+      textLength: normalizedText.length,
+      priority,
+      queueSize: assistantPromptQueueRef.current.length,
+      requestId: nextEntry.requestId || 0,
+    });
+
+    drainAssistantPromptQueue();
+    return true;
+  }, [drainAssistantPromptQueue, recordConversationAction]);
+
+  const releaseAssistantPromptLock = React.useCallback((reason = 'commit') => {
+    assistantPromptInFlightRef.current = false;
+    assistantInFlightRequestIdRef.current = 0;
+    clearAssistantPromptTimer();
+    recordConversationAction('assistant.queue.release', { reason });
+    drainAssistantPromptQueue();
+  }, [clearAssistantPromptTimer, drainAssistantPromptQueue, recordConversationAction]);
+
+  const clearAssistantPromptQueue = React.useCallback((reason = 'reset') => {
+    assistantPromptQueueRef.current = [];
+    assistantPromptInFlightRef.current = false;
+    assistantInFlightRequestIdRef.current = 0;
+    clearAssistantPromptTimer();
+    recordConversationAction('assistant.queue.clear', { reason });
+  }, [clearAssistantPromptTimer, recordConversationAction]);
+
+  const beginUserRequest = React.useCallback((source = 'stt-final') => {
+    const previousRequestId = activeDialogRequestRef.current;
+    if (previousRequestId > 0) {
+      finalizeDialogRequest(previousRequestId, 'superseded', { source });
+    }
+    const nextRequestId = activeDialogRequestRef.current + 1;
+    activeDialogRequestRef.current = nextRequestId;
+    pendingOrchestratedTurnRef.current = null;
+    clearAssistantPromptQueue(`new-user-request:${source}`);
+    cancelAssistantOutputRef.current?.();
+    recordConversationAction('runtime.request.activate', {
+      requestId: nextRequestId,
+      source,
+    });
+    markDialogRequestState(nextRequestId, 'active', { source });
+    return nextRequestId;
+  }, [clearAssistantPromptQueue, finalizeDialogRequest, markDialogRequestState, recordConversationAction]);
+
+  const triggerBargeIn = React.useCallback((reason = 'speech-overlap') => {
+    const now = Date.now();
+    if ((now - lastBargeInAtRef.current) < BARGE_IN_MIN_GAP_MS) {
+      return false;
+    }
+    lastBargeInAtRef.current = now;
+    clearAssistantPromptQueue(reason);
+    cancelAssistantOutputRef.current?.();
+    if (activeDialogRequestRef.current > 0) {
+      markDialogRequestState(activeDialogRequestRef.current, 'interrupted', { reason });
+    }
+    recordConversationActionRef.current?.('assistant.turn.bargein', {
+      conversationSessionId: conversationSessionIdRef.current || '',
+      reason,
+    });
+    return true;
+  }, [clearAssistantPromptQueue, markDialogRequestState]);
+
+  const recordConversationTurn = React.useCallback((role, text, source = 'live') => {
+    const sessionId = conversationSessionIdRef.current;
+    const normalizedText = normalizeSpeechText(text);
+    const normalizedRole = role === 'assistant' ? 'assistant' : 'user';
+    if (normalizedText) {
+      recentTurnsForIntentRef.current = [
+        ...recentTurnsForIntentRef.current,
+        {
+          role: normalizedRole,
+          text: truncatePromptValue(normalizedText, 260),
+          source: normalizeSpeechText(source || 'live') || 'live',
+        },
+      ].slice(-MAX_RECENT_INTENT_TURNS);
+    }
+    if (!sessionId || !normalizedText) {
+      return;
+    }
+
+    void fetch(`/api/conversation/session/${encodeURIComponent(sessionId)}/turn`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        role: normalizedRole,
+        text: normalizedText,
+        source,
+        characterId: selectedCharacter?.id || '',
+      }),
+    }).catch(() => {});
+  }, [selectedCharacter?.id]);
+
+  const updateConversationSessionState = React.useCallback((nextState = {}) => {
+    const sessionId = conversationSessionIdRef.current;
+    if (!sessionId) {
+      return;
+    }
+
+    void fetch(`/api/conversation/session/${encodeURIComponent(sessionId)}/state`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ...nextState,
+        characterId: selectedCharacter?.id || '',
+      }),
+    }).catch(() => {});
+  }, [selectedCharacter?.id]);
+
+  const handleLiveInputTranscription = React.useCallback((transcript) => {
+    const normalized = String(transcript || '').trim();
+    const now = Date.now();
+    setLiveInputTranscript(normalized);
+    if (!normalized) {
+      bargeInCandidateRef.current = { startedAt: 0, textKey: '' };
+      return;
+    }
+
+    const botVolume = audioPlayer?.getVolume?.() || 0;
+    if (botVolume <= speechStabilityConfig.botVolumeGuard) {
+      bargeInCandidateRef.current = { startedAt: 0, textKey: '' };
+      return;
+    }
+
+    if (STOP_SPEECH_PATTERN.test(normalized)) {
+      bargeInCandidateRef.current = { startedAt: 0, textKey: '' };
+      triggerBargeIn('bargein-stop-word');
+      return;
+    }
+
+    if ((now - assistantTurnStartedAtRef.current) < ASSISTANT_BARGE_IN_WARMUP_MS) {
+      return;
+    }
+
+    if (speechStabilityConfig.profile === 'legacy') {
+      triggerBargeIn('bargein-input');
+      return;
+    }
+
+    if (normalized.length < speechStabilityConfig.minTranscriptLength) {
+      return;
+    }
+
+    const textKey = normalizeTranscriptKey(normalized);
+    if (bargeInCandidateRef.current.textKey !== textKey) {
+      bargeInCandidateRef.current = { startedAt: now, textKey };
+      return;
+    }
+
+    if ((now - bargeInCandidateRef.current.startedAt) >= speechStabilityConfig.bargeInHoldMs) {
+      bargeInCandidateRef.current = { startedAt: 0, textKey: '' };
+      triggerBargeIn('bargein-input-hold');
+    }
+  }, [audioPlayer, speechStabilityConfig, triggerBargeIn]);
+
+  const bootstrapConversationContext = React.useCallback(async (sessionId, { shouldSendGreeting = false } = {}) => {
+    const restorePayload = await jsonRequest(
+      `/api/conversation/session/${encodeURIComponent(sessionId)}/restore?characterId=${encodeURIComponent(selectedCharacter?.id || '')}`,
+      { method: 'GET' },
+      10000,
+    );
+    const restoredCharacterId = String(restorePayload?.restore?.lastCharacterId || '').trim();
+    const characterMismatch = Boolean(restoredCharacterId && selectedCharacter?.id && restoredCharacterId !== selectedCharacter.id);
+    const effectiveRestorePayload = characterMismatch
+      ? { ...restorePayload, restore: null }
+      : restorePayload;
+    const nextBootstrapText = buildSessionBootstrapText(effectiveRestorePayload, restorePayload?.knowledgeContext || '');
+    setSessionBootstrapText(nextBootstrapText);
+    setSessionShouldSendGreeting(Boolean(shouldSendGreeting && !effectiveRestorePayload?.restore?.greetingSent));
+    assistantTurnCountRef.current = Array.isArray(effectiveRestorePayload?.restore?.recentTurns)
+      ? effectiveRestorePayload.restore.recentTurns.filter((turn) => turn?.role === 'assistant' && normalizeSpeechText(turn?.text || '')).length
+      : 0;
+    lastLiveFinalRef.current = {
+      key: normalizeTranscriptKey(effectiveRestorePayload?.restore?.lastFinalTranscriptHash || ''),
+      timestamp: 0,
+    };
+    const restoredBrowserSessionId = String(effectiveRestorePayload?.restore?.browserSessionId || '').trim();
+    if (restoredBrowserSessionId) {
+      setActiveBrowserSessionId(restoredBrowserSessionId);
+      activeBrowserSessionIdRef.current = restoredBrowserSessionId;
+      setBrowserPanel((current) => ({
+        ...current,
+        status: current.status === 'idle' ? 'ready' : current.status,
+        title: effectiveRestorePayload?.restore?.browserContext?.title || current.title,
+        url: effectiveRestorePayload?.restore?.browserContext?.url || current.url,
+      }));
+      void jsonRequest(
+        `/api/browser/session/${encodeURIComponent(restoredBrowserSessionId)}/view?refresh=1`,
+        { method: 'GET' },
+        BROWSER_ACTION_TIMEOUT_MS,
+      ).then((view) => {
+        setBrowserPanel((current) => ({
+          ...current,
+          status: 'ready',
+          title: view.title || current.title,
+          url: view.url || current.url,
+          screenshotUrl: view.imageUrl || current.screenshotUrl,
+          view: {
+            imageUrl: view.imageUrl || '',
+            width: view.width || 0,
+            height: view.height || 0,
+            revision: view.revision || 0,
+            actionableElements: Array.isArray(view.actionableElements) ? view.actionableElements : [],
+          },
+          revision: view.revision || current.revision || 0,
+          actionableElements: Array.isArray(view.actionableElements) ? view.actionableElements : current.actionableElements,
+        }));
+      }).catch((error) => {
+        if (/нет активного открытого сайта/i.test(String(error?.message || ''))) {
+          activeBrowserSessionIdRef.current = '';
+          setActiveBrowserSessionId('');
+          setBrowserFlowState('error');
+          browserFlowStateRef.current = 'error';
+          setBrowserPanel((current) => ({
+            ...current,
+            status: 'error',
+            error: 'Связь с открытым сайтом потеряна. Откройте сайт снова.',
+          }));
+        }
+      });
+    }
+    return nextBootstrapText;
+  }, [selectedCharacter?.id]);
+
+  const refreshBrowserView = React.useCallback(async (force = false) => {
+    const sessionId = activeBrowserSessionIdRef.current;
+    if (!sessionId) {
+      return null;
+    }
+
+    let view;
+    try {
+      view = await jsonRequest(
+        `/api/browser/session/${encodeURIComponent(sessionId)}/view?refresh=${force ? '1' : '0'}`,
+        { method: 'GET' },
+        BROWSER_ACTION_TIMEOUT_MS,
+      );
+    } catch (error) {
+      if (/нет активного открытого сайта/i.test(String(error?.message || ''))) {
+        activeBrowserSessionIdRef.current = '';
+        browserFlowStateRef.current = 'error';
+        setActiveBrowserSessionId('');
+        setBrowserFlowState('error');
+        setBrowserPanel((current) => ({
+          ...current,
+          status: 'error',
+          error: 'Связь с открытым сайтом потеряна. Откройте сайт снова.',
+        }));
+      }
+      throw error;
+    }
+
+    setBrowserPanel((current) => ({
+      ...current,
+      status: current.status === 'idle' ? 'ready' : current.status,
+      title: view.title || current.title,
+      url: view.url || current.url,
+      screenshotUrl: view.imageUrl || current.screenshotUrl,
+      view: {
+        imageUrl: view.imageUrl || '',
+        width: view.width || 0,
+        height: view.height || 0,
+        revision: view.revision || 0,
+        actionableElements: Array.isArray(view.actionableElements) ? view.actionableElements : [],
+      },
+      revision: view.revision || current.revision || 0,
+      actionableElements: Array.isArray(view.actionableElements) ? view.actionableElements : current.actionableElements,
+    }));
+
+    return view;
   }, []);
 
-  const restoreBrowserPanelSnapshot = React.useCallback(() => {
-    setBrowserPanel(browserPanelSnapshotRef.current);
-    earlyBrowserFeedbackKeyRef.current = '';
+  const setBrowserFlowPhase = React.useCallback((phase) => {
+    browserFlowStateRef.current = phase;
+    setBrowserFlowState(phase);
   }, []);
 
-  const { status, connect, disconnect, error, getUserVolume, sendTextTurn } = useGeminiLive(
+  const detectBrowserIntentWithRetry = React.useCallback(async ({
+    traceId,
+    transcript,
+    requestId,
+    dedupeKey,
+  }) => {
+    let lastError = null;
+    const maxAttempts = 1 + BROWSER_INTENT_RETRY_LIMIT;
+
+    for (let attemptIndex = 0; attemptIndex < maxAttempts; attemptIndex += 1) {
+      const attempt = attemptIndex + 1;
+      const attemptAbortController = new AbortController();
+      browserIntentAbortRef.current = attemptAbortController;
+      const abortTimerId = setTimeout(() => {
+        attemptAbortController.abort();
+      }, BROWSER_INTENT_PENDING_SLA_MS);
+
+      try {
+        const intent = await jsonRequest('/api/browser/intent', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            traceId,
+            transcript,
+            sessionHistory: getSessionHistoryPayload(),
+            activeCharacterId: selectedCharacter?.id || null,
+            conversationSessionId: conversationSessionIdRef.current || '',
+            recentTurns: recentTurnsForIntentRef.current.slice(-MAX_RECENT_INTENT_TURNS),
+          }),
+          signal: attemptAbortController.signal,
+        }, BROWSER_INTENT_TIMEOUT_MS);
+
+        sendBrowserClientEvent('browser.intent.attempt.success', {
+          requestId,
+          traceId,
+          attempt,
+          dedupeKey,
+          intentType: intent?.type || 'none',
+        });
+        return intent;
+      } catch (error) {
+        lastError = error;
+        const transientError = isTransientIntentError(error);
+        const canRetryTranscript = /\bhttps?:\/\/[^\s]+/i.test(transcript)
+          || /\b(?:[a-z0-9-]+\.)+(?:by|ru)\b/i.test(transcript)
+          || /\bточка\s*(?:by|ru)\b/i.test(transcript);
+        const shouldRetry = transientError && canRetryTranscript && attempt < maxAttempts;
+        sendBrowserClientEvent('browser.intent.attempt.error', {
+          requestId,
+          traceId,
+          attempt,
+          dedupeKey,
+          transient: transientError,
+          retryPlanned: shouldRetry,
+          error: error?.message || 'Не удалось определить сайт',
+        });
+
+        if (!shouldRetry) {
+          throw error;
+        }
+
+        setBrowserPanel((current) => ({
+          ...current,
+          status: 'loading',
+          title: 'Проверяю адрес еще раз...',
+          sourceType: 'intent-pending',
+        }));
+        await new Promise((resolve) => {
+          setTimeout(resolve, BROWSER_INTENT_RETRY_BACKOFF_MS);
+        });
+      } finally {
+        clearTimeout(abortTimerId);
+        if (browserIntentAbortRef.current === attemptAbortController) {
+          browserIntentAbortRef.current = null;
+        }
+      }
+    }
+
+    throw lastError || new Error('Не удалось определить сайт');
+  }, [getSessionHistoryPayload, selectedCharacter?.id, sendBrowserClientEvent]);
+
+  const requestActiveBrowserContext = React.useCallback(async (question, { requestId = 0 } = {}) => {
+    const sessionId = activeBrowserSessionIdRef.current;
+    if (!sessionId) {
+      throw new Error('Нет активного сайта для уточнения контекста');
+    }
+
+    return jsonRequest(`/api/browser/session/${encodeURIComponent(sessionId)}/query`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        question,
+        conversationSessionId: conversationSessionIdRef.current || '',
+        characterId: selectedCharacter?.id || '',
+        requestId: Number.isInteger(requestId) ? requestId : 0,
+      }),
+    }, BROWSER_CONTEXT_TIMEOUT_MS);
+  }, [selectedCharacter?.id]);
+
+  const queryKnowledgeForTurn = React.useCallback(async (question) => {
+    const normalizedQuestion = normalizeSpeechText(question);
+    if (!normalizedQuestion) {
+      return { hits: [] };
+    }
+
+    return jsonRequest('/api/knowledge/query', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        question: normalizedQuestion,
+        conversationSessionId: conversationSessionIdRef.current || '',
+        characterId: selectedCharacter?.id || '',
+      }),
+    }, 10000);
+  }, [selectedCharacter?.id]);
+
+  const getRuntimePageContextForTurn = React.useCallback(async (question) => {
+    if (!activeBrowserSessionIdRef.current || browserFlowStateRef.current !== 'ready' || browserIntentInFlightRef.current) {
+      return null;
+    }
+
+    try {
+      const contextResult = await requestActiveBrowserContext(question, {
+        requestId: activeDialogRequestRef.current,
+      });
+      return contextResult || null;
+    } catch {
+      return null;
+    }
+  }, [requestActiveBrowserContext]);
+
+  useEffect(() => {
+    browserFlowStateRef.current = browserFlowState;
+  }, [browserFlowState]);
+
+  useEffect(() => {
+    activeBrowserSessionIdRef.current = activeBrowserSessionId;
+  }, [activeBrowserSessionId]);
+
+  useEffect(() => {
+    conversationSessionIdRef.current = conversationSessionId;
+  }, [conversationSessionId]);
+
+  useEffect(() => {
+    if (browserViewPollTimerRef.current) {
+      clearInterval(browserViewPollTimerRef.current);
+      browserViewPollTimerRef.current = null;
+    }
+
+    if (!activeBrowserSessionId || browserFlowState !== 'ready') {
+      return undefined;
+    }
+
+    void refreshBrowserView(false).catch(() => {});
+    browserViewPollTimerRef.current = setInterval(() => {
+      void refreshBrowserView(false).catch(() => {});
+    }, BROWSER_VIEW_POLL_MS);
+
+    return () => {
+      if (browserViewPollTimerRef.current) {
+        clearInterval(browserViewPollTimerRef.current);
+        browserViewPollTimerRef.current = null;
+      }
+    };
+  }, [activeBrowserSessionId, browserFlowState, refreshBrowserView]);
+
+  const {
+    status,
+    connect,
+    disconnect,
+    error,
+    sendTextTurn,
+    cancelAssistantOutput,
+    clearSessionResumption,
+  } = useGeminiLive(
     audioPlayer,
     runtimeConfig,
-    { onInputTranscription: handleLiveInputTranscription },
+    {
+      onInputTranscription: (text) => {
+        if (preferServerSttRef.current) {
+          return;
+        }
+        handleLiveInputTranscription(text);
+      },
+      onInputTranscriptionCommit: ({ text }) => {
+        if (runtimeConfig?.captureUserAudio === false) {
+          return;
+        }
+        if (preferServerSttRef.current) {
+          return;
+        }
+        const normalized = normalizeSpeechText(text);
+        setLiveInputTranscript('');
+        if (!normalized) {
+          return;
+        }
+
+        const botVolume = audioPlayer?.getVolume?.() || 0;
+        if (isLikelyAssistantEchoFinal(normalized, lastAssistantTurnRef.current, botVolume, speechStabilityConfig)) {
+          recordConversationAction('stt.stream.echo-drop', {
+            conversationSessionId: conversationSessionIdRef.current || '',
+            source: 'gemini-input',
+            textLength: normalized.length,
+          });
+          return;
+        }
+
+        const transcriptKey = normalizeTranscriptKey(normalized);
+        const now = Date.now();
+        if (
+          transcriptKey
+          && lastLiveFinalRef.current.key === transcriptKey
+          && (now - lastLiveFinalRef.current.timestamp) < USER_FINAL_DEDUP_WINDOW_MS
+        ) {
+          return;
+        }
+
+        lastLiveFinalRef.current = { key: transcriptKey, timestamp: now };
+        if (botVolume > speechStabilityConfig.botVolumeGuard) {
+          triggerBargeIn('bargein-final-gemini-input');
+        }
+        const requestId = beginUserRequest('gemini-input-final');
+        updateConversationSessionState({
+          lastFinalTranscriptHash: transcriptKey,
+          activeSttSessionId: conversationSessionIdRef.current ? `gemini-live-input:${conversationSessionIdRef.current}` : '',
+        });
+        recordConversationAction('stt.stream.final', {
+          conversationSessionId: conversationSessionIdRef.current || '',
+          textLength: normalized.length,
+        });
+        recordConversationAction('user.turn.final', {
+          conversationSessionId: conversationSessionIdRef.current || '',
+          textLength: normalized.length,
+        });
+        recordConversationTurn('user', normalized, 'gemini-input-transcription');
+
+        const intentType = classifyTranscriptIntent(normalized);
+        const implicitBrowserAction = Boolean(activeBrowserSessionIdRef.current)
+          && Boolean(parseImplicitBrowserActionRequest(normalized));
+        if (intentType === 'browser_action' || intentType === 'page_query' || intentType === 'site_open' || implicitBrowserAction) {
+          handleBrowserTranscriptRef.current?.(normalized, { requestId });
+          return;
+        }
+
+        handleOrchestratedTurnRef.current?.(normalized, { requestId });
+      },
+      onAssistantTurnStart: () => {
+        assistantTurnStartedAtRef.current = Date.now();
+        assistantPromptInFlightRef.current = true;
+        recordConversationAction('assistant.turn.start', {
+          conversationSessionId: conversationSessionIdRef.current || '',
+        });
+      },
+      onAssistantTurnCommit: ({ text, textChunks = 0, audioChunks = 0, durationMs = 0 }) => {
+        const inFlightRequestId = assistantInFlightRequestIdRef.current;
+        assistantTurnStartedAtRef.current = 0;
+        releaseAssistantPromptLock('commit');
+        if (inFlightRequestId > 0 && inFlightRequestId !== activeDialogRequestRef.current) {
+          recordConversationAction('assistant.turn.drop', {
+            reason: 'stale-request',
+            requestId: inFlightRequestId,
+            activeRequestId: activeDialogRequestRef.current,
+            textLength: String(text || '').length,
+          });
+          return;
+        }
+        const normalizedAssistantText = normalizeSpeechText(text);
+        if (normalizedAssistantText) {
+          assistantTurnCountRef.current += 1;
+          lastAssistantTurnRef.current = {
+            text: normalizedAssistantText,
+            timestamp: Date.now(),
+          };
+          if (assistantTurnCountRef.current === 1 && sessionShouldSendGreeting) {
+            updateConversationSessionState({ greetingSent: true });
+            setSessionShouldSendGreeting(false);
+          }
+        }
+        recordConversationAction('assistant.turn.commit', {
+          conversationSessionId: conversationSessionIdRef.current || '',
+          textLength: String(text || '').length,
+          textChunks,
+          audioChunks,
+          durationMs,
+        });
+        finalizeDialogRequest(inFlightRequestId || activeDialogRequestRef.current, 'answered', {
+          textLength: normalizedAssistantText.length,
+        });
+        recordConversationTurn('assistant', text, 'gemini-live');
+      },
+      onAssistantTurnCancel: ({ text, interrupted = false }) => {
+        const inFlightRequestId = assistantInFlightRequestIdRef.current;
+        assistantTurnStartedAtRef.current = 0;
+        releaseAssistantPromptLock('cancel');
+        recordConversationAction('assistant.turn.cancel', {
+          conversationSessionId: conversationSessionIdRef.current || '',
+          textLength: String(text || '').length,
+          requestId: inFlightRequestId || 0,
+          interrupted,
+        });
+      },
+      onAssistantInterrupted: () => {
+        recordConversationAction('assistant.turn.interrupted', {
+          conversationSessionId: conversationSessionIdRef.current || '',
+        });
+      },
+      onSessionGoAway: (goAway) => {
+        const timeLeftRaw = goAway?.timeLeft ?? goAway?.time_left ?? '';
+        const timeLeftMs = parseTimeLeftMs(timeLeftRaw);
+        const nextSignature = currentSignature || appliedSessionSignature || null;
+        const reconnectDelayMs = timeLeftMs == null
+          ? GOAWAY_RECONNECT_FALLBACK_DELAY_MS
+          : Math.max(
+            GOAWAY_RECONNECT_MIN_DELAY_MS,
+            Math.min(GOAWAY_RECONNECT_FALLBACK_DELAY_MS, timeLeftMs - GOAWAY_RECONNECT_BUFFER_MS),
+          );
+        recordConversationAction('model.session.goaway', {
+          conversationSessionId: conversationSessionIdRef.current || '',
+          timeLeft: timeLeftRaw,
+          timeLeftMs: timeLeftMs ?? '',
+          reconnectDelayMs,
+        });
+        if (!initialized || manualStopRef.current || status !== 'connected' || !nextSignature) {
+          return;
+        }
+        if (pendingReconnectSignatureRef.current) {
+          return;
+        }
+        pendingReconnectSignatureRef.current = nextSignature;
+        setSessionShouldSendGreeting(false);
+        clearAssistantPromptQueue('session-goaway');
+        cancelAssistantOutputRef.current?.();
+        clearGoAwayReconnectTimer();
+        goAwayReconnectTimerRef.current = setTimeout(() => {
+          goAwayReconnectTimerRef.current = null;
+          if (manualStopRef.current) {
+            pendingReconnectSignatureRef.current = null;
+            return;
+          }
+          disconnect();
+        }, reconnectDelayMs);
+      },
+    },
   );
 
-  const currentSignature = buildSignature(selectedCharacter);
+  useEffect(() => {
+    sendTextTurnRef.current = sendTextTurn;
+    drainAssistantPromptQueue();
+  }, [drainAssistantPromptQueue, sendTextTurn]);
+
+  useEffect(() => {
+    cancelAssistantOutputRef.current = cancelAssistantOutput;
+  }, [cancelAssistantOutput]);
+
+  useEffect(() => {
+    if (status === 'connected') {
+      drainAssistantPromptQueue();
+      return;
+    }
+
+    if (status === 'disconnected' || status === 'error') {
+      clearAssistantPromptQueue('model-status-change');
+    }
+  }, [clearAssistantPromptQueue, drainAssistantPromptQueue, status]);
+
+  const {
+    status: sttStatus,
+    error: sttError,
+    disconnect: disconnectServerStt,
+    getUserVolume: getServerSttUserVolume,
+  } = useServerStt({
+    enabled: initialized && status === 'connected' && Boolean(conversationSessionId),
+    conversationSessionId,
+    language: 'ru-RU',
+    onSpeechStart: () => {
+      if (!speechStabilityConfig.immediateOnSpeechStart) {
+        return;
+      }
+      if ((audioPlayer?.getVolume?.() || 0) > speechStabilityConfig.botVolumeGuard) {
+        triggerBargeIn('bargein-stt');
+      }
+    },
+    onPartialTranscript: handleLiveInputTranscription,
+    onFinalTranscript: (transcript) => {
+      const normalized = normalizeSpeechText(transcript);
+      setLiveInputTranscript('');
+      if (!normalized || isAssistantBrowserNarration(normalized)) {
+        return;
+      }
+
+      const botVolume = audioPlayer?.getVolume?.() || 0;
+      if (isLikelyAssistantEchoFinal(normalized, lastAssistantTurnRef.current, botVolume, speechStabilityConfig)) {
+        recordConversationAction('stt.stream.echo-drop', {
+          conversationSessionId: conversationSessionIdRef.current || '',
+          source: 'server-stt',
+          textLength: normalized.length,
+        });
+        return;
+      }
+
+      const transcriptKey = normalizeTranscriptKey(normalized);
+      const now = Date.now();
+      if (
+        transcriptKey
+        && lastLiveFinalRef.current.key === transcriptKey
+        && (now - lastLiveFinalRef.current.timestamp) < USER_FINAL_DEDUP_WINDOW_MS
+      ) {
+        return;
+      }
+
+      lastLiveFinalRef.current = { key: transcriptKey, timestamp: now };
+      if (botVolume > speechStabilityConfig.botVolumeGuard) {
+        triggerBargeIn('bargein-final-server-stt');
+      }
+      const requestId = beginUserRequest('server-stt-final');
+      updateConversationSessionState({
+        lastFinalTranscriptHash: transcriptKey,
+        activeSttSessionId: conversationSessionIdRef.current ? `server-stt:${conversationSessionIdRef.current}` : '',
+      });
+      recordConversationAction('stt.stream.final', {
+        conversationSessionId: conversationSessionIdRef.current || '',
+        textLength: normalized.length,
+      });
+      recordConversationAction('user.turn.final', {
+        conversationSessionId: conversationSessionIdRef.current || '',
+        textLength: normalized.length,
+      });
+      recordConversationTurn('user', normalized, 'server-stt');
+
+      const intentType = classifyTranscriptIntent(normalized);
+      const implicitBrowserAction = Boolean(activeBrowserSessionIdRef.current)
+        && Boolean(parseImplicitBrowserActionRequest(normalized));
+      if (intentType === 'browser_action' || intentType === 'page_query' || intentType === 'site_open' || implicitBrowserAction) {
+        handleBrowserTranscriptRef.current?.(normalized, { requestId });
+        return;
+      }
+
+      handleOrchestratedTurnRef.current?.(normalized, { requestId });
+    },
+  });
+
+  useEffect(() => {
+    if (!conversationSessionIdRef.current) {
+      return;
+    }
+
+    if (sttStatus === 'connected') {
+      recordConversationAction('stt.stream.ready', {
+        conversationSessionId: conversationSessionIdRef.current,
+        sttSessionId: `server-stt:${conversationSessionIdRef.current}`,
+      });
+      return;
+    }
+
+    if (sttStatus === 'error' && sttError) {
+      recordConversationAction('stt.stream.error', {
+        conversationSessionId: conversationSessionIdRef.current,
+        error: sttError,
+      });
+    }
+  }, [recordConversationAction, sttError, sttStatus]);
+
+  useEffect(() => {
+    preferServerSttRef.current = sttStatus === 'connected';
+  }, [sttStatus]);
+
+  const handleOrchestratedUserTurn = React.useCallback(async (transcript, { requestId = 0 } = {}) => {
+    const normalized = normalizeSpeechText(transcript);
+    const effectiveRequestId = Number.isInteger(requestId) && requestId > 0
+      ? requestId
+      : activeDialogRequestRef.current;
+    if (!normalized || !conversationSessionIdRef.current) {
+      return;
+    }
+    if (effectiveRequestId !== activeDialogRequestRef.current) {
+      return;
+    }
+
+    if (normalTurnInFlightRef.current) {
+      pendingOrchestratedTurnRef.current = { text: normalized, requestId: effectiveRequestId };
+      return;
+    }
+
+    normalTurnInFlightRef.current = true;
+    markDialogRequestState(effectiveRequestId, 'runtime-turn-started', {
+      textLength: normalized.length,
+    });
+    recordConversationAction('runtime.turn.orchestrated.start', {
+      conversationSessionId: conversationSessionIdRef.current,
+      textLength: normalized.length,
+      hasActiveBrowserSession: Boolean(activeBrowserSessionIdRef.current),
+    });
+
+    try {
+      if (assistantTurnCountRef.current > 0 && isGreetingOnlyTranscript(normalized)) {
+        const sent = enqueueAssistantPrompt(buildGreetingAckPrompt(normalized), {
+          source: 'runtime.greeting-ack',
+          dedupeKey: `runtime-greeting-ack:${normalizeTranscriptKey(normalized)}`,
+          requestId: effectiveRequestId,
+        });
+        if (!sent) {
+          recordConversationAction('runtime.turn.orchestrated.fail', {
+            conversationSessionId: conversationSessionIdRef.current,
+            error: 'live-session-unavailable',
+            reason: 'greeting-ack',
+          });
+        }
+        return;
+      }
+
+      const [knowledgeResult, activePageContext] = await Promise.all([
+        queryKnowledgeForTurn(normalized).catch(() => ({ hits: [] })),
+        getRuntimePageContextForTurn(normalized),
+      ]);
+
+      const knowledgeHits = Array.isArray(knowledgeResult?.hits) ? knowledgeResult.hits : [];
+      recordConversationAction('runtime.turn.orchestrated.context', {
+        conversationSessionId: conversationSessionIdRef.current,
+        knowledgeHitCount: knowledgeHits.length,
+        hasActivePageContext: Boolean(activePageContext?.url),
+      });
+      markDialogRequestState(effectiveRequestId, 'runtime-turn-context-ready', {
+        knowledgeHitCount: knowledgeHits.length,
+        hasActivePageContext: Boolean(activePageContext?.url),
+      });
+      if (effectiveRequestId !== activeDialogRequestRef.current) {
+        return;
+      }
+
+      const sent = enqueueAssistantPrompt(buildRuntimeTurnPrompt(normalized, {
+        knowledgeHits,
+        activePageContext,
+        prayerReadMode,
+      }), {
+        source: 'runtime.turn',
+        dedupeKey: `runtime-turn:${normalizeTranscriptKey(normalized)}`,
+        requestId: effectiveRequestId,
+      });
+
+      if (!sent) {
+        recordConversationAction('runtime.turn.orchestrated.fail', {
+          conversationSessionId: conversationSessionIdRef.current,
+          error: 'live-session-unavailable',
+        });
+      }
+    } finally {
+      normalTurnInFlightRef.current = false;
+      if (pendingOrchestratedTurnRef.current?.text) {
+        const pendingTurn = pendingOrchestratedTurnRef.current;
+        pendingOrchestratedTurnRef.current = null;
+        if (
+          pendingTurn.requestId === activeDialogRequestRef.current
+          && normalizeTranscriptKey(pendingTurn.text) !== normalizeTranscriptKey(normalized)
+        ) {
+          handleOrchestratedTurnRef.current?.(pendingTurn.text, { requestId: pendingTurn.requestId });
+        }
+      }
+    }
+  }, [
+    enqueueAssistantPrompt,
+    getRuntimePageContextForTurn,
+    markDialogRequestState,
+    queryKnowledgeForTurn,
+    prayerReadMode,
+    recordConversationAction,
+  ]);
+
+  useEffect(() => {
+    handleOrchestratedTurnRef.current = (transcript, options = {}) => {
+      void handleOrchestratedUserTurn(transcript, options);
+    };
+  }, [handleOrchestratedUserTurn]);
+
+  const clearReconnectTimer = React.useCallback(() => {
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+  }, []);
+
+  const clearReloadWatchdog = React.useCallback(() => {
+    if (reloadWatchdogTimerRef.current) {
+      clearTimeout(reloadWatchdogTimerRef.current);
+      reloadWatchdogTimerRef.current = null;
+    }
+  }, []);
+
+  const clearGoAwayReconnectTimer = React.useCallback(() => {
+    if (goAwayReconnectTimerRef.current) {
+      clearTimeout(goAwayReconnectTimerRef.current);
+      goAwayReconnectTimerRef.current = null;
+    }
+  }, []);
+
+  const resetReconnectState = React.useCallback(() => {
+    reconnectAttemptRef.current = 0;
+    setReconnectAttempt(0);
+    clearReconnectTimer();
+    clearReloadWatchdog();
+    clearGoAwayReconnectTimer();
+  }, [clearGoAwayReconnectTimer, clearReconnectTimer, clearReloadWatchdog]);
+
+  const currentSignature = buildSignature(selectedCharacter, {
+    speechStabilityProfile,
+    prayerReadMode,
+    safeSpeechFlowEnabled,
+  });
   const sessionNeedsReconnect = status === 'connected' && Boolean(appliedSessionSignature) && appliedSessionSignature !== currentSignature;
+  const isRecoveringConnection = initialized && reconnectAttempt > 0 && status !== 'connected';
 
   useEffect(() => {
     document.documentElement.dataset.theme = themeMode;
   }, [themeMode]);
+
+  useEffect(() => {
+    if (typeof document === 'undefined') {
+      return undefined;
+    }
+
+    const syncFullscreenState = () => {
+      setIsFullscreen(Boolean(document.fullscreenElement));
+    };
+    syncFullscreenState();
+    document.addEventListener('fullscreenchange', syncFullscreenState);
+    return () => document.removeEventListener('fullscreenchange', syncFullscreenState);
+  }, []);
+
+  useEffect(() => {
+    if (status === 'connected') {
+      resetReconnectState();
+      return;
+    }
+
+    if (status === 'connecting') {
+      clearReconnectTimer();
+    }
+  }, [clearReconnectTimer, resetReconnectState, status]);
+
+  useEffect(() => {
+    if (status !== 'disconnected' || !pendingReconnectSignatureRef.current) {
+      return;
+    }
+
+    const nextSignature = pendingReconnectSignatureRef.current;
+    pendingReconnectSignatureRef.current = null;
+    setAppliedSessionSignature(nextSignature);
+    const sessionId = conversationSessionIdRef.current;
+    if (!sessionId) {
+      connect();
+      return;
+    }
+
+    void bootstrapConversationContext(sessionId, { shouldSendGreeting: false })
+      .then((bootstrapText) => {
+        connect({
+          voiceModelId: selectedCharacter?.voiceModelId,
+          voiceName: selectedCharacter?.voiceName,
+          systemPrompt: selectedCharacter?.systemPrompt,
+          greetingText: selectedCharacter?.greetingText,
+          sessionContextText: bootstrapText,
+          shouldSendGreeting: false,
+        });
+      })
+      .catch(() => {
+        connect();
+      });
+  }, [bootstrapConversationContext, connect, selectedCharacter?.greetingText, selectedCharacter?.systemPrompt, selectedCharacter?.voiceModelId, selectedCharacter?.voiceName, status]);
+
+  useEffect(() => {
+    if (!initialized || manualStopRef.current || pendingReconnectSignatureRef.current) {
+      return;
+    }
+
+    if (status !== 'error' && status !== 'disconnected') {
+      return;
+    }
+
+    if (reconnectTimerRef.current) {
+      return;
+    }
+
+    const nextAttempt = reconnectAttemptRef.current + 1;
+    reconnectAttemptRef.current = nextAttempt;
+    setReconnectAttempt(nextAttempt);
+
+    const delay = Math.min(
+      AUTO_RECONNECT_MAX_DELAY_MS,
+      AUTO_RECONNECT_BASE_DELAY_MS * (2 ** Math.min(nextAttempt - 1, 4)),
+    );
+    reconnectTimerRef.current = setTimeout(() => {
+      reconnectTimerRef.current = null;
+      const sessionId = conversationSessionIdRef.current;
+      if (!sessionId) {
+        connect();
+        return;
+      }
+
+      void bootstrapConversationContext(sessionId, { shouldSendGreeting: false })
+        .then((bootstrapText) => {
+          recordConversationAction('model.reconnect.restore', {
+            attempt: nextAttempt,
+            conversationSessionId: sessionId,
+          });
+          connect({
+            voiceModelId: selectedCharacter?.voiceModelId,
+            voiceName: selectedCharacter?.voiceName,
+            systemPrompt: selectedCharacter?.systemPrompt,
+            greetingText: selectedCharacter?.greetingText,
+            sessionContextText: bootstrapText,
+            shouldSendGreeting: false,
+          });
+        })
+        .catch(() => {
+          connect();
+        });
+    }, delay);
+
+    if (nextAttempt >= AUTO_RECONNECT_MAX_ATTEMPTS && !reloadWatchdogTimerRef.current) {
+      reloadWatchdogTimerRef.current = setTimeout(() => {
+        window.location.reload();
+      }, RELOAD_WATCHDOG_TIMEOUT_MS);
+    }
+  }, [bootstrapConversationContext, connect, initialized, recordConversationAction, selectedCharacter?.greetingText, selectedCharacter?.systemPrompt, selectedCharacter?.voiceModelId, selectedCharacter?.voiceName, status]);
+
+  useEffect(() => {
+    if (!initialized || manualStopRef.current || status !== 'connecting') {
+      return undefined;
+    }
+
+    const watchdogId = setTimeout(() => {
+      disconnect();
+    }, CONNECTING_WATCHDOG_TIMEOUT_MS);
+
+    return () => clearTimeout(watchdogId);
+  }, [disconnect, initialized, status]);
+
+  useEffect(() => () => {
+    clearReconnectTimer();
+    clearReloadWatchdog();
+    browserIntentAbortRef.current?.abort?.();
+    clearAssistantPromptQueue('component-unmount');
+  }, [clearAssistantPromptQueue, clearReconnectTimer, clearReloadWatchdog]);
 
   const commitConfig = async (nextConfig) => {
     try {
@@ -543,19 +2565,80 @@ function App() {
 
   const handleStart = async () => {
     await audioPlayer.initialize();
+    manualStopRef.current = false;
+    resetReconnectState();
+    clearSessionResumption();
     setInitialized(true);
     setLiveInputTranscript('');
     resetSessionRuntimeState();
+    const nextConversationSessionId = buildConversationSessionId();
+    await jsonRequest('/api/conversation/session', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        conversationSessionId: nextConversationSessionId,
+        characterId: selectedCharacter?.id || '',
+      }),
+    }, 10000);
+    setConversationSessionId(nextConversationSessionId);
+    conversationSessionIdRef.current = nextConversationSessionId;
+    recordConversationAction('stt.stream.start', {
+      conversationSessionId: nextConversationSessionId,
+      sttSessionId: `server-stt:${nextConversationSessionId}`,
+    });
+    updateConversationSessionState({
+      activeSttSessionId: `server-stt:${nextConversationSessionId}`,
+    });
+    const bootstrapText = await bootstrapConversationContext(nextConversationSessionId, { shouldSendGreeting: true });
     setAppliedSessionSignature(currentSignature);
-    connect();
+    connect({
+      voiceModelId: selectedCharacter?.voiceModelId,
+      voiceName: selectedCharacter?.voiceName,
+      systemPrompt: selectedCharacter?.systemPrompt,
+      greetingText: selectedCharacter?.greetingText,
+      sessionContextText: bootstrapText,
+      shouldSendGreeting: true,
+    });
   };
 
   const handleStop = () => {
+    const currentConversationSessionId = conversationSessionIdRef.current || '';
+    if (activeDialogRequestRef.current > 0) {
+      finalizeDialogRequest(activeDialogRequestRef.current, 'session-stopped');
+    }
+    recordConversationAction('session.stop.request', {
+      conversationSessionId: currentConversationSessionId,
+    });
+    recordConversationAction('stt.stream.closed', {
+      conversationSessionId: currentConversationSessionId,
+      sttSessionId: currentConversationSessionId ? `server-stt:${currentConversationSessionId}` : '',
+    });
+    manualStopRef.current = true;
+    clearAssistantPromptQueue('manual-stop');
+    cancelAssistantOutputRef.current?.();
+    browserIntentAbortRef.current?.abort?.();
+    resetReconnectState();
+    pendingReconnectSignatureRef.current = null;
+    clearSessionResumption();
+    updateConversationSessionState({
+      activeSttSessionId: '',
+    });
+    if (currentConversationSessionId) {
+      void fetch(`/api/conversation/session/${encodeURIComponent(currentConversationSessionId)}/close`, {
+        method: 'POST',
+      }).catch(() => {});
+    }
+    disconnectServerStt();
     disconnect();
     setInitialized(false);
     setLiveInputTranscript('');
     resetSessionRuntimeState();
+    recordConversationAction('session.teardown.complete', {
+      conversationSessionId: currentConversationSessionId,
+    });
     setAppliedSessionSignature(null);
+    setConversationSessionId('');
+    conversationSessionIdRef.current = '';
     audioPlayer.close();
   };
 
@@ -580,6 +2663,23 @@ function App() {
     });
   };
 
+  const handleFullscreenToggle = React.useCallback(async () => {
+    if (typeof document === 'undefined') {
+      return;
+    }
+
+    try {
+      if (document.fullscreenElement) {
+        await document.exitFullscreen();
+        return;
+      }
+
+      await document.documentElement.requestFullscreen();
+    } catch (error) {
+      console.warn('Fullscreen toggle failed', error);
+    }
+  }, []);
+
   const handleSaveSettings = async () => {
     if (!config || !settingsDraft || !selectedCharacter) return;
 
@@ -592,7 +2692,21 @@ function App() {
       )),
     };
 
-    await commitConfig(nextConfig);
+    const savedConfig = await commitConfig(nextConfig);
+    const savedCharacter = savedConfig?.characters?.find((character) => character.id === selectedCharacter.id);
+    const nextSignature = buildSignature(savedCharacter, {
+      speechStabilityProfile: savedConfig?.speechStabilityProfile,
+      prayerReadMode: savedConfig?.prayerReadMode,
+      safeSpeechFlowEnabled: savedConfig?.safetySwitches?.safeSpeechFlowEnabled !== false,
+    });
+
+    if (status === 'connected' && nextSignature && nextSignature !== appliedSessionSignature) {
+      pendingReconnectSignatureRef.current = nextSignature;
+      setLiveInputTranscript('');
+      resetSessionRuntimeState();
+      disconnect();
+    }
+
     setSettingsOpen(false);
   };
 
@@ -601,16 +2715,269 @@ function App() {
     setSettingsOpen(true);
   };
 
-  const handleBrowserTranscript = React.useCallback(async (transcript) => {
+  const handleAvatarStageClick = React.useCallback(() => {
+    const now = Date.now();
+    const recent = avatarQuickTapTimestampsRef.current.filter((timestamp) => now - timestamp <= AVATAR_QUICK_TAP_WINDOW_MS);
+    recent.push(now);
+    avatarQuickTapTimestampsRef.current = recent;
+
+    if (recent.length < AVATAR_QUICK_TAP_COUNT) {
+      return;
+    }
+
+    avatarQuickTapTimestampsRef.current = [];
+    if (document.fullscreenElement && typeof document.exitFullscreen === 'function') {
+      document.exitFullscreen().catch(() => {});
+    }
+  }, []);
+
+  const performBrowserAction = React.useCallback(async (actionRequest, transcript = '', { requestId = 0 } = {}) => {
+    const sessionId = activeBrowserSessionIdRef.current;
+    if (!sessionId) {
+      throw new Error('Нет активного сайта для действия');
+    }
+    const effectiveRequestId = Number.isInteger(requestId) && requestId > 0
+      ? requestId
+      : activeDialogRequestRef.current;
+    const isStaleRequest = () => effectiveRequestId > 0 && effectiveRequestId !== activeDialogRequestRef.current;
+    if (isStaleRequest()) {
+      return null;
+    }
+
+    setBrowserPanel((current) => ({
+      ...current,
+      status: 'loading',
+      sourceType: 'page-action',
+    }));
+    cancelAssistantOutput();
+    setBrowserFlowPhase('opening');
+    sendBrowserClientEvent('browser.action.request', {
+      browserSessionId: sessionId,
+      actionType: actionRequest?.type || '',
+      transcript,
+    });
+    recordConversationAction('browser.action.request', {
+      browserSessionId: sessionId,
+      actionType: actionRequest?.type || '',
+      transcript,
+    });
+
+    const actionResult = await jsonRequest(`/api/browser/session/${encodeURIComponent(sessionId)}/action`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ...actionRequest,
+        conversationSessionId: conversationSessionIdRef.current || '',
+        characterId: selectedCharacter?.id || '',
+        requestId: effectiveRequestId,
+      }),
+    }, BROWSER_ACTION_TIMEOUT_MS);
+    if (isStaleRequest()) {
+      return null;
+    }
+
+    setBrowserPanel((current) => ({
+      ...current,
+      status: 'ready',
+      title: actionResult.title || current.title,
+      url: actionResult.url || current.url,
+      screenshotUrl: actionResult.imageUrl || current.screenshotUrl,
+      view: {
+        imageUrl: actionResult.imageUrl || '',
+        width: actionResult.width || 0,
+        height: actionResult.height || 0,
+        revision: actionResult.revision || 0,
+        actionableElements: Array.isArray(actionResult.actionableElements) ? actionResult.actionableElements : [],
+      },
+      revision: actionResult.revision || current.revision || 0,
+      actionableElements: Array.isArray(actionResult.actionableElements) ? actionResult.actionableElements : current.actionableElements,
+      error: null,
+    }));
+    setBrowserFlowPhase('ready');
+
+    const contextResult = await requestActiveBrowserContext('что сейчас находится на открытой странице', {
+      requestId: effectiveRequestId,
+    });
+    if (isStaleRequest()) {
+      return null;
+    }
+    sendBrowserClientEvent('browser.action.complete', {
+      browserSessionId: sessionId,
+      actionType: actionRequest?.type || '',
+      url: contextResult?.url || actionResult?.url || '',
+      title: contextResult?.title || actionResult?.title || '',
+    });
+    if (transcript) {
+      enqueueAssistantPrompt(buildWebActionPrompt(transcript, contextResult, getSessionHistorySummary()), {
+        source: 'browser.action.result',
+        dedupeKey: `action:${normalizeTranscriptKey(transcript)}:${normalizeTranscriptKey(actionRequest?.type || '')}`,
+        requestId: effectiveRequestId,
+      });
+    }
+    return contextResult;
+  }, [
+    cancelAssistantOutput,
+    enqueueAssistantPrompt,
+    getSessionHistorySummary,
+    recordConversationAction,
+    requestActiveBrowserContext,
+    selectedCharacter?.id,
+    sendBrowserClientEvent,
+    setBrowserFlowPhase,
+  ]);
+
+  const handleBrowserTranscript = React.useCallback(async (transcript, { requestId: dialogRequestId = 0 } = {}) => {
     const normalized = normalizeSpeechText(transcript);
+    const effectiveRequestId = Number.isInteger(dialogRequestId) && dialogRequestId > 0
+      ? dialogRequestId
+      : activeDialogRequestRef.current;
     if (!normalized) return;
+    if (effectiveRequestId !== activeDialogRequestRef.current) {
+      return;
+    }
+    markDialogRequestState(effectiveRequestId, 'browser-routing', {
+      transcript: truncatePromptValue(normalized, 180),
+    });
 
     if (isAssistantBrowserNarration(normalized)) {
       return;
     }
 
-    const likelyBrowserIntent = isLikelyBrowserIntent(normalized);
-    if (!likelyBrowserIntent) {
+    const hasActiveBrowserSession = Boolean(activeBrowserSessionIdRef.current);
+    let intentType = classifyTranscriptIntent(normalized);
+    if (hasActiveBrowserSession && parseImplicitBrowserActionRequest(normalized)) {
+      intentType = 'browser_action';
+    }
+    if (intentType === 'browser_action') {
+      let browserActionRequest = parseBrowserActionRequest(normalized);
+      if (!browserActionRequest && hasActiveBrowserSession) {
+        browserActionRequest = parseImplicitBrowserActionRequest(normalized);
+      }
+      if (!browserActionRequest || browserIntentInFlightRef.current) {
+        return;
+      }
+
+      if (!activeBrowserSessionIdRef.current) {
+        const canFallbackToSiteOpen = browserActionRequest.type === 'home'
+          && (hasExplicitMainPageSiteTarget(normalized)
+            || /\b(?:[a-z0-9-]+\.)+(?:by|ru)\b/i.test(normalized)
+            || /\bhttps?:\/\/[^\s]+/i.test(normalized)
+            || /\bточка\s*(?:by|ru)\b/i.test(normalized));
+        if (canFallbackToSiteOpen) {
+          // User likely means opening the main page of some site, not navigating inside an active one.
+          intentType = 'site_open';
+        } else {
+          const errorText = 'Сейчас сайт не открыт. Скажите, какой сайт открыть.';
+          setBrowserFlowPhase('error');
+          setBrowserPanel({
+            ...DEFAULT_PANEL_STATE,
+            status: 'error',
+            error: errorText,
+          });
+          enqueueAssistantPrompt(buildWebFailurePrompt(
+            normalized,
+            errorText,
+            getSessionHistorySummary(),
+          ), {
+            source: 'browser.action.no-session',
+            dedupeKey: `browser-action-no-session:${normalizeTranscriptKey(normalized)}`,
+            requestId: effectiveRequestId,
+          });
+          finalizeDialogRequest(effectiveRequestId, 'browser-no-session');
+          return;
+        }
+      }
+
+      if (activeBrowserSessionIdRef.current) {
+        browserIntentInFlightRef.current = true;
+        inFlightBrowserKeyRef.current = 'page-action';
+        clearAssistantPromptQueue('browser-action');
+        cancelAssistantOutput();
+        try {
+          await performBrowserAction(browserActionRequest, normalized, { requestId: effectiveRequestId });
+        } catch (actionError) {
+          setBrowserFlowPhase('error');
+          setBrowserPanel((current) => ({
+            ...current,
+            status: 'error',
+            error: actionError.message || 'Не удалось выполнить действие на странице',
+          }));
+          enqueueAssistantPrompt(buildWebFailurePrompt(
+            normalized,
+            actionError.message || 'Не удалось выполнить действие на странице',
+            getSessionHistorySummary(),
+          ), {
+            source: 'browser.action.error',
+            dedupeKey: `browser-action-error:${normalizeTranscriptKey(normalized)}`,
+            requestId: effectiveRequestId,
+          });
+        } finally {
+          browserIntentInFlightRef.current = false;
+          inFlightBrowserKeyRef.current = '';
+        }
+        return;
+      }
+    }
+
+    if (intentType === 'page_query') {
+      if (!activeBrowserSessionIdRef.current || browserIntentInFlightRef.current) {
+        return;
+      }
+
+      browserIntentInFlightRef.current = true;
+      inFlightBrowserKeyRef.current = 'context-followup';
+      clearAssistantPromptQueue('browser-followup');
+      cancelAssistantOutput();
+      sendBrowserClientEvent('browser.followup.started', {
+        browserSessionId: activeBrowserSessionIdRef.current,
+        question: normalized,
+      });
+
+      try {
+        const contextResult = await requestActiveBrowserContext(normalized, {
+          requestId: effectiveRequestId,
+        });
+        if (effectiveRequestId !== activeDialogRequestRef.current) {
+          return;
+        }
+        sendBrowserClientEvent('browser.followup.ready', {
+          browserSessionId: contextResult?.browserSessionId || activeBrowserSessionIdRef.current,
+          url: contextResult?.url || '',
+          title: contextResult?.title || '',
+        });
+        enqueueAssistantPrompt(buildWebActivePrompt(normalized, contextResult, getSessionHistorySummary()), {
+          source: 'browser.followup.ready',
+          dedupeKey: `browser-followup:${normalizeTranscriptKey(normalized)}`,
+          requestId: effectiveRequestId,
+        });
+        markDialogRequestState(effectiveRequestId, 'browser-followup-ready');
+      } catch (contextError) {
+        if (effectiveRequestId !== activeDialogRequestRef.current) {
+          return;
+        }
+        sendBrowserClientEvent('browser.followup.error', {
+          browserSessionId: activeBrowserSessionIdRef.current,
+          question: normalized,
+          error: contextError.message || 'Не удалось прочитать текущую страницу',
+        });
+        enqueueAssistantPrompt(buildWebFailurePrompt(
+          normalized,
+          contextError.message || 'Не удалось прочитать текущую страницу',
+          getSessionHistorySummary(),
+        ), {
+          source: 'browser.followup.error',
+          dedupeKey: `browser-followup-error:${normalizeTranscriptKey(normalized)}`,
+          requestId: effectiveRequestId,
+        });
+        finalizeDialogRequest(effectiveRequestId, 'browser-followup-error');
+      } finally {
+        browserIntentInFlightRef.current = false;
+        inFlightBrowserKeyRef.current = '';
+      }
+      return;
+    }
+
+    if (intentType !== 'site_open') {
       return;
     }
 
@@ -636,184 +3003,423 @@ function App() {
       return;
     }
 
-    showEarlyBrowserFeedback(normalized);
+    const hadActiveBrowserSession = Boolean(activeBrowserSessionIdRef.current);
     browserIntentInFlightRef.current = true;
     inFlightBrowserKeyRef.current = dedupeKey;
+    clearAssistantPromptQueue('browser-site-intent');
+    cancelAssistantOutput();
     handledTranscriptsRef.current.push({ key: dedupeKey, timestamp: now });
-    sendTextTurn('Секунду, проверяю.');
+    const requestId = browserRequestIdRef.current + 1;
+    browserRequestIdRef.current = requestId;
+    browserFlowRequestIdRef.current = requestId;
+    markDialogRequestState(effectiveRequestId, 'browser-intent-started', { browserRequestId: requestId });
+    setBrowserFlowPhase('intent_pending');
+    setBrowserPanel((current) => ({
+      ...current,
+      status: 'loading',
+      title: buildEarlyBrowserLoadingTitle(normalized),
+      sourceType: 'intent-pending',
+      error: null,
+    }));
+    browserTraceCounterRef.current += 1;
+    const traceId = `browser-${Date.now().toString(36)}-${browserTraceCounterRef.current.toString(36)}`;
+    sendBrowserClientEvent('browser.intent.started', {
+      requestId,
+      traceId,
+      transcript: normalized,
+      dedupeKey,
+      activeCharacterId: selectedCharacter?.id || '',
+      dialogRequestId: effectiveRequestId,
+    });
 
     try {
       let intent;
       try {
-        intent = await jsonRequest('/api/browser/intent', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            transcript: normalized,
-            sessionHistory: getSessionHistoryPayload(),
-          }),
-        }, BROWSER_INTENT_TIMEOUT_MS);
-      } catch (requestError) {
-        if (earlyBrowserFeedbackKeyRef.current === dedupeKey) {
-          restoreBrowserPanelSnapshot();
-        }
-        browserSpeechGuardUntilRef.current = now + 2500;
-        setBrowserPanel({
-          ...DEFAULT_PANEL_STATE,
-          status: 'error',
-          error: requestError.message || 'Не удалось определить browser intent',
+        intent = await detectBrowserIntentWithRetry({
+          requestId,
+          traceId,
+          transcript: normalized,
+          dedupeKey,
         });
-        sendTextTurn(buildWebFailurePrompt(
+      } catch (requestError) {
+        if (browserFlowRequestIdRef.current !== requestId) {
+          return;
+        }
+        if (effectiveRequestId !== activeDialogRequestRef.current) {
+          return;
+        }
+        browserFlowRequestIdRef.current = 0;
+        browserSpeechGuardUntilRef.current = now + 2500;
+        if (hadActiveBrowserSession && activeBrowserSessionIdRef.current) {
+          setBrowserFlowPhase('ready');
+          setBrowserPanel((current) => ({
+            ...current,
+            status: 'ready',
+            error: null,
+          }));
+          void refreshBrowserView(true).catch(() => {});
+        } else {
+          setBrowserFlowPhase('error');
+        }
+        const errorReason = classifyIntentErrorReason(requestError);
+        const errorMessage = errorReason === 'resolve_timeout'
+          ? 'Не успела определить сайт вовремя. Повторите запрос точнее.'
+          : (requestError.message || 'Не удалось определить browser intent');
+        if (!(hadActiveBrowserSession && activeBrowserSessionIdRef.current)) {
+          setBrowserPanel({
+            ...DEFAULT_PANEL_STATE,
+            status: 'error',
+            error: errorMessage,
+          });
+        }
+        sendBrowserClientEvent('browser.intent.error', {
+          requestId,
+          traceId,
+          transcript: normalized,
+          error: errorMessage,
+          errorReason,
+        });
+        enqueueAssistantPrompt(buildWebFailurePrompt(
           normalized,
-          requestError.message || 'Не удалось определить browser intent',
+          errorMessage,
           getSessionHistorySummary(),
-        ));
+        ), {
+          source: 'browser.intent.error',
+          dedupeKey: `browser-intent-error:${normalizeTranscriptKey(normalized)}`,
+          requestId: effectiveRequestId,
+        });
+        finalizeDialogRequest(effectiveRequestId, 'browser-intent-error', { browserRequestId: requestId });
         return;
       }
 
+      if (browserFlowRequestIdRef.current !== requestId) {
+        return;
+      }
+      if (effectiveRequestId !== activeDialogRequestRef.current) {
+        return;
+      }
+      sendBrowserClientEvent('browser.intent.result', {
+        requestId,
+        traceId,
+        intentType: intent?.intentType || intent?.type || 'none',
+        url: intent?.url || '',
+        confidence: intent?.confidence ?? 0,
+        confidenceMargin: intent?.confidenceMargin ?? 0,
+        resolutionSource: intent?.resolutionSource || '',
+        candidateCount: intent?.candidateCount ?? 0,
+      });
+
       if (!intent || intent.type === 'none') {
-        if (earlyBrowserFeedbackKeyRef.current === dedupeKey) {
-          restoreBrowserPanelSnapshot();
+        browserFlowRequestIdRef.current = 0;
+        if (hadActiveBrowserSession && activeBrowserSessionIdRef.current) {
+          setBrowserFlowPhase('ready');
+          setBrowserPanel((current) => ({
+            ...current,
+            status: 'ready',
+            error: null,
+          }));
+          void refreshBrowserView(true).catch(() => {});
+        } else {
+          setBrowserFlowPhase('error');
+          setBrowserPanel({
+            ...DEFAULT_PANEL_STATE,
+            status: 'error',
+            error: 'Не получилось понять, какой сайт или страницу нужно открыть.',
+          });
         }
-        setBrowserPanel({
-          ...DEFAULT_PANEL_STATE,
-          status: 'error',
-          error: 'Не получилось понять, какой сайт или страницу нужно открыть.',
+        sendBrowserClientEvent('browser.intent.unresolved', {
+          requestId,
+          traceId,
+          transcript: normalized,
         });
-        sendTextTurn(buildWebFailurePrompt(
+        enqueueAssistantPrompt(buildWebFailurePrompt(
           normalized,
           'Не получилось понять, какой сайт или страницу нужно открыть.',
           getSessionHistorySummary(),
-        ));
+        ), {
+          source: 'browser.intent.none',
+          dedupeKey: `browser-intent-none:${normalizeTranscriptKey(normalized)}`,
+          requestId: effectiveRequestId,
+        });
+        finalizeDialogRequest(effectiveRequestId, 'browser-intent-unresolved', { browserRequestId: requestId });
         return;
       }
 
       if (intent.type === 'unresolved-site') {
-        earlyBrowserFeedbackKeyRef.current = '';
+        browserFlowRequestIdRef.current = 0;
         browserSpeechGuardUntilRef.current = now + 2500;
+        if (hadActiveBrowserSession && activeBrowserSessionIdRef.current) {
+          setBrowserFlowPhase('ready');
+          setBrowserPanel((current) => ({
+            ...current,
+            status: 'ready',
+            error: null,
+          }));
+          void refreshBrowserView(true).catch(() => {});
+        } else {
+          setBrowserFlowPhase('error');
+        }
         appendSessionWebHistory({
           status: 'failed',
           transcript: normalized,
           title: intent.titleHint || intent.query || 'Сайт',
           note: intent.error || 'Не удалось определить сайт',
         });
-        setBrowserPanel({
-          ...DEFAULT_PANEL_STATE,
-          status: 'error',
+        if (!(hadActiveBrowserSession && activeBrowserSessionIdRef.current)) {
+          setBrowserPanel({
+            ...DEFAULT_PANEL_STATE,
+            status: 'error',
+            error: intent.error || 'Не распознала сайт',
+          });
+        }
+        sendBrowserClientEvent('browser.intent.unresolved', {
+          requestId,
+          traceId,
+          transcript: normalized,
           error: intent.error || 'Не распознала сайт',
+          errorReason: intent.errorReason || 'resolve_low_confidence',
         });
-        sendTextTurn(buildWebFailurePrompt(normalized, intent.error, getSessionHistorySummary()));
+        enqueueAssistantPrompt(buildWebFailurePrompt(normalized, intent.error, getSessionHistorySummary()), {
+          source: 'browser.intent.unresolved',
+          dedupeKey: `browser-intent-unresolved:${normalizeTranscriptKey(normalized)}`,
+          requestId: effectiveRequestId,
+        });
+        finalizeDialogRequest(effectiveRequestId, 'browser-intent-unresolved', { browserRequestId: requestId });
         return;
       }
 
-      const requestId = browserRequestIdRef.current + 1;
-      browserRequestIdRef.current = requestId;
-      earlyBrowserFeedbackKeyRef.current = '';
+      const resolvedTraceId = intent.traceId || traceId;
       lastBrowserCommandRef.current = { key: dedupeKey, transcript: normalized, timestamp: now };
       browserSpeechGuardUntilRef.current = now + 6000;
-      setBrowserPanel({
-        ...DEFAULT_PANEL_STATE,
+      setBrowserFlowPhase('opening');
+      setBrowserPanel((current) => ({
+        ...current,
         status: 'loading',
         url: intent.url,
         title: intent.titleHint || 'Открываю страницу',
         sourceType: intent.sourceType || intent.type,
+        error: null,
+      }));
+      sendBrowserClientEvent('browser.opening', {
+        requestId,
+        traceId: resolvedTraceId,
+        url: intent.url || '',
+        sourceType: intent.sourceType || intent.type || '',
       });
-      sendTextTurn(buildWebPendingPrompt(normalized, intent.titleHint || intent.url, getSessionHistorySummary()));
 
       try {
         const opened = await jsonRequest('/api/browser/open', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(intent),
+          body: JSON.stringify({
+            ...intent,
+            traceId: resolvedTraceId,
+            conversationSessionId: conversationSessionIdRef.current || '',
+            characterId: selectedCharacter?.id || '',
+            requestId: effectiveRequestId,
+          }),
         }, BROWSER_OPEN_TIMEOUT_MS);
 
         if (browserRequestIdRef.current !== requestId) {
           return;
         }
+        if (effectiveRequestId !== activeDialogRequestRef.current) {
+          return;
+        }
 
-        earlyBrowserFeedbackKeyRef.current = '';
         browserSpeechGuardUntilRef.current = Date.now() + 2500;
-        setBrowserPanel(opened);
+        const nextSessionId = String(opened?.browserSessionId || '');
+        if (!nextSessionId) {
+          throw new Error('Сервер не передал данные открытого сайта. Проверьте подключение API.');
+        }
+        setBrowserFlowPhase('ready');
+        setBrowserPanel((current) => ({
+          ...current,
+          ...opened,
+          status: 'ready',
+          view: opened.view || current.view || null,
+          revision: opened.revision || current.revision || 0,
+          actionableElements: Array.isArray(opened?.view?.actionableElements)
+            ? opened.view.actionableElements
+            : (current.actionableElements || []),
+          error: null,
+        }));
+        setActiveBrowserSessionId(nextSessionId);
+        activeBrowserSessionIdRef.current = nextSessionId;
+        await waitForNextPaint();
+        let confirmedOpen = {
+          ...opened,
+        };
+        let panelConfirmed = Boolean(opened?.view?.imageUrl || opened?.screenshotUrl || opened?.browserSessionId);
+        try {
+          const view = await jsonRequest(
+            `/api/browser/session/${encodeURIComponent(nextSessionId)}/view?refresh=1`,
+            { method: 'GET' },
+            BROWSER_ACTION_TIMEOUT_MS,
+          );
+          if (browserRequestIdRef.current !== requestId) {
+            return;
+          }
+          confirmedOpen = {
+            ...confirmedOpen,
+            ...view,
+            browserSessionId: nextSessionId,
+            screenshotUrl: view.imageUrl || confirmedOpen.screenshotUrl || null,
+            view: {
+              imageUrl: view.imageUrl || '',
+              width: view.width || 0,
+              height: view.height || 0,
+              revision: view.revision || 0,
+              actionableElements: Array.isArray(view.actionableElements) ? view.actionableElements : [],
+            },
+          };
+          panelConfirmed = true;
+          setBrowserPanel((current) => ({
+            ...current,
+            status: 'ready',
+            title: view.title || current.title,
+            url: view.url || current.url,
+            screenshotUrl: view.imageUrl || current.screenshotUrl,
+            view: {
+              imageUrl: view.imageUrl || '',
+              width: view.width || 0,
+              height: view.height || 0,
+              revision: view.revision || 0,
+              actionableElements: Array.isArray(view.actionableElements) ? view.actionableElements : [],
+            },
+            revision: view.revision || current.revision || 0,
+            actionableElements: Array.isArray(view.actionableElements) ? view.actionableElements : current.actionableElements,
+            error: null,
+          }));
+          await waitForNextPaint();
+        } catch (viewError) {
+          recordConversationAction('browser.open.view-warning', {
+            requestId,
+            browserSessionId: nextSessionId,
+            error: viewError.message || 'browser view refresh failed',
+          });
+        }
         appendSessionWebHistory({
           status: 'opened',
           transcript: normalized,
-          title: opened.title || intent.titleHint || 'Сайт',
-          url: opened.url || intent.url,
-          note: opened.query || '',
+          title: confirmedOpen.title || intent.titleHint || 'Сайт',
+          url: confirmedOpen.url || intent.url,
+          note: confirmedOpen.query || '',
         });
-        sendTextTurn(buildWebResultPrompt(normalized, opened, getSessionHistorySummary()));
+        sendBrowserClientEvent('browser.open.ready', {
+          requestId,
+          traceId: resolvedTraceId,
+          browserSessionId: nextSessionId,
+          title: confirmedOpen?.title || '',
+          url: confirmedOpen?.url || '',
+          embeddable: Boolean(confirmedOpen?.embeddable),
+          panelConfirmed,
+        });
+        markDialogRequestState(effectiveRequestId, 'browser-open-ready', {
+          browserRequestId: requestId,
+          browserSessionId: nextSessionId,
+          panelConfirmed,
+        });
+        enqueueAssistantPrompt(buildWebResultPrompt(normalized, confirmedOpen, getSessionHistorySummary()), {
+          source: 'browser.open.ready',
+          dedupeKey: `browser-open-ready:${normalizeTranscriptKey(normalized)}`,
+          requestId: effectiveRequestId,
+        });
       } catch (requestError) {
         if (browserRequestIdRef.current !== requestId) {
           return;
         }
+        if (effectiveRequestId !== activeDialogRequestRef.current) {
+          return;
+        }
 
-        earlyBrowserFeedbackKeyRef.current = '';
+        const errorReason = classifyBrowserOpenErrorReason(requestError);
+        const errorText = requestError.message || 'Не удалось открыть страницу';
         browserSpeechGuardUntilRef.current = Date.now() + 2500;
+        setBrowserFlowPhase('error');
+        setActiveBrowserSessionId('');
         appendSessionWebHistory({
           status: 'failed',
           transcript: normalized,
           title: intent.titleHint || intent.query || 'Сайт',
           url: intent.url || '',
-          note: requestError.message || 'Не удалось открыть страницу',
+          note: errorText,
         });
         setBrowserPanel({
           ...DEFAULT_PANEL_STATE,
           status: 'error',
-          error: requestError.message || 'Не удалось открыть страницу',
+          error: errorText,
         });
-        sendTextTurn(buildWebFailurePrompt(
+        sendBrowserClientEvent('browser.open.error', {
+          requestId,
+          traceId: resolvedTraceId,
+          url: intent.url || '',
+          error: errorText,
+          errorReason,
+        });
+        enqueueAssistantPrompt(buildWebFailurePrompt(
           normalized,
-          requestError.message || 'Не удалось открыть страницу',
+          errorText,
           getSessionHistorySummary(),
-        ));
+        ), {
+          source: 'browser.open.error',
+          dedupeKey: `browser-open-error:${normalizeTranscriptKey(normalized)}`,
+          requestId: effectiveRequestId,
+        });
+        finalizeDialogRequest(effectiveRequestId, 'browser-open-error', {
+          browserRequestId: requestId,
+          errorReason,
+        });
       }
     } finally {
+      browserIntentAbortRef.current?.abort?.();
+      browserIntentAbortRef.current = null;
+      if (browserFlowRequestIdRef.current === requestId) {
+        browserFlowRequestIdRef.current = 0;
+      }
       browserIntentInFlightRef.current = false;
       inFlightBrowserKeyRef.current = '';
     }
-  }, [appendSessionWebHistory, getSessionHistoryPayload, getSessionHistorySummary, restoreBrowserPanelSnapshot, sendTextTurn, showEarlyBrowserFeedback]);
-
-  const handleSidecarTranscript = React.useCallback((transcript) => {
-    const normalized = String(transcript || '').trim();
-    if (!normalized || !isLikelyBrowserIntent(normalized) || isAssistantBrowserNarration(normalized)) {
-      return;
-    }
-
-    if ((audioPlayer?.getVolume?.() || 0) > SIDECAR_BOT_VOLUME_GUARD) {
-      return;
-    }
-
-    void handleBrowserTranscript(normalized);
-  }, [audioPlayer, handleBrowserTranscript]);
-
-  const { isSupported: sidecarSupported, isListening: sidecarListening } = useSpeechSidecar({
-    enabled: status === 'connected',
-    onFinalTranscript: handleSidecarTranscript,
-    language: 'ru-RU',
-  });
+  }, [
+    appendSessionWebHistory,
+    cancelAssistantOutput,
+    clearAssistantPromptQueue,
+    detectBrowserIntentWithRetry,
+    enqueueAssistantPrompt,
+    getSessionHistorySummary,
+    performBrowserAction,
+    recordConversationAction,
+    refreshBrowserView,
+    requestActiveBrowserContext,
+    selectedCharacter?.id,
+    sendBrowserClientEvent,
+    setBrowserFlowPhase,
+    finalizeDialogRequest,
+    markDialogRequestState,
+  ]);
 
   useEffect(() => {
-    if (status !== 'connected' || (sidecarSupported && sidecarListening) || !isStableInterimBrowserCandidate(liveInputTranscript)) {
-      if (liveTranscriptTimerRef.current) {
-        clearTimeout(liveTranscriptTimerRef.current);
-        liveTranscriptTimerRef.current = null;
-      }
-      return undefined;
+    handleBrowserTranscriptRef.current = (transcript, options = {}) => {
+      void handleBrowserTranscript(transcript, options);
+    };
+  }, [handleBrowserTranscript]);
+
+  const handleBrowserPanelAction = React.useCallback(async (action) => {
+    if (!activeBrowserSessionIdRef.current || !action?.type) {
+      return;
     }
 
-    showEarlyBrowserFeedback(liveInputTranscript);
-
-    liveTranscriptTimerRef.current = setTimeout(() => {
-      handleBrowserTranscript(liveInputTranscript);
-    }, INTERIM_BROWSER_TRIGGER_DELAY_MS);
-
-    return () => {
-      if (liveTranscriptTimerRef.current) {
-        clearTimeout(liveTranscriptTimerRef.current);
-        liveTranscriptTimerRef.current = null;
-      }
-    };
-  }, [handleBrowserTranscript, liveInputTranscript, showEarlyBrowserFeedback, sidecarListening, sidecarSupported, status]);
+    try {
+      await performBrowserAction(action);
+    } catch (error) {
+      setBrowserFlowPhase('error');
+      setBrowserPanel((current) => ({
+        ...current,
+        status: 'error',
+        error: error.message || 'Не удалось выполнить действие на странице',
+      }));
+    }
+  }, [performBrowserAction, setBrowserFlowPhase]);
 
   if (loading || !config || !selectedCharacter) {
     return (
@@ -838,6 +3444,9 @@ function App() {
             <IconButton label="Переключить тему" onClick={handleThemeToggle} active={themeMode === 'dark'}>
               <ThemeIcon dark={themeMode === 'dark'} />
             </IconButton>
+            <IconButton label={isFullscreen ? 'Выйти из полноэкранного режима' : 'Включить полноэкранный режим'} onClick={handleFullscreenToggle} active={isFullscreen}>
+              <FullscreenIcon active={isFullscreen} />
+            </IconButton>
             <IconButton label="Открыть настройки персонажа" onClick={handleOpenSettings}>
               <SettingsIcon />
             </IconButton>
@@ -851,21 +3460,32 @@ function App() {
             <div
               className="avatar-stage"
               data-avatar-instance={avatarInstanceId}
+              onClick={handleAvatarStageClick}
               style={{
                 background: activeBackground.stage,
                 '--stage-shadow': activeBackground.shadow,
                 '--stage-border': activeBackground.border,
               }}
             >
-              <Canvas key={avatarRenderKey} camera={{ position: [0, 0, 0.64], fov: 45 }} dpr={[1, 2]} gl={{ antialias: true, alpha: true, powerPreference: 'high-performance' }}>
-                <color attach="background" args={[activeBackground.canvasBackground]} />
-                <ambientLight intensity={0.92} />
-                <directionalLight position={[0, 0, 5]} intensity={0.68} />
+              <Canvas key={avatarRenderKey} camera={avatarFrame.camera} dpr={[1, 2]} gl={{ antialias: true, alpha: true, powerPreference: 'high-performance' }}>
+                {activeBackground.canvasBackground && (
+                  <color attach="background" args={[activeBackground.canvasBackground]} />
+                )}
+                <ambientLight intensity={avatarFrame.lights.ambient} />
+                <directionalLight position={[0, 0, 5]} intensity={avatarFrame.lights.directional} />
 
                 <CanvasErrorBoundary>
                   <Suspense fallback={<Loader />}>
-                    <group position={[0, -0.75, 0]}>
-                      <Avatar key={avatarRenderKey} audioPlayer={audioPlayer} modelUrl={avatarModelUrl} instanceId={avatarInstanceId} />
+                    <group position={[0, avatarFrame.y, 0]}>
+                      <Avatar
+                        key={avatarRenderKey}
+                        audioPlayer={audioPlayer}
+                        modelUrl={avatarModelUrl}
+                        instanceId={avatarInstanceId}
+                        scale={avatarFrame.scale}
+                        idleMotion={avatarFrame.idleMotion}
+                        idleMotionProfile={avatarFrame.idleMotionProfile}
+                      />
                     </group>
                   </Suspense>
                 </CanvasErrorBoundary>
@@ -874,7 +3494,13 @@ function App() {
               </Canvas>
             </div>
 
-            <LiveStatusPill status={status} audioPlayer={audioPlayer} getUserVolume={getUserVolume} sidecarListening={sidecarListening} />
+            <LiveStatusPill
+              status={status}
+              audioPlayer={audioPlayer}
+              getUserVolume={getServerSttUserVolume}
+              sidecarListening={Boolean(liveInputTranscript)}
+              isRecovering={isRecoveringConnection}
+            />
           </div>
 
           <CharacterArrow direction="right" onClick={() => handleCharacterStep(1)} />
@@ -897,9 +3523,14 @@ function App() {
           {configError && <div className="notice notice--error">{configError}</div>}
           {saveError && <div className="notice notice--error">{saveError}</div>}
           {sessionNeedsReconnect && <div className="notice notice--warning">Новые настройки голоса и промпта применятся после переподключения.</div>}
+          {initialized && reconnectAttempt > 0 && status !== 'connected' && (
+            <div className="notice notice--warning">
+              Соединение восстанавливается автоматически (попытка {reconnectAttempt}).
+            </div>
+          )}
         </div>
 
-        <BrowserPanel panel={browserPanel} />
+        <BrowserPanel panel={browserPanel} onAction={handleBrowserPanelAction} />
       </div>
 
       <SettingsDrawer
