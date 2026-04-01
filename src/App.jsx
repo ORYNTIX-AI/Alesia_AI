@@ -6,14 +6,27 @@ import { BrowserPanel } from './components/BrowserPanel';
 import { SettingsDrawer } from './components/SettingsDrawer';
 import { useAppConfig } from './hooks/useAppConfig';
 import { useGeminiLive } from './hooks/useGeminiLive';
+import { useYandexVoiceSession } from './hooks/useYandexVoiceSession';
 import { useServerStt } from './hooks/useServerStt';
 import { AudioStreamPlayer } from './utils/AudioStreamPlayer';
 
 const DEFAULT_PANEL_STATE = {
   status: 'idle',
+  browserPanelMode: 'remote',
   sourceType: null,
   title: '',
   url: '',
+  clientUrl: '',
+  clientHomeUrl: '',
+  clientHistory: [],
+  clientHistoryIndex: -1,
+  clientReloadKey: 0,
+  clientFrameLoaded: false,
+  clientContextStatus: 'idle',
+  clientContextError: '',
+  clientFallback: false,
+  clientExternalOpened: false,
+  note: '',
   embeddable: false,
   readerText: '',
   screenshotUrl: null,
@@ -40,7 +53,8 @@ const GOAWAY_RECONNECT_FALLBACK_DELAY_MS = 1500;
 const GOAWAY_RECONNECT_BUFFER_MS = 1500;
 const CONNECTING_WATCHDOG_TIMEOUT_MS = 20000;
 const RELOAD_WATCHDOG_TIMEOUT_MS = 12000;
-const BATYUSHKA_CHARACTER_ID = 'alesya-puck';
+const BATYUSHKA_CHARACTER_IDS = new Set(['alesya-puck', 'batyushka-2', 'batyushka-3']);
+const GEMINI_31_FLASH_LIVE_MODEL = 'models/gemini-3.1-flash-live-preview';
 const AVATAR_QUICK_TAP_COUNT = 4;
 const AVATAR_QUICK_TAP_WINDOW_MS = 900;
 const BROWSER_INTENT_RETRY_LIMIT = 1;
@@ -52,6 +66,14 @@ const BARGE_IN_MIN_GAP_MS = 1200;
 const ASSISTANT_BARGE_IN_WARMUP_MS = 320;
 const STOP_SPEECH_PATTERN = /(^|\s)(стоп|остановись|замолчи|хватит|тише|пауза|stop)(?=\s|$)/i;
 const USER_FINAL_DEDUP_WINDOW_MS = 4200;
+const SERVER_STT_FRAGMENT_HOLD_MS = 900;
+const SERVER_STT_FRAGMENT_MERGE_WINDOW_MS = 2400;
+const SERVER_STT_FRAGMENT_MAX_LENGTH = 28;
+const SERVER_STT_FRAGMENT_MAX_WORDS = 4;
+const SERVER_STT_SITE_FRAGMENT_HOLD_MS = 520;
+const SERVER_STT_SHORT_FRAGMENT_HOLD_MS = 650;
+const LIVE_INPUT_COMMIT_EXTRA_MS = 120;
+const CLIENT_INLINE_LOAD_TIMEOUT_MS = 12000;
 
 const BACKGROUND_PRESETS = {
   aurora: {
@@ -103,6 +125,10 @@ const BACKGROUND_PRESETS = {
     border: 'rgba(227, 227, 227, 0.9)',
   },
 };
+
+function isGemini31FlashLiveModel(modelId) {
+  return String(modelId || '').trim() === GEMINI_31_FLASH_LIVE_MODEL;
+}
 
 class CanvasErrorBoundary extends React.Component {
   constructor(props) {
@@ -266,10 +292,16 @@ function LiveStatusPill({ status, audioPlayer, getUserVolume, sidecarListening, 
 function buildSignature(character, globalRuntimeConfig = {}) {
   if (!character) return '';
   return [
+    String(character.runtimeProvider || 'gemini-live').trim(),
+    String(character.modelId || character.voiceModelId || '').trim(),
     character.voiceModelId,
     character.voiceName,
     character.systemPrompt,
     character.greetingText,
+    character.liveInputEnabled ? 'live-input-on' : 'live-input-off',
+    String(character.voiceGatewayUrl || '').trim(),
+    isClientInlinePanelMode(character.browserPanelMode) ? 'client-inline' : 'remote',
+    String(character.pageContextMode || 'browser-session').trim(),
     normalizeSpeechStabilityProfile(globalRuntimeConfig.speechStabilityProfile),
     String(globalRuntimeConfig.prayerReadMode || 'knowledge-only').trim().toLowerCase(),
     globalRuntimeConfig.safeSpeechFlowEnabled === false ? 'safe-off' : 'safe-on',
@@ -282,6 +314,10 @@ function normalizeSpeechStabilityProfile(value) {
     return normalized;
   }
   return 'balanced';
+}
+
+function isClientInlinePanelMode(value) {
+  return String(value || '').trim() === 'client-inline';
 }
 
 function resolveSpeechStabilityConfig(profile, safeSpeechFlowEnabled) {
@@ -626,6 +662,105 @@ function classifyTranscriptIntent(transcript) {
   return 'chat';
 }
 
+function isLikelyIncompleteBrowserRequest(transcript) {
+  const normalized = normalizeBrowserCommandText(transcript);
+  if (!normalized || !isExplicitBrowserRequest(normalized)) {
+    return false;
+  }
+
+  const stripped = normalizeSpeechText(
+    normalized
+      .replace(/(^|\s)(?:ну|а|и|ладно|тогда|давай|слушай|смотри|прошу|пожалуйста|мне|нам|для|меня)(?=\s|$)/giu, ' ')
+      .replace(/(^|\s)(?:открой|открыть|открою|откроем|откроешь|откроете|зайди|зайти|зайду|зайдём|зайдешь|зайдете|перейди|перейти|перейду|перейдём|перейдешь|перейдете|найди|найти|покажи|посмотри|адкрый|адкрыць|адкрыйце|зайдзи|зайдзі|зайсці|перайдзи|перайдзі|перайсци|перайсці)(?=\s|$)/giu, ' ')
+      .replace(/(^|\s)(?:официальн(?:ый|ая|ое|ую|ого|ой)|главн(?:ый|ая|ое|ую|ого|ой)|этот|эту|это|тот|ту|такой)(?=\s|$)/giu, ' ')
+      .replace(/(^|\s)(?:сайт|сайта|страниц[ауые]?|старонк[ауые]?|домен|адрес|url|урл|веб|web)(?=\s|$)/giu, ' ')
+      .replace(/\s+/g, ' ')
+      .trim(),
+  );
+
+  return normalizeTranscriptKey(stripped).length < 4;
+}
+
+function endsWithSentencePunctuation(transcript) {
+  return /[.!?…]$/.test(normalizeSpeechText(transcript));
+}
+
+function looksLikeIncompleteTranscriptFragment(transcript) {
+  const normalized = normalizeSpeechText(transcript);
+  if (!normalized || endsWithSentencePunctuation(normalized) || STOP_SPEECH_PATTERN.test(normalized)) {
+    return false;
+  }
+
+  const intentType = classifyTranscriptIntent(normalized);
+  if (intentType === 'browser_action' || intentType === 'page_query') {
+    return false;
+  }
+
+  if (intentType === 'site_open') {
+    return isLikelyIncompleteBrowserRequest(normalized);
+  }
+
+  const words = normalized.split(/\s+/).filter(Boolean);
+  const lastWord = words.at(-1)?.toLowerCase() || '';
+  const looksLikeTrailingVerb = /(?:ешь|ете|ем|им|ют|ут|ет|ит|ать|ять|ить|еть|уть|ти|ться|чь|ай|яй|уй)$/.test(lastWord)
+    || /^(?:могу|можешь|можете|хочу|хочешь|хотел|хотела|надо|нужно|нужен|нужна|буду|будешь|давай)$/i.test(lastWord);
+  if (
+    words.length >= 2
+    && words.length <= SERVER_STT_FRAGMENT_MAX_WORDS
+    && normalized.length <= SERVER_STT_FRAGMENT_MAX_LENGTH
+    && looksLikeTrailingVerb
+  ) {
+    return true;
+  }
+
+  return /(что|чтобы|кроме|потому|если|когда|куда|как|какой|какая|какие|ты|меня|мне|тебя|нам|вам|и|а|но|или|про|о|об|по|на|в|во|для|ещё|еще|что-нибудь|чего-нибудь|какой-нибудь)$/i.test(normalized);
+}
+
+function canMergeServerTranscriptFragments(previousTranscript, nextTranscript) {
+  const previous = normalizeSpeechText(previousTranscript);
+  const next = normalizeSpeechText(nextTranscript);
+  if (!previous || !next) {
+    return false;
+  }
+
+  if (endsWithSentencePunctuation(previous) || STOP_SPEECH_PATTERN.test(next)) {
+    return false;
+  }
+
+  return looksLikeIncompleteTranscriptFragment(previous);
+}
+
+function mergeServerTranscriptFragments(previousTranscript, nextTranscript) {
+  const previous = normalizeSpeechText(previousTranscript);
+  const next = normalizeSpeechText(nextTranscript);
+  if (!previous) {
+    return next;
+  }
+  if (!next) {
+    return previous;
+  }
+  return normalizeSpeechText(`${previous} ${next}`);
+}
+
+function getServerFinalHoldDelay(transcript) {
+  const normalized = normalizeSpeechText(transcript);
+  if (!normalized) {
+    return SERVER_STT_FRAGMENT_HOLD_MS;
+  }
+
+  const intentType = classifyTranscriptIntent(normalized);
+  if (intentType === 'site_open') {
+    return SERVER_STT_SITE_FRAGMENT_HOLD_MS;
+  }
+
+  const words = normalized.split(/\s+/).filter(Boolean);
+  if (words.length <= 2 && normalized.length <= 18) {
+    return SERVER_STT_SHORT_FRAGMENT_HOLD_MS;
+  }
+
+  return SERVER_STT_FRAGMENT_HOLD_MS;
+}
+
 function isAssistantBrowserNarration(transcript) {
   const normalized = String(transcript || '').trim().toLowerCase();
   if (!normalized) {
@@ -759,6 +894,32 @@ ${truncatePromptValue(historySummary, 420)}
 Ответь коротко, естественно и только по факту этого контекста.`;
 }
 
+function buildWebClientResultPrompt(transcript, panelState, historySummary) {
+  return `WEB_CONTEXT_CLIENT_RESULT:
+Сайт открыт прямо в нижней панели у пользователя.
+Запрос: "${truncatePromptValue(transcript, 220)}"
+Источник: ${truncatePromptValue(panelState.title || 'Официальный сайт', 140)}
+URL: ${truncatePromptValue(panelState.url || panelState.clientUrl || 'n/a', 180)}
+Статус страницы: ${panelState?.clientContextStatus === 'ready' ? 'текст страницы уже подтверждён' : 'страница уже показана, но текст ещё дочитывается'}
+Важно: говори, что сайт открыт в нижней панели только по этому служебному контексту.
+Недавняя веб-история:
+${truncatePromptValue(historySummary, 420)}
+
+Ответь коротко и честно: подтверди открытие сайта внизу и предложи помочь короткой справкой, контактами или вакансиями по подтверждённым данным.`;
+}
+
+function buildWebClientPendingPrompt(transcript, panelState, historySummary) {
+  return `WEB_CONTEXT_CLIENT_PENDING:
+Сайт ещё открывается в нижней панели или текст страницы ещё не подтверждён.
+Запрос: "${truncatePromptValue(transcript, 220)}"
+Источник: ${truncatePromptValue(panelState.title || 'Сайт', 140)}
+URL: ${truncatePromptValue(panelState.url || panelState.clientUrl || 'n/a', 180)}
+Недавняя веб-история:
+${truncatePromptValue(historySummary, 420)}
+
+Ответь коротко и правдиво: скажи, что сайт уже открывается внизу, а текст страницы ещё дочитывается. Не говори, что страница уже разобрана полностью.`;
+}
+
 function buildWebActivePrompt(question, contextResult, historySummary) {
   const pageAnswer = truncatePromptValue(contextResult?.answer || 'Не удалось получить ответ.', 420);
   const pageSnippet = truncatePromptValue(contextResult?.contextSnippet || contextResult?.readerText || 'Текст страницы недоступен.', 700);
@@ -784,6 +945,59 @@ function buildWebFailurePrompt(transcript, errorMessage, historySummary) {
 ${truncatePromptValue(historySummary, 420)}
 
 Коротко объясни, что именно не удалось, и попроси уточнить сайт без перечисления доменных зон.`;
+}
+
+function buildWebOpenPendingPrompt(transcript, panelState, historySummary) {
+  return `WEB_CONTEXT_OPEN_PENDING:
+Сайт уже найден и сервер начал открытие, но нижняя панель ещё не подтвердила показ страницы.
+Запрос: "${truncatePromptValue(transcript, 220)}"
+Источник: ${truncatePromptValue(panelState?.title || 'Сайт', 140)}
+URL: ${truncatePromptValue(panelState?.url || 'n/a', 180)}
+Недавняя веб-история:
+${truncatePromptValue(historySummary, 420)}
+
+Ответь коротко и честно: скажи, что сайт ещё открывается или панель ещё обновляется. Не говори, что страница уже показана.`;
+}
+
+function getClientHomeUrl(url) {
+  try {
+    return `${new URL(url).origin}/`;
+  } catch {
+    return String(url || '').trim();
+  }
+}
+
+function buildClientPanelState(intent, currentPanel = null, { status = 'ready', note = '', browserPanelMode = 'client-inline' } = {}) {
+  const nextUrl = String(intent?.url || currentPanel?.clientUrl || currentPanel?.url || '').trim();
+  const nextTitle = String(intent?.titleHint || currentPanel?.title || nextUrl || 'Сайт').trim();
+  const previousHistory = Array.isArray(currentPanel?.clientHistory) ? currentPanel.clientHistory : [];
+  const previousIndex = Number.isInteger(currentPanel?.clientHistoryIndex) ? currentPanel.clientHistoryIndex : (previousHistory.length - 1);
+  const truncatedHistory = previousHistory.slice(0, Math.max(0, previousIndex) + 1);
+  const lastUrl = truncatedHistory[truncatedHistory.length - 1] || '';
+  const nextHistory = nextUrl
+    ? (lastUrl === nextUrl ? truncatedHistory : [...truncatedHistory, nextUrl])
+    : truncatedHistory;
+  const nextHistoryIndex = nextHistory.length ? nextHistory.length - 1 : -1;
+
+  return {
+    ...DEFAULT_PANEL_STATE,
+    browserPanelMode: isClientInlinePanelMode(browserPanelMode) ? 'client-inline' : 'remote',
+    status,
+    sourceType: intent?.sourceType || intent?.type || currentPanel?.sourceType || 'direct-site',
+    title: nextTitle,
+    url: nextUrl,
+    clientUrl: nextHistoryIndex >= 0 ? nextHistory[nextHistoryIndex] : nextUrl,
+    clientHomeUrl: getClientHomeUrl(nextUrl),
+    clientHistory: nextHistory,
+    clientHistoryIndex: nextHistoryIndex,
+    clientReloadKey: Date.now(),
+    clientFrameLoaded: false,
+    clientContextStatus: status === 'ready' ? 'ready' : 'loading',
+    clientContextError: '',
+    clientFallback: true,
+    clientExternalOpened: false,
+    note: note || currentPanel?.note || '',
+  };
 }
 
 function buildWebActionPrompt(transcript, result, historySummary) {
@@ -849,10 +1063,11 @@ function buildRuntimeTurnPrompt(
     knowledgeHits = [],
     activePageContext = null,
     prayerReadMode = 'knowledge-only',
+    compactMode = false,
   } = {},
 ) {
   const normalizedQuestion = truncatePromptValue(question, 320);
-  const hits = Array.isArray(knowledgeHits) ? knowledgeHits.slice(0, 3) : [];
+  const hits = Array.isArray(knowledgeHits) ? knowledgeHits.slice(0, compactMode ? 2 : 3) : [];
   const prayerMode = String(prayerReadMode || 'knowledge-only').trim().toLowerCase();
   const prayerRequested = isPrayerRequest(normalizedQuestion);
   const prayerReading = prayerRequested && prayerMode === 'knowledge-only'
@@ -867,13 +1082,17 @@ function buildRuntimeTurnPrompt(
   const pageUrl = activePageContext?.url ? truncatePromptValue(activePageContext.url, 160) : '';
   const pageContextSnippet = truncatePromptValue(
     activePageContext?.contextSnippet || activePageContext?.readerText || '',
-    320,
+    compactMode ? 220 : 320,
   );
   const pageBlock = pageContextSnippet
-    ? `Контекст текущего открытого сайта:
+    ? (
+      compactMode
+        ? `Открытая страница: ${pageTitle}${pageUrl ? ` (${pageUrl})` : ''}\nФрагмент: ${pageContextSnippet}`
+        : `Контекст текущего открытого сайта:
 ${pageTitle}${pageUrl ? ` (${pageUrl})` : ''}
 Фрагмент страницы: ${pageContextSnippet}`
-    : 'Контекст текущего открытого сайта сейчас не добавлен.';
+    )
+    : (compactMode ? 'Открытая страница не добавлена.' : 'Контекст текущего открытого сайта сейчас не добавлен.');
   const prayerRuleBlock = prayerMode === 'knowledge-only'
     ? `Спец-режим молитв:
 1. Если пользователь просит прочитать молитву, используй только подтвержденные фрагменты из утвержденной базы знаний или открытой страницы.
@@ -885,6 +1104,17 @@ ${pageTitle}${pageUrl ? ` (${pageUrl})` : ''}
       : '';
 
   if (!hits.length) {
+    if (compactMode) {
+      return `Вопрос пользователя: "${normalizedQuestion}"
+${pageBlock}
+
+Подтвержденных знаний по этому вопросу сейчас нет.
+
+Ответь коротко и по делу.
+Если данных мало, скажи это прямо.
+Не обещай открытие сайта или действие без подтверждения.`;
+    }
+
     return `RUNTIME_USER_TURN:
 Вопрос пользователя: "${normalizedQuestion}"
 ${pageBlock}
@@ -902,12 +1132,33 @@ ${prayerRuleBlock ? `\n\n${prayerRuleBlock}` : ''}`;
   }
 
   const knowledgeBlock = orderedHits
-    .map((hit, index) => `${index + 1}. ${truncatePromptValue(hit.title || hit.canonicalUrl || 'Источник', 140)}${hit.canonicalUrl ? ` (${truncatePromptValue(hit.canonicalUrl, 140)})` : ''}\nФрагмент: ${truncatePromptValue(hit.confirmedExcerpt || hit.text || '', 260)}`)
+    .map((hit, index) => `${index + 1}. ${truncatePromptValue(hit.title || hit.canonicalUrl || 'Источник', 140)}${hit.canonicalUrl ? ` (${truncatePromptValue(hit.canonicalUrl, 140)})` : ''}\nФрагмент: ${truncatePromptValue(hit.confirmedExcerpt || hit.text || '', compactMode ? 180 : 260)}`)
     .join('\n\n');
   const prayerReadingBlock = prayerReadingExcerpt
     ? `Подтвержденный фрагмент для чтения молитвы:
-${truncatePromptValue(prayerReadingExcerpt, 900)}`
+${truncatePromptValue(prayerReadingExcerpt, compactMode ? 520 : 900)}`
     : '';
+
+  if (compactMode) {
+    return `Вопрос пользователя: "${normalizedQuestion}"
+${pageBlock}
+
+Подтвержденные знания:
+${knowledgeBlock}
+${prayerReadingBlock ? `\n\n${prayerReadingBlock}` : ''}
+
+Ответь коротко и естественно.
+Сначала опирайся на открытую страницу, если она подходит.
+Затем используй только подтвержденные знания.
+Не выдумывай факты и не обещай действие браузера без подтверждения.
+${prayerRequested && prayerMode === 'knowledge-only'
+    ? (
+      prayerReadingHit
+        ? 'Если просят молитву, прочитай только подтвержденный фрагмент полностью, без добавлений от себя.'
+        : 'Если просят молитву, используй только подтвержденные фрагменты и не достраивай текст по памяти.'
+    )
+    : 'Не повторяй вопрос пользователя.'}`;
+  }
 
   return `RUNTIME_USER_TURN:
 Вопрос пользователя: "${normalizedQuestion}"
@@ -930,6 +1181,75 @@ ${prayerReadingBlock ? `\n\n${prayerReadingBlock}` : ''}
     )
     : 'Ответь кратко, естественно и по делу.'}
 ${prayerRuleBlock ? `\n\n${prayerRuleBlock}` : ''}`;
+}
+
+function resolveExactPrayerReading(question, {
+  knowledgeHits = [],
+  activePageContext = null,
+} = {}) {
+  const normalizedQuestion = normalizeSpeechText(question);
+  if (!isPrayerRequest(normalizedQuestion)) {
+    return null;
+  }
+
+  const reading = pickPrayerReadingHit(knowledgeHits, normalizedQuestion);
+  if (reading?.excerpt) {
+    return {
+      sourceTitle: reading.hit?.title || reading.hit?.canonicalUrl || 'Подтверждённый источник',
+      sourceUrl: reading.hit?.canonicalUrl || '',
+      excerpt: reading.excerpt,
+      sourceKind: 'knowledge',
+    };
+  }
+
+  const pageExcerpt = extractConfirmedPrayerExcerpt(
+    activePageContext?.readerText || activePageContext?.contextSnippet || '',
+    normalizedQuestion,
+  );
+  if (pageExcerpt.length >= 80) {
+    return {
+      sourceTitle: activePageContext?.title || activePageContext?.url || 'Открытая страница',
+      sourceUrl: activePageContext?.url || '',
+      excerpt: pageExcerpt,
+      sourceKind: 'page',
+    };
+  }
+
+  return null;
+}
+
+function buildExactPrayerReadingPrompt(question, reading) {
+  return `RUNTIME_EXACT_READING:
+Пользователь попросил молитву: "${truncatePromptValue(question, 220)}"
+Разрешено только точное чтение подтвержденного текста.
+Источник: ${truncatePromptValue(reading?.sourceTitle || 'Подтверждённый источник', 180)}${reading?.sourceUrl ? ` (${truncatePromptValue(reading.sourceUrl, 180)})` : ''}
+
+Прочитай сейчас только этот текст, полностью и без добавлений от себя:
+${truncatePromptValue(reading?.excerpt || '', 1200)}
+
+Правила:
+1. Не пересказывай и не сокращай текст.
+2. Не добавляй вступление, если пользователь не просил.
+3. Не вставляй комментарии и пояснения между строками.
+4. Не отказывайся, потому что источник уже подтверждён.`;
+}
+
+function buildPrayerSourceRequiredPrompt(question, {
+  knowledgeHits = [],
+  activePageContext = null,
+} = {}) {
+  const topHit = Array.isArray(knowledgeHits) ? knowledgeHits[0] : null;
+  const sourceTitle = topHit?.title || activePageContext?.title || 'утверждённый источник';
+  const sourceUrl = topHit?.canonicalUrl || activePageContext?.url || '';
+  return `RUNTIME_PRAYER_SOURCE_REQUIRED:
+Пользователь попросил молитву: "${truncatePromptValue(question, 220)}"
+Точного подтвержденного текста для чтения сейчас нет.
+${sourceUrl ? `Есть ближайший источник: ${truncatePromptValue(sourceTitle, 180)} (${truncatePromptValue(sourceUrl, 180)}).` : 'Под рукой нет открытого подтверждённого источника.'}
+
+Ответь коротко и честно:
+1. скажи, что для точного чтения нужен подтверждённый источник;
+2. предложи открыть страницу с текстом молитвы;
+3. не выдумывай текст по памяти.`;
 }
 
 function buildGreetingAckPrompt(greetingText) {
@@ -1143,6 +1463,7 @@ function App() {
   const browserRequestIdRef = useRef(0);
   const browserFlowRequestIdRef = useRef(0);
   const browserIntentAbortRef = useRef(null);
+  const browserPanelRef = useRef(DEFAULT_PANEL_STATE);
   const browserFlowStateRef = useRef('idle');
   const activeBrowserSessionIdRef = useRef('');
   const conversationSessionIdRef = useRef('');
@@ -1161,7 +1482,7 @@ function App() {
   const avatarQuickTapTimestampsRef = useRef([]);
   const browserTraceCounterRef = useRef(0);
   const browserViewPollTimerRef = useRef(null);
-  const lastLiveFinalRef = useRef({ key: '', timestamp: 0 });
+  const lastLiveFinalRef = useRef({ key: '', timestamp: 0, requestId: 0, source: '' });
   const activeDialogRequestRef = useRef(0);
   const recentTurnsForIntentRef = useRef([]);
   const normalTurnInFlightRef = useRef(false);
@@ -1172,6 +1493,7 @@ function App() {
   const assistantPromptQueueRef = useRef([]);
   const assistantPromptInFlightRef = useRef(false);
   const assistantInFlightRequestIdRef = useRef(0);
+  const assistantAwaitingResponseRef = useRef(false);
   const assistantPromptTimerRef = useRef(null);
   const assistantPromptSeqRef = useRef(0);
   const recordConversationActionRef = useRef(null);
@@ -1183,12 +1505,41 @@ function App() {
   const preferServerSttRef = useRef(false);
   const lastAssistantTurnRef = useRef({ text: '', timestamp: 0 });
   const dialogRequestStatesRef = useRef(new Map());
+  const sessionGreetingQueuedRef = useRef(false);
+  const pendingServerFinalRef = useRef({ text: '', timerId: null, capturedAt: 0 });
+  const pendingLiveFinalRef = useRef({ text: '', timerId: null, capturedAt: 0 });
+  const pendingClientPanelLoadRef = useRef({
+    requestId: 0,
+    transcript: '',
+    actionType: '',
+    targetUrl: '',
+    timerId: null,
+    frameLoaded: false,
+    contextReady: false,
+  });
 
   const selectedCharacter = config?.characters?.find((character) => character.id === config.activeCharacterId) || config?.characters?.[0] || null;
   const safeSpeechFlowEnabled = config?.safetySwitches?.safeSpeechFlowEnabled !== false;
-  const speechStabilityProfile = normalizeSpeechStabilityProfile(config?.speechStabilityProfile);
-  const speechStabilityConfig = resolveSpeechStabilityConfig(speechStabilityProfile, safeSpeechFlowEnabled);
+  const runtimeProvider = String(selectedCharacter?.runtimeProvider || 'gemini-live').trim() || 'gemini-live';
+  const usesYandexRuntime = runtimeProvider === 'yandex-full';
+  const baseSpeechStabilityProfile = normalizeSpeechStabilityProfile(config?.speechStabilityProfile);
+  const speechStabilityProfile = baseSpeechStabilityProfile;
+  const speechStabilityConfig = selectedCharacter?.id === 'batyushka-2'
+    ? {
+      ...resolveSpeechStabilityConfig(speechStabilityProfile, safeSpeechFlowEnabled),
+      profile: 'batyushka-stable',
+      bargeInHoldMs: 560,
+      minTranscriptLength: 7,
+      botVolumeGuard: 0.115,
+      immediateOnSpeechStart: false,
+    }
+    : resolveSpeechStabilityConfig(speechStabilityProfile, safeSpeechFlowEnabled);
   const prayerReadMode = String(config?.prayerReadMode || 'knowledge-only').trim().toLowerCase();
+  const usesLiveInput = Boolean(selectedCharacter?.liveInputEnabled || usesYandexRuntime);
+  const usesClientInlinePanel = isClientInlinePanelMode(selectedCharacter?.browserPanelMode);
+  const pageContextMode = String(selectedCharacter?.pageContextMode || 'browser-session').trim() === 'url-fetch'
+    ? 'url-fetch'
+    : 'browser-session';
   const voiceOptions = Array.isArray(config?.supportedVoices) && config.supportedVoices.length > 0
     ? config.supportedVoices.map((voice) => ({
       value: voice.name,
@@ -1202,20 +1553,20 @@ function App() {
   const activeBackground = BACKGROUND_PRESETS[uiCharacter?.backgroundPreset] || BACKGROUND_PRESETS.aurora;
   const avatarModelUrl = uiCharacter?.avatarModelUrl || DEFAULT_AVATAR_MODEL_URL;
   const avatarInstanceId = uiCharacter?.avatarInstanceId || `avatar-${uiCharacter?.id || 'default'}`;
-  const avatarFrame = uiCharacter?.id === BATYUSHKA_CHARACTER_ID
+  const avatarFrame = BATYUSHKA_CHARACTER_IDS.has(uiCharacter?.id || '')
     ? {
-      y: -1.2,
-      scale: 0.7,
-      camera: { position: [0, 0, 0.5], fov: 43 },
-      lights: { ambient: 1.22, directional: 1.02 },
+      y: -0.9,
+      scale: 1.82,
+      camera: { position: [0, 0, 0.36], fov: 35 },
+      lights: { ambient: 1.18, directional: 0.96 },
       idleMotion: true,
       idleMotionProfile: {
-        yawAmplitude: 0.028,
-        yawSpeed: 0.36,
-        pitchAmplitude: 0.016,
-        pitchSpeed: 0.24,
-        bobAmplitude: 0.011,
-        bobSpeed: 0.38,
+        yawAmplitude: 0.024,
+        yawSpeed: 0.34,
+        pitchAmplitude: 0.014,
+        pitchSpeed: 0.22,
+        bobAmplitude: 0.009,
+        bobSpeed: 0.34,
       },
     }
     : {
@@ -1252,14 +1603,20 @@ function App() {
   const themeMode = config?.themeMode === 'dark' ? 'dark' : 'light';
   const runtimeConfig = selectedCharacter
     ? {
-      voiceModelId: selectedCharacter.voiceModelId,
+      runtimeProvider,
+      modelId: selectedCharacter.modelId || selectedCharacter.voiceModelId,
+      voiceModelId: selectedCharacter.voiceModelId || selectedCharacter.modelId,
       voiceName: selectedCharacter.voiceName,
+      ttsVoiceName: selectedCharacter.ttsVoiceName || selectedCharacter.voiceName,
       systemPrompt: selectedCharacter.systemPrompt,
       greetingText: selectedCharacter.greetingText,
       sessionContextText: sessionBootstrapText,
       shouldSendGreeting: sessionShouldSendGreeting,
-      captureUserAudio: true,
+      captureUserAudio: usesLiveInput,
+      voiceGatewayUrl: selectedCharacter.voiceGatewayUrl || '',
+      conversationSessionId,
       characterId: selectedCharacter.id,
+      outputAudioTranscription: selectedCharacter.outputAudioTranscription !== false,
       speechStabilityProfile,
       prayerReadMode,
       safeSpeechFlowEnabled,
@@ -1305,45 +1662,6 @@ function App() {
       assistantPromptTimerRef.current = null;
     }
   }, []);
-
-  const resetSessionRuntimeState = React.useCallback(() => {
-    sessionWebHistoryRef.current = [];
-    handledTranscriptsRef.current = [];
-    browserRequestIdRef.current = 0;
-    browserFlowRequestIdRef.current = 0;
-    browserIntentAbortRef.current?.abort?.();
-    browserIntentAbortRef.current = null;
-    lastBrowserCommandRef.current = { key: '', transcript: '', timestamp: 0 };
-    browserSpeechGuardUntilRef.current = 0;
-    browserIntentInFlightRef.current = false;
-    inFlightBrowserKeyRef.current = '';
-    normalTurnInFlightRef.current = false;
-    pendingOrchestratedTurnRef.current = null;
-    activeDialogRequestRef.current = 0;
-    lastLiveFinalRef.current = { key: '', timestamp: 0 };
-    lastAssistantTurnRef.current = { text: '', timestamp: 0 };
-    assistantTurnCountRef.current = 0;
-    assistantPromptQueueRef.current = [];
-    assistantPromptInFlightRef.current = false;
-    assistantInFlightRequestIdRef.current = 0;
-    recentTurnsForIntentRef.current = [];
-    dialogRequestStatesRef.current = new Map();
-    bargeInCandidateRef.current = { startedAt: 0, textKey: '' };
-    lastBargeInAtRef.current = 0;
-    clearAssistantPromptTimer();
-    browserFlowStateRef.current = 'idle';
-    setBrowserFlowState('idle');
-    activeBrowserSessionIdRef.current = '';
-    setActiveBrowserSessionId('');
-    setBrowserPanel(DEFAULT_PANEL_STATE);
-    setSessionBootstrapText('');
-    setSessionShouldSendGreeting(true);
-
-    if (browserViewPollTimerRef.current) {
-      clearInterval(browserViewPollTimerRef.current);
-      browserViewPollTimerRef.current = null;
-    }
-  }, [clearAssistantPromptTimer]);
 
   const sendBrowserClientEvent = React.useCallback((event, details = {}) => {
     void fetch('/api/browser/client-event', {
@@ -1454,8 +1772,15 @@ function App() {
       return;
     }
 
+    assistantPromptInFlightRef.current = true;
+    assistantInFlightRequestIdRef.current = nextPrompt.requestId || activeDialogRequestRef.current;
+    assistantAwaitingResponseRef.current = true;
+
     const sent = sendTextTurnRef.current?.(nextPrompt.text, { interrupt: nextPrompt.interrupt });
     if (!sent) {
+      assistantPromptInFlightRef.current = false;
+      assistantInFlightRequestIdRef.current = 0;
+      assistantAwaitingResponseRef.current = false;
       recordConversationAction('assistant.queue.drop', {
         reason: 'send-failed',
         source: nextPrompt.source || '',
@@ -1464,8 +1789,6 @@ function App() {
       return;
     }
 
-    assistantPromptInFlightRef.current = true;
-    assistantInFlightRequestIdRef.current = nextPrompt.requestId || activeDialogRequestRef.current;
     clearAssistantPromptTimer();
     const handleQueueTurnTimeout = () => {
       const assistantTurnStartedAt = assistantTurnStartedAtRef.current;
@@ -1477,6 +1800,7 @@ function App() {
 
       assistantPromptInFlightRef.current = false;
       assistantInFlightRequestIdRef.current = 0;
+      assistantAwaitingResponseRef.current = false;
       assistantPromptTimerRef.current = null;
       recordConversationAction('assistant.queue.timeout-release', {
         source: nextPrompt.source || '',
@@ -1546,6 +1870,7 @@ function App() {
   const releaseAssistantPromptLock = React.useCallback((reason = 'commit') => {
     assistantPromptInFlightRef.current = false;
     assistantInFlightRequestIdRef.current = 0;
+    assistantAwaitingResponseRef.current = false;
     clearAssistantPromptTimer();
     recordConversationAction('assistant.queue.release', { reason });
     drainAssistantPromptQueue();
@@ -1555,9 +1880,35 @@ function App() {
     assistantPromptQueueRef.current = [];
     assistantPromptInFlightRef.current = false;
     assistantInFlightRequestIdRef.current = 0;
+    assistantAwaitingResponseRef.current = false;
     clearAssistantPromptTimer();
     recordConversationAction('assistant.queue.clear', { reason });
   }, [clearAssistantPromptTimer, recordConversationAction]);
+
+  const cancelPendingBrowserWork = React.useCallback((reason = 'new-user-request') => {
+    browserIntentAbortRef.current?.abort?.();
+    browserIntentAbortRef.current = null;
+    browserIntentInFlightRef.current = false;
+    browserFlowRequestIdRef.current = 0;
+    inFlightBrowserKeyRef.current = '';
+    if (pendingClientPanelLoadRef.current?.timerId) {
+      clearTimeout(pendingClientPanelLoadRef.current.timerId);
+    }
+    pendingClientPanelLoadRef.current = {
+      requestId: 0,
+      transcript: '',
+      actionType: '',
+      targetUrl: '',
+      timerId: null,
+      frameLoaded: false,
+      contextReady: false,
+    };
+    void fetch('/api/browser/cancel', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reason }),
+    }).catch(() => {});
+  }, []);
 
   const beginUserRequest = React.useCallback((source = 'stt-final') => {
     const previousRequestId = activeDialogRequestRef.current;
@@ -1567,6 +1918,7 @@ function App() {
     const nextRequestId = activeDialogRequestRef.current + 1;
     activeDialogRequestRef.current = nextRequestId;
     pendingOrchestratedTurnRef.current = null;
+    cancelPendingBrowserWork(`superseded:${source}`);
     clearAssistantPromptQueue(`new-user-request:${source}`);
     cancelAssistantOutputRef.current?.();
     recordConversationAction('runtime.request.activate', {
@@ -1574,6 +1926,24 @@ function App() {
       source,
     });
     markDialogRequestState(nextRequestId, 'active', { source });
+    return nextRequestId;
+  }, [cancelPendingBrowserWork, clearAssistantPromptQueue, finalizeDialogRequest, markDialogRequestState, recordConversationAction]);
+
+  const beginAssistantInitiatedRequest = React.useCallback((source = 'assistant-initiated') => {
+    const previousRequestId = activeDialogRequestRef.current;
+    if (previousRequestId > 0) {
+      finalizeDialogRequest(previousRequestId, 'superseded', { source });
+    }
+    const nextRequestId = activeDialogRequestRef.current + 1;
+    activeDialogRequestRef.current = nextRequestId;
+    pendingOrchestratedTurnRef.current = null;
+    clearAssistantPromptQueue(`assistant-request:${source}`);
+    recordConversationAction('runtime.request.activate', {
+      requestId: nextRequestId,
+      source,
+      actor: 'assistant',
+    });
+    markDialogRequestState(nextRequestId, 'assistant-active', { source });
     return nextRequestId;
   }, [clearAssistantPromptQueue, finalizeDialogRequest, markDialogRequestState, recordConversationAction]);
 
@@ -1583,6 +1953,7 @@ function App() {
       return false;
     }
     lastBargeInAtRef.current = now;
+    cancelPendingBrowserWork(reason);
     clearAssistantPromptQueue(reason);
     cancelAssistantOutputRef.current?.();
     if (activeDialogRequestRef.current > 0) {
@@ -1593,7 +1964,7 @@ function App() {
       reason,
     });
     return true;
-  }, [clearAssistantPromptQueue, markDialogRequestState]);
+  }, [cancelPendingBrowserWork, clearAssistantPromptQueue, markDialogRequestState]);
 
   const recordConversationTurn = React.useCallback((role, text, source = 'live') => {
     const sessionId = conversationSessionIdRef.current;
@@ -1641,12 +2012,302 @@ function App() {
     }).catch(() => {});
   }, [selectedCharacter?.id]);
 
+  const clearPendingServerFinal = React.useCallback(() => {
+    const timerId = pendingServerFinalRef.current?.timerId;
+    if (timerId) {
+      clearTimeout(timerId);
+    }
+    pendingServerFinalRef.current = {
+      text: '',
+      timerId: null,
+      capturedAt: 0,
+    };
+  }, []);
+
+  const clearPendingLiveFinal = React.useCallback(() => {
+    const timerId = pendingLiveFinalRef.current?.timerId;
+    if (timerId) {
+      clearTimeout(timerId);
+    }
+    pendingLiveFinalRef.current = {
+      text: '',
+      timerId: null,
+      capturedAt: 0,
+    };
+  }, []);
+
+  const resetSessionRuntimeState = React.useCallback(() => {
+    sessionWebHistoryRef.current = [];
+    handledTranscriptsRef.current = [];
+    browserRequestIdRef.current = 0;
+    browserFlowRequestIdRef.current = 0;
+    browserIntentAbortRef.current?.abort?.();
+    browserIntentAbortRef.current = null;
+    lastBrowserCommandRef.current = { key: '', transcript: '', timestamp: 0 };
+    browserSpeechGuardUntilRef.current = 0;
+    browserIntentInFlightRef.current = false;
+    inFlightBrowserKeyRef.current = '';
+    normalTurnInFlightRef.current = false;
+    pendingOrchestratedTurnRef.current = null;
+    activeDialogRequestRef.current = 0;
+    lastLiveFinalRef.current = { key: '', timestamp: 0, requestId: 0, source: '' };
+    lastAssistantTurnRef.current = { text: '', timestamp: 0 };
+    assistantTurnCountRef.current = 0;
+    sessionGreetingQueuedRef.current = false;
+    assistantPromptQueueRef.current = [];
+    assistantPromptInFlightRef.current = false;
+    assistantInFlightRequestIdRef.current = 0;
+    recentTurnsForIntentRef.current = [];
+    dialogRequestStatesRef.current = new Map();
+    bargeInCandidateRef.current = { startedAt: 0, textKey: '' };
+    lastBargeInAtRef.current = 0;
+    clearAssistantPromptTimer();
+    clearPendingServerFinal();
+    clearPendingLiveFinal();
+    if (pendingClientPanelLoadRef.current?.timerId) {
+      clearTimeout(pendingClientPanelLoadRef.current.timerId);
+    }
+    pendingClientPanelLoadRef.current = {
+      requestId: 0,
+      transcript: '',
+      actionType: '',
+      targetUrl: '',
+      timerId: null,
+      frameLoaded: false,
+      contextReady: false,
+    };
+    browserFlowStateRef.current = 'idle';
+    setBrowserFlowState('idle');
+    activeBrowserSessionIdRef.current = '';
+    setActiveBrowserSessionId('');
+    setBrowserPanel(DEFAULT_PANEL_STATE);
+    setSessionBootstrapText('');
+    setSessionShouldSendGreeting(true);
+
+    if (browserViewPollTimerRef.current) {
+      clearInterval(browserViewPollTimerRef.current);
+      browserViewPollTimerRef.current = null;
+    }
+  }, [clearAssistantPromptTimer, clearPendingLiveFinal, clearPendingServerFinal]);
+
+  const commitRecognizedUserTranscript = React.useCallback((transcript, {
+    source = 'server-stt',
+    requestSource = 'server-stt-final',
+    sttSessionPrefix = 'server-stt',
+    turnSource = 'server-stt',
+  } = {}) => {
+    const normalized = normalizeSpeechText(transcript);
+    setLiveInputTranscript('');
+    if (!normalized || isAssistantBrowserNarration(normalized)) {
+      return false;
+    }
+
+    const botVolume = audioPlayer?.getVolume?.() || 0;
+    if (isLikelyAssistantEchoFinal(normalized, lastAssistantTurnRef.current, botVolume, speechStabilityConfig)) {
+      recordConversationAction('stt.stream.echo-drop', {
+        conversationSessionId: conversationSessionIdRef.current || '',
+        source,
+        textLength: normalized.length,
+      });
+      return false;
+    }
+
+    const transcriptKey = normalizeTranscriptKey(normalized);
+    const now = Date.now();
+    const previousLiveFinal = lastLiveFinalRef.current;
+    const previousRequestState = previousLiveFinal.requestId > 0
+      ? dialogRequestStatesRef.current.get(previousLiveFinal.requestId)
+      : null;
+    const duplicateGeminiFinalInFlight = source === 'gemini-input'
+      && transcriptKey
+      && previousLiveFinal.key === transcriptKey
+      && previousLiveFinal.source === 'gemini-input'
+      && previousLiveFinal.requestId > 0
+      && !previousRequestState?.finalized;
+
+    if (duplicateGeminiFinalInFlight) {
+      recordConversationAction('stt.stream.final-drop', {
+        conversationSessionId: conversationSessionIdRef.current || '',
+        source,
+        reason: 'duplicate-live-final-in-flight',
+        textLength: normalized.length,
+      });
+      return false;
+    }
+
+    if (
+      transcriptKey
+      && previousLiveFinal.key === transcriptKey
+      && (now - previousLiveFinal.timestamp) < USER_FINAL_DEDUP_WINDOW_MS
+    ) {
+      recordConversationAction('stt.stream.final-drop', {
+        conversationSessionId: conversationSessionIdRef.current || '',
+        source,
+        reason: 'dedupe-window',
+        textLength: normalized.length,
+      });
+      return false;
+    }
+    if (botVolume > speechStabilityConfig.botVolumeGuard) {
+      triggerBargeIn(`bargein-final-${source}`);
+    }
+
+    const requestId = beginUserRequest(requestSource);
+    lastLiveFinalRef.current = {
+      key: transcriptKey,
+      timestamp: now,
+      requestId,
+      source,
+    };
+    updateConversationSessionState({
+      lastFinalTranscriptHash: transcriptKey,
+      activeSttSessionId: conversationSessionIdRef.current
+        ? `${sttSessionPrefix}:${conversationSessionIdRef.current}`
+        : '',
+    });
+    recordConversationAction('stt.stream.final', {
+      conversationSessionId: conversationSessionIdRef.current || '',
+      source,
+      textLength: normalized.length,
+    });
+    recordConversationAction('user.turn.final', {
+      conversationSessionId: conversationSessionIdRef.current || '',
+      source,
+      textLength: normalized.length,
+    });
+    recordConversationTurn('user', normalized, turnSource);
+
+    const intentType = classifyTranscriptIntent(normalized);
+    const implicitBrowserAction = Boolean(activeBrowserSessionIdRef.current)
+      && Boolean(parseImplicitBrowserActionRequest(normalized));
+    if (intentType === 'browser_action' || intentType === 'page_query' || intentType === 'site_open' || implicitBrowserAction) {
+      handleBrowserTranscriptRef.current?.(normalized, { requestId });
+      return true;
+    }
+
+    handleOrchestratedTurnRef.current?.(normalized, { requestId });
+    return true;
+  }, [
+    audioPlayer,
+    beginUserRequest,
+    recordConversationAction,
+    recordConversationTurn,
+    speechStabilityConfig,
+    triggerBargeIn,
+    updateConversationSessionState,
+  ]);
+
+  const schedulePendingServerFinal = React.useCallback((delayMs = SERVER_STT_FRAGMENT_HOLD_MS) => {
+    const bufferedText = normalizeSpeechText(pendingServerFinalRef.current.text);
+    if (!bufferedText) {
+      clearPendingServerFinal();
+      return;
+    }
+
+    if (pendingServerFinalRef.current.timerId) {
+      clearTimeout(pendingServerFinalRef.current.timerId);
+    }
+
+    pendingServerFinalRef.current.timerId = window.setTimeout(() => {
+      const pendingText = normalizeSpeechText(pendingServerFinalRef.current.text);
+      clearPendingServerFinal();
+      if (!pendingText) {
+        return;
+      }
+      commitRecognizedUserTranscript(pendingText, {
+        source: 'server-stt',
+        requestSource: 'server-stt-final',
+        sttSessionPrefix: 'server-stt',
+        turnSource: 'server-stt',
+      });
+    }, Math.max(180, delayMs));
+  }, [clearPendingServerFinal, commitRecognizedUserTranscript]);
+
+  const flushPendingServerFinal = React.useCallback((mode = 'commit') => {
+    const pendingText = normalizeSpeechText(pendingServerFinalRef.current.text);
+    clearPendingServerFinal();
+    if (mode !== 'commit' || !pendingText) {
+      return false;
+    }
+    return commitRecognizedUserTranscript(pendingText, {
+      source: 'server-stt',
+      requestSource: 'server-stt-final',
+      sttSessionPrefix: 'server-stt',
+      turnSource: 'server-stt',
+    });
+  }, [clearPendingServerFinal, commitRecognizedUserTranscript]);
+
+  const handleServerFinalTranscript = React.useCallback((transcript) => {
+    const normalized = normalizeSpeechText(transcript);
+    setLiveInputTranscript('');
+    if (!normalized || isAssistantBrowserNarration(normalized)) {
+      return;
+    }
+
+    const now = Date.now();
+    const pendingText = normalizeSpeechText(pendingServerFinalRef.current.text);
+    const pendingCapturedAt = Number(pendingServerFinalRef.current.capturedAt || 0);
+    if (pendingText) {
+      const withinMergeWindow = pendingCapturedAt > 0
+        && (now - pendingCapturedAt) <= SERVER_STT_FRAGMENT_MERGE_WINDOW_MS;
+      if (withinMergeWindow && canMergeServerTranscriptFragments(pendingText, normalized)) {
+        const mergedText = mergeServerTranscriptFragments(pendingText, normalized);
+        pendingServerFinalRef.current.text = mergedText;
+        pendingServerFinalRef.current.capturedAt = now;
+        recordConversationAction('stt.stream.final.merge', {
+          conversationSessionId: conversationSessionIdRef.current || '',
+          textLength: mergedText.length,
+        });
+        schedulePendingServerFinal(
+          looksLikeIncompleteTranscriptFragment(mergedText)
+            ? getServerFinalHoldDelay(mergedText)
+            : 260,
+        );
+        return;
+      }
+
+      flushPendingServerFinal('commit');
+    }
+
+    if (looksLikeIncompleteTranscriptFragment(normalized)) {
+      pendingServerFinalRef.current = {
+        text: normalized,
+        timerId: null,
+        capturedAt: now,
+      };
+      recordConversationAction('stt.stream.final.hold', {
+        conversationSessionId: conversationSessionIdRef.current || '',
+        textLength: normalized.length,
+      });
+      schedulePendingServerFinal(getServerFinalHoldDelay(normalized));
+      return;
+    }
+
+    commitRecognizedUserTranscript(normalized, {
+      source: 'server-stt',
+      requestSource: 'server-stt-final',
+      sttSessionPrefix: 'server-stt',
+      turnSource: 'server-stt',
+    });
+  }, [
+    commitRecognizedUserTranscript,
+    flushPendingServerFinal,
+    recordConversationAction,
+    schedulePendingServerFinal,
+  ]);
+
   const handleLiveInputTranscription = React.useCallback((transcript) => {
     const normalized = String(transcript || '').trim();
     const now = Date.now();
     setLiveInputTranscript(normalized);
     if (!normalized) {
+      clearPendingLiveFinal();
       bargeInCandidateRef.current = { startedAt: 0, textKey: '' };
+      return;
+    }
+
+    if (isAssistantBrowserNarration(normalized)) {
+      clearPendingLiveFinal();
       return;
     }
 
@@ -1685,7 +2346,7 @@ function App() {
       bargeInCandidateRef.current = { startedAt: 0, textKey: '' };
       triggerBargeIn('bargein-input-hold');
     }
-  }, [audioPlayer, speechStabilityConfig, triggerBargeIn]);
+  }, [audioPlayer, clearPendingLiveFinal, speechStabilityConfig, triggerBargeIn]);
 
   const bootstrapConversationContext = React.useCallback(async (sessionId, { shouldSendGreeting = false } = {}) => {
     const restorePayload = await jsonRequest(
@@ -1707,6 +2368,8 @@ function App() {
     lastLiveFinalRef.current = {
       key: normalizeTranscriptKey(effectiveRestorePayload?.restore?.lastFinalTranscriptHash || ''),
       timestamp: 0,
+      requestId: 0,
+      source: '',
     };
     const restoredBrowserSessionId = String(effectiveRestorePayload?.restore?.browserSessionId || '').trim();
     if (restoredBrowserSessionId) {
@@ -1752,9 +2415,63 @@ function App() {
           }));
         }
       });
+    } else if (pageContextMode === 'url-fetch' && effectiveRestorePayload?.restore?.browserContext?.url) {
+      const restoredUrl = String(effectiveRestorePayload.restore.browserContext.url || '').trim();
+      const restoredTitle = String(effectiveRestorePayload.restore.browserContext.title || '').trim();
+      if (restoredUrl) {
+        browserFlowStateRef.current = 'ready';
+        setBrowserFlowState('ready');
+        setBrowserPanel((current) => ({
+          ...buildClientPanelState({
+            url: restoredUrl,
+            titleHint: restoredTitle || restoredUrl,
+            sourceType: 'restored-site',
+          }, current, {
+            status: 'ready',
+            note: '',
+            browserPanelMode: 'client-inline',
+          }),
+          title: restoredTitle || current.title || restoredUrl,
+          url: restoredUrl,
+          clientUrl: restoredUrl,
+          clientContextStatus: 'loading',
+          clientContextError: '',
+        }));
+        void jsonRequest('/api/browser/url-context', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            url: restoredUrl,
+            question: 'что сейчас находится на открытой странице',
+            requestId: 0,
+            conversationSessionId: sessionId,
+            characterId: selectedCharacter?.id || '',
+          }),
+        }, BROWSER_CONTEXT_TIMEOUT_MS + 3000)
+          .then((contextResult) => {
+            setBrowserPanel((current) => ({
+              ...current,
+              title: contextResult?.title || current.title,
+              url: contextResult?.url || current.url,
+              embeddable: contextResult?.embeddable !== false,
+              readerText: contextResult?.readerText || current.readerText,
+              lastUpdated: contextResult?.lastUpdated || current.lastUpdated,
+              clientContextStatus: 'ready',
+              clientContextError: '',
+              error: null,
+            }));
+          })
+          .catch((contextError) => {
+            setBrowserPanel((current) => ({
+              ...current,
+              clientContextStatus: 'error',
+              clientContextError: contextError.message || 'Не удалось быстро прочитать страницу.',
+            }));
+          });
+      }
     }
     return nextBootstrapText;
-  }, [selectedCharacter?.id]);
+  }, [pageContextMode, selectedCharacter?.id]);
 
   const refreshBrowserView = React.useCallback(async (force = false) => {
     const sessionId = activeBrowserSessionIdRef.current;
@@ -1908,6 +2625,25 @@ function App() {
     }, BROWSER_CONTEXT_TIMEOUT_MS);
   }, [selectedCharacter?.id]);
 
+  const requestClientInlineContext = React.useCallback(async (url, question, { requestId = 0 } = {}) => {
+    const normalizedUrl = String(url || '').trim();
+    if (!normalizedUrl) {
+      throw new Error('Нет адреса страницы для чтения контекста');
+    }
+
+    return jsonRequest('/api/browser/url-context', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        url: normalizedUrl,
+        question,
+        requestId: Number.isInteger(requestId) ? requestId : 0,
+        conversationSessionId: conversationSessionIdRef.current || '',
+        characterId: selectedCharacter?.id || '',
+      }),
+    }, BROWSER_CONTEXT_TIMEOUT_MS + 3000);
+  }, [selectedCharacter?.id]);
+
   const queryKnowledgeForTurn = React.useCallback(async (question) => {
     const normalizedQuestion = normalizeSpeechText(question);
     if (!normalizedQuestion) {
@@ -1926,7 +2662,24 @@ function App() {
   }, [selectedCharacter?.id]);
 
   const getRuntimePageContextForTurn = React.useCallback(async (question) => {
-    if (!activeBrowserSessionIdRef.current || browserFlowStateRef.current !== 'ready' || browserIntentInFlightRef.current) {
+    if (browserIntentInFlightRef.current) {
+      return null;
+    }
+
+    if (pageContextMode === 'url-fetch' && browserPanelRef.current?.clientUrl && browserFlowStateRef.current === 'ready') {
+      try {
+        const contextResult = await requestClientInlineContext(
+          browserPanelRef.current.clientUrl,
+          question,
+          { requestId: activeDialogRequestRef.current },
+        );
+        return contextResult || null;
+      } catch {
+        return null;
+      }
+    }
+
+    if (!activeBrowserSessionIdRef.current || browserFlowStateRef.current !== 'ready') {
       return null;
     }
 
@@ -1938,11 +2691,15 @@ function App() {
     } catch {
       return null;
     }
-  }, [requestActiveBrowserContext]);
+  }, [pageContextMode, requestActiveBrowserContext, requestClientInlineContext]);
 
   useEffect(() => {
     browserFlowStateRef.current = browserFlowState;
   }, [browserFlowState]);
+
+  useEffect(() => {
+    browserPanelRef.current = browserPanel;
+  }, [browserPanel]);
 
   useEffect(() => {
     activeBrowserSessionIdRef.current = activeBrowserSessionId;
@@ -1975,18 +2732,26 @@ function App() {
     };
   }, [activeBrowserSessionId, browserFlowState, refreshBrowserView]);
 
-  const {
-    status,
-    connect,
-    disconnect,
-    error,
-    sendTextTurn,
-    cancelAssistantOutput,
-    clearSessionResumption,
-  } = useGeminiLive(
-    audioPlayer,
-    runtimeConfig,
-    {
+  const voiceSessionCallbacks = {
+      onSessionReady: ({ resumed = false, shouldSendGreeting = false }) => {
+        recordConversationAction('model.session.ready', {
+          conversationSessionId: conversationSessionIdRef.current || '',
+          resumed,
+          shouldSendGreeting,
+        });
+        if (resumed || !shouldSendGreeting || sessionGreetingQueuedRef.current) {
+          return;
+        }
+        const greetingRequestId = beginAssistantInitiatedRequest('session-greeting');
+        sessionGreetingQueuedRef.current = true;
+        enqueueAssistantPrompt(selectedCharacter?.greetingText || 'Поздоровайся коротко с пользователем.', {
+          interrupt: false,
+          priority: 'high',
+          source: 'session.greeting',
+          dedupeKey: `session-greeting:${selectedCharacter?.id || 'default'}`,
+          requestId: greetingRequestId,
+        });
+      },
       onInputTranscription: (text) => {
         if (preferServerSttRef.current) {
           return;
@@ -2000,72 +2765,51 @@ function App() {
         if (preferServerSttRef.current) {
           return;
         }
-        const normalized = normalizeSpeechText(text);
-        setLiveInputTranscript('');
-        if (!normalized) {
-          return;
-        }
-
-        const botVolume = audioPlayer?.getVolume?.() || 0;
-        if (isLikelyAssistantEchoFinal(normalized, lastAssistantTurnRef.current, botVolume, speechStabilityConfig)) {
-          recordConversationAction('stt.stream.echo-drop', {
-            conversationSessionId: conversationSessionIdRef.current || '',
-            source: 'gemini-input',
-            textLength: normalized.length,
-          });
-          return;
-        }
-
-        const transcriptKey = normalizeTranscriptKey(normalized);
-        const now = Date.now();
-        if (
-          transcriptKey
-          && lastLiveFinalRef.current.key === transcriptKey
-          && (now - lastLiveFinalRef.current.timestamp) < USER_FINAL_DEDUP_WINDOW_MS
-        ) {
-          return;
-        }
-
-        lastLiveFinalRef.current = { key: transcriptKey, timestamp: now };
-        if (botVolume > speechStabilityConfig.botVolumeGuard) {
-          triggerBargeIn('bargein-final-gemini-input');
-        }
-        const requestId = beginUserRequest('gemini-input-final');
-        updateConversationSessionState({
-          lastFinalTranscriptHash: transcriptKey,
-          activeSttSessionId: conversationSessionIdRef.current ? `gemini-live-input:${conversationSessionIdRef.current}` : '',
+        clearPendingLiveFinal();
+        commitRecognizedUserTranscript(text, {
+          source: usesYandexRuntime ? 'yandex-input' : 'gemini-input',
+          requestSource: usesYandexRuntime ? 'yandex-input-final' : 'gemini-input-final',
+          sttSessionPrefix: usesYandexRuntime ? 'yandex-local-vad' : 'gemini-live-input',
+          turnSource: usesYandexRuntime ? 'yandex-input-transcription' : 'gemini-input-transcription',
         });
-        recordConversationAction('stt.stream.final', {
-          conversationSessionId: conversationSessionIdRef.current || '',
-          textLength: normalized.length,
-        });
-        recordConversationAction('user.turn.final', {
-          conversationSessionId: conversationSessionIdRef.current || '',
-          textLength: normalized.length,
-        });
-        recordConversationTurn('user', normalized, 'gemini-input-transcription');
-
-        const intentType = classifyTranscriptIntent(normalized);
-        const implicitBrowserAction = Boolean(activeBrowserSessionIdRef.current)
-          && Boolean(parseImplicitBrowserActionRequest(normalized));
-        if (intentType === 'browser_action' || intentType === 'page_query' || intentType === 'site_open' || implicitBrowserAction) {
-          handleBrowserTranscriptRef.current?.(normalized, { requestId });
-          return;
-        }
-
-        handleOrchestratedTurnRef.current?.(normalized, { requestId });
       },
       onAssistantTurnStart: () => {
+        if (!assistantAwaitingResponseRef.current) {
+          recordConversationAction('assistant.turn.drop', {
+            conversationSessionId: conversationSessionIdRef.current || '',
+            reason: 'unexpected-start',
+            browserIntentInFlight: browserIntentInFlightRef.current,
+            browserFlowState: browserFlowStateRef.current,
+          });
+          if (
+            browserIntentInFlightRef.current
+            || browserFlowStateRef.current === 'intent_pending'
+            || browserFlowStateRef.current === 'opening'
+          ) {
+            cancelAssistantOutputRef.current?.();
+          }
+          return false;
+        }
         assistantTurnStartedAtRef.current = Date.now();
         assistantPromptInFlightRef.current = true;
         recordConversationAction('assistant.turn.start', {
           conversationSessionId: conversationSessionIdRef.current || '',
         });
+        return true;
       },
       onAssistantTurnCommit: ({ text, textChunks = 0, audioChunks = 0, durationMs = 0 }) => {
         const inFlightRequestId = assistantInFlightRequestIdRef.current;
+        const awaitingResponse = assistantAwaitingResponseRef.current;
         assistantTurnStartedAtRef.current = 0;
         releaseAssistantPromptLock('commit');
+        if (!awaitingResponse || inFlightRequestId <= 0) {
+          recordConversationAction('assistant.turn.drop', {
+            conversationSessionId: conversationSessionIdRef.current || '',
+            reason: 'unexpected-commit',
+            textLength: String(text || '').length,
+          });
+          return;
+        }
         if (inFlightRequestId > 0 && inFlightRequestId !== activeDialogRequestRef.current) {
           recordConversationAction('assistant.turn.drop', {
             reason: 'stale-request',
@@ -2097,12 +2841,21 @@ function App() {
         finalizeDialogRequest(inFlightRequestId || activeDialogRequestRef.current, 'answered', {
           textLength: normalizedAssistantText.length,
         });
-        recordConversationTurn('assistant', text, 'gemini-live');
+        recordConversationTurn('assistant', text, usesYandexRuntime ? 'yandex-full' : 'gemini-live');
       },
       onAssistantTurnCancel: ({ text, interrupted = false }) => {
         const inFlightRequestId = assistantInFlightRequestIdRef.current;
+        const awaitingResponse = assistantAwaitingResponseRef.current;
         assistantTurnStartedAtRef.current = 0;
         releaseAssistantPromptLock('cancel');
+        if (!awaitingResponse && !interrupted) {
+          recordConversationAction('assistant.turn.drop', {
+            conversationSessionId: conversationSessionIdRef.current || '',
+            reason: 'unexpected-cancel',
+            textLength: String(text || '').length,
+          });
+          return;
+        }
         recordConversationAction('assistant.turn.cancel', {
           conversationSessionId: conversationSessionIdRef.current || '',
           textLength: String(text || '').length,
@@ -2151,8 +2904,31 @@ function App() {
           disconnect();
         }, reconnectDelayMs);
       },
-    },
+  };
+
+  const geminiSession = useGeminiLive(
+    audioPlayer,
+    runtimeConfig,
+    voiceSessionCallbacks,
   );
+
+  const yandexSession = useYandexVoiceSession(
+    audioPlayer,
+    runtimeConfig,
+    voiceSessionCallbacks,
+  );
+
+  const activeVoiceSession = usesYandexRuntime ? yandexSession : geminiSession;
+  const {
+    status,
+    connect,
+    disconnect,
+    error,
+    getUserVolume: getLiveUserVolume,
+    sendTextTurn,
+    cancelAssistantOutput,
+    clearSessionResumption,
+  } = activeVoiceSession;
 
   useEffect(() => {
     sendTextTurnRef.current = sendTextTurn;
@@ -2180,7 +2956,7 @@ function App() {
     disconnect: disconnectServerStt,
     getUserVolume: getServerSttUserVolume,
   } = useServerStt({
-    enabled: initialized && status === 'connected' && Boolean(conversationSessionId),
+    enabled: initialized && status === 'connected' && Boolean(conversationSessionId) && !usesLiveInput && !usesYandexRuntime,
     conversationSessionId,
     language: 'ru-RU',
     onSpeechStart: () => {
@@ -2192,62 +2968,7 @@ function App() {
       }
     },
     onPartialTranscript: handleLiveInputTranscription,
-    onFinalTranscript: (transcript) => {
-      const normalized = normalizeSpeechText(transcript);
-      setLiveInputTranscript('');
-      if (!normalized || isAssistantBrowserNarration(normalized)) {
-        return;
-      }
-
-      const botVolume = audioPlayer?.getVolume?.() || 0;
-      if (isLikelyAssistantEchoFinal(normalized, lastAssistantTurnRef.current, botVolume, speechStabilityConfig)) {
-        recordConversationAction('stt.stream.echo-drop', {
-          conversationSessionId: conversationSessionIdRef.current || '',
-          source: 'server-stt',
-          textLength: normalized.length,
-        });
-        return;
-      }
-
-      const transcriptKey = normalizeTranscriptKey(normalized);
-      const now = Date.now();
-      if (
-        transcriptKey
-        && lastLiveFinalRef.current.key === transcriptKey
-        && (now - lastLiveFinalRef.current.timestamp) < USER_FINAL_DEDUP_WINDOW_MS
-      ) {
-        return;
-      }
-
-      lastLiveFinalRef.current = { key: transcriptKey, timestamp: now };
-      if (botVolume > speechStabilityConfig.botVolumeGuard) {
-        triggerBargeIn('bargein-final-server-stt');
-      }
-      const requestId = beginUserRequest('server-stt-final');
-      updateConversationSessionState({
-        lastFinalTranscriptHash: transcriptKey,
-        activeSttSessionId: conversationSessionIdRef.current ? `server-stt:${conversationSessionIdRef.current}` : '',
-      });
-      recordConversationAction('stt.stream.final', {
-        conversationSessionId: conversationSessionIdRef.current || '',
-        textLength: normalized.length,
-      });
-      recordConversationAction('user.turn.final', {
-        conversationSessionId: conversationSessionIdRef.current || '',
-        textLength: normalized.length,
-      });
-      recordConversationTurn('user', normalized, 'server-stt');
-
-      const intentType = classifyTranscriptIntent(normalized);
-      const implicitBrowserAction = Boolean(activeBrowserSessionIdRef.current)
-        && Boolean(parseImplicitBrowserActionRequest(normalized));
-      if (intentType === 'browser_action' || intentType === 'page_query' || intentType === 'site_open' || implicitBrowserAction) {
-        handleBrowserTranscriptRef.current?.(normalized, { requestId });
-        return;
-      }
-
-      handleOrchestratedTurnRef.current?.(normalized, { requestId });
-    },
+    onFinalTranscript: handleServerFinalTranscript,
   });
 
   useEffect(() => {
@@ -2272,8 +2993,25 @@ function App() {
   }, [recordConversationAction, sttError, sttStatus]);
 
   useEffect(() => {
-    preferServerSttRef.current = sttStatus === 'connected';
-  }, [sttStatus]);
+    preferServerSttRef.current = !usesLiveInput && sttStatus === 'connected';
+  }, [sttStatus, usesLiveInput]);
+
+  useEffect(() => () => {
+    clearPendingServerFinal();
+    clearPendingLiveFinal();
+  }, [clearPendingLiveFinal, clearPendingServerFinal]);
+
+  useEffect(() => {
+    if (sttStatus !== 'connected') {
+      clearPendingServerFinal();
+    }
+  }, [clearPendingServerFinal, sttStatus]);
+
+  useEffect(() => {
+    if (!usesLiveInput) {
+      clearPendingLiveFinal();
+    }
+  }, [clearPendingLiveFinal, usesLiveInput]);
 
   const handleOrchestratedUserTurn = React.useCallback(async (transcript, { requestId = 0 } = {}) => {
     const normalized = normalizeSpeechText(transcript);
@@ -2338,10 +3076,40 @@ function App() {
         return;
       }
 
+      const exactPrayerReading = resolveExactPrayerReading(normalized, {
+        knowledgeHits,
+        activePageContext,
+      });
+      if (isPrayerRequest(normalized) && prayerReadMode === 'knowledge-only') {
+        const prayerPrompt = exactPrayerReading
+          ? buildExactPrayerReadingPrompt(normalized, exactPrayerReading)
+          : buildPrayerSourceRequiredPrompt(normalized, {
+            knowledgeHits,
+            activePageContext,
+          });
+        const sentPrayerPrompt = enqueueAssistantPrompt(prayerPrompt, {
+          source: exactPrayerReading ? 'runtime.prayer.exact' : 'runtime.prayer.source-required',
+          dedupeKey: exactPrayerReading
+            ? `runtime-prayer-read:${normalizeTranscriptKey(normalized)}`
+            : `runtime-prayer-source:${normalizeTranscriptKey(normalized)}`,
+          requestId: effectiveRequestId,
+          priority: 'high',
+        });
+        if (!sentPrayerPrompt) {
+          recordConversationAction('runtime.turn.orchestrated.fail', {
+            conversationSessionId: conversationSessionIdRef.current,
+            error: 'live-session-unavailable',
+            reason: exactPrayerReading ? 'prayer-exact' : 'prayer-source',
+          });
+        }
+        return;
+      }
+
       const sent = enqueueAssistantPrompt(buildRuntimeTurnPrompt(normalized, {
         knowledgeHits,
         activePageContext,
         prayerReadMode,
+        compactMode: isGemini31FlashLiveModel(selectedCharacter?.modelId || selectedCharacter?.voiceModelId),
       }), {
         source: 'runtime.turn',
         dedupeKey: `runtime-turn:${normalizeTranscriptKey(normalized)}`,
@@ -2371,6 +3139,7 @@ function App() {
     enqueueAssistantPrompt,
     getRuntimePageContextForTurn,
     markDialogRequestState,
+    selectedCharacter?.voiceModelId,
     queryKnowledgeForTurn,
     prayerReadMode,
     recordConversationAction,
@@ -2464,18 +3233,25 @@ function App() {
     void bootstrapConversationContext(sessionId, { shouldSendGreeting: false })
       .then((bootstrapText) => {
         connect({
-          voiceModelId: selectedCharacter?.voiceModelId,
+          runtimeProvider,
+          modelId: selectedCharacter?.modelId || selectedCharacter?.voiceModelId,
+          voiceModelId: selectedCharacter?.voiceModelId || selectedCharacter?.modelId,
           voiceName: selectedCharacter?.voiceName,
+          ttsVoiceName: selectedCharacter?.ttsVoiceName || selectedCharacter?.voiceName,
           systemPrompt: selectedCharacter?.systemPrompt,
           greetingText: selectedCharacter?.greetingText,
           sessionContextText: bootstrapText,
           shouldSendGreeting: false,
+          captureUserAudio: usesLiveInput,
+          voiceGatewayUrl: selectedCharacter?.voiceGatewayUrl || '',
+          outputAudioTranscription: selectedCharacter?.outputAudioTranscription !== false,
+          conversationSessionId: sessionId,
         });
       })
       .catch(() => {
         connect();
       });
-  }, [bootstrapConversationContext, connect, selectedCharacter?.greetingText, selectedCharacter?.systemPrompt, selectedCharacter?.voiceModelId, selectedCharacter?.voiceName, status]);
+  }, [bootstrapConversationContext, connect, selectedCharacter?.greetingText, selectedCharacter?.systemPrompt, selectedCharacter?.voiceGatewayUrl, selectedCharacter?.voiceModelId, selectedCharacter?.voiceName, status, usesLiveInput]);
 
   useEffect(() => {
     if (!initialized || manualStopRef.current || pendingReconnectSignatureRef.current) {
@@ -2513,12 +3289,19 @@ function App() {
             conversationSessionId: sessionId,
           });
           connect({
-            voiceModelId: selectedCharacter?.voiceModelId,
+            runtimeProvider,
+            modelId: selectedCharacter?.modelId || selectedCharacter?.voiceModelId,
+            voiceModelId: selectedCharacter?.voiceModelId || selectedCharacter?.modelId,
             voiceName: selectedCharacter?.voiceName,
+            ttsVoiceName: selectedCharacter?.ttsVoiceName || selectedCharacter?.voiceName,
             systemPrompt: selectedCharacter?.systemPrompt,
             greetingText: selectedCharacter?.greetingText,
             sessionContextText: bootstrapText,
             shouldSendGreeting: false,
+            captureUserAudio: usesLiveInput,
+            voiceGatewayUrl: selectedCharacter?.voiceGatewayUrl || '',
+            outputAudioTranscription: selectedCharacter?.outputAudioTranscription !== false,
+            conversationSessionId: sessionId,
           });
         })
         .catch(() => {
@@ -2531,7 +3314,7 @@ function App() {
         window.location.reload();
       }, RELOAD_WATCHDOG_TIMEOUT_MS);
     }
-  }, [bootstrapConversationContext, connect, initialized, recordConversationAction, selectedCharacter?.greetingText, selectedCharacter?.systemPrompt, selectedCharacter?.voiceModelId, selectedCharacter?.voiceName, status]);
+  }, [bootstrapConversationContext, connect, initialized, recordConversationAction, selectedCharacter?.greetingText, selectedCharacter?.systemPrompt, selectedCharacter?.voiceGatewayUrl, selectedCharacter?.voiceModelId, selectedCharacter?.voiceName, status, usesLiveInput]);
 
   useEffect(() => {
     if (!initialized || manualStopRef.current || status !== 'connecting') {
@@ -2582,22 +3365,33 @@ function App() {
     }, 10000);
     setConversationSessionId(nextConversationSessionId);
     conversationSessionIdRef.current = nextConversationSessionId;
-    recordConversationAction('stt.stream.start', {
+    const inputSessionId = usesLiveInput
+      ? `gemini-live-input:${nextConversationSessionId}`
+      : `server-stt:${nextConversationSessionId}`;
+    recordConversationAction('voice.input.start', {
       conversationSessionId: nextConversationSessionId,
-      sttSessionId: `server-stt:${nextConversationSessionId}`,
+      inputSessionId,
+      mode: usesYandexRuntime ? 'yandex-local-vad' : (usesLiveInput ? 'gemini-live-input' : 'server-stt'),
     });
     updateConversationSessionState({
-      activeSttSessionId: `server-stt:${nextConversationSessionId}`,
+      activeSttSessionId: inputSessionId,
     });
     const bootstrapText = await bootstrapConversationContext(nextConversationSessionId, { shouldSendGreeting: true });
     setAppliedSessionSignature(currentSignature);
     connect({
-      voiceModelId: selectedCharacter?.voiceModelId,
+      runtimeProvider,
+      modelId: selectedCharacter?.modelId || selectedCharacter?.voiceModelId,
+      voiceModelId: selectedCharacter?.voiceModelId || selectedCharacter?.modelId,
       voiceName: selectedCharacter?.voiceName,
+      ttsVoiceName: selectedCharacter?.ttsVoiceName || selectedCharacter?.voiceName,
       systemPrompt: selectedCharacter?.systemPrompt,
       greetingText: selectedCharacter?.greetingText,
       sessionContextText: bootstrapText,
       shouldSendGreeting: true,
+      captureUserAudio: usesLiveInput,
+      voiceGatewayUrl: selectedCharacter?.voiceGatewayUrl || '',
+      outputAudioTranscription: selectedCharacter?.outputAudioTranscription !== false,
+      conversationSessionId: nextConversationSessionId,
     });
   };
 
@@ -2609,11 +3403,15 @@ function App() {
     recordConversationAction('session.stop.request', {
       conversationSessionId: currentConversationSessionId,
     });
-    recordConversationAction('stt.stream.closed', {
+    recordConversationAction('voice.input.closed', {
       conversationSessionId: currentConversationSessionId,
-      sttSessionId: currentConversationSessionId ? `server-stt:${currentConversationSessionId}` : '',
+      inputSessionId: currentConversationSessionId
+        ? `${usesLiveInput ? 'gemini-live-input' : 'server-stt'}:${currentConversationSessionId}`
+        : '',
+      mode: usesLiveInput ? 'gemini-live-input' : 'server-stt',
     });
     manualStopRef.current = true;
+    cancelPendingBrowserWork('manual-stop');
     clearAssistantPromptQueue('manual-stop');
     cancelAssistantOutputRef.current?.();
     browserIntentAbortRef.current?.abort?.();
@@ -2731,7 +3529,330 @@ function App() {
     }
   }, []);
 
+  const clearPendingClientPanelLoad = React.useCallback(() => {
+    const timerId = pendingClientPanelLoadRef.current?.timerId;
+    if (timerId) {
+      clearTimeout(timerId);
+    }
+    pendingClientPanelLoadRef.current = {
+      requestId: 0,
+      transcript: '',
+      actionType: '',
+      targetUrl: '',
+      timerId: null,
+      frameLoaded: false,
+      contextReady: false,
+    };
+  }, []);
+
+  const failPendingClientPanelLoad = React.useCallback((errorText, fallbackRequestId = 0) => {
+    const pending = pendingClientPanelLoadRef.current;
+    const requestId = Number.isInteger(pending?.requestId) && pending.requestId > 0
+      ? pending.requestId
+      : fallbackRequestId;
+    const transcript = normalizeSpeechText(pending?.transcript || '');
+    const panelState = browserPanelRef.current || DEFAULT_PANEL_STATE;
+
+    clearPendingClientPanelLoad();
+    setBrowserFlowPhase('error');
+    setBrowserPanel((current) => ({
+      ...current,
+      status: 'error',
+      clientFrameLoaded: false,
+      clientContextStatus: 'error',
+      clientContextError: errorText,
+      error: errorText,
+      note: '',
+    }));
+
+    if (transcript) {
+      appendSessionWebHistory({
+        status: 'failed',
+        transcript,
+        title: panelState.title || 'Сайт',
+        url: panelState.url || panelState.clientUrl || '',
+        note: errorText,
+      });
+    }
+
+    sendBrowserClientEvent('browser.inline.error', {
+      requestId,
+      transcript,
+      url: panelState.url || panelState.clientUrl || '',
+      error: errorText,
+    });
+
+    if (transcript && requestId > 0) {
+      enqueueAssistantPrompt(buildWebFailurePrompt(
+        transcript,
+        errorText,
+        getSessionHistorySummary(),
+      ), {
+        source: 'browser.inline.error',
+        dedupeKey: `browser-inline-error:${normalizeTranscriptKey(transcript)}:${normalizeTranscriptKey(panelState.url || panelState.clientUrl || '')}`,
+        requestId,
+      });
+    }
+
+    if (requestId > 0) {
+      finalizeDialogRequest(requestId, 'browser-inline-error');
+    }
+  }, [
+    appendSessionWebHistory,
+    clearPendingClientPanelLoad,
+    enqueueAssistantPrompt,
+    finalizeDialogRequest,
+    getSessionHistorySummary,
+    sendBrowserClientEvent,
+    setBrowserFlowPhase,
+  ]);
+
+  const finalizePendingClientPanelLoad = React.useCallback(() => {
+    const pending = pendingClientPanelLoadRef.current;
+    const requestId = Number(pending?.requestId || 0);
+    if (requestId > 0 && requestId !== activeDialogRequestRef.current) {
+      clearPendingClientPanelLoad();
+      return false;
+    }
+
+    const panelState = browserPanelRef.current || DEFAULT_PANEL_STATE;
+    const transcript = normalizeSpeechText(pending.transcript || '');
+    const contextReady = panelState.clientContextStatus === 'ready';
+    const prompt = pending.actionType === 'action'
+      ? (
+        contextReady
+          ? buildWebActionPrompt(transcript, panelState, getSessionHistorySummary())
+          : buildWebClientPendingPrompt(transcript, panelState, getSessionHistorySummary())
+      )
+      : (
+        contextReady
+          ? buildWebResultPrompt(transcript, panelState, getSessionHistorySummary())
+          : buildWebClientResultPrompt(transcript, panelState, getSessionHistorySummary())
+      );
+
+    if (pending.actionType !== 'action') {
+      appendSessionWebHistory({
+        status: 'opened',
+        transcript,
+        title: panelState.title || 'Сайт',
+        url: panelState.url || panelState.clientUrl || '',
+        note: contextReady ? '' : 'Страница показана, текст ещё дочитывается.',
+      });
+    }
+
+    setBrowserFlowPhase('ready');
+    setBrowserPanel((current) => ({
+      ...current,
+      status: 'ready',
+      clientFrameLoaded: true,
+      error: null,
+      note: contextReady ? '' : 'Сайт открыт внизу. Текст страницы ещё дочитывается.',
+    }));
+
+    sendBrowserClientEvent(
+      pending.actionType === 'action' ? 'browser.action.complete' : 'browser.open.ready',
+      {
+        requestId,
+        browserPanelMode: 'client-inline',
+        title: panelState.title || '',
+        url: panelState.url || panelState.clientUrl || '',
+        panelConfirmed: true,
+        contextReady,
+      },
+    );
+
+    markDialogRequestState(
+      requestId,
+      pending.actionType === 'action' ? 'browser-action-ready' : 'browser-open-ready',
+      {
+        browserPanelMode: 'client-inline',
+        panelConfirmed: true,
+        contextReady,
+      },
+    );
+
+    if (transcript && requestId > 0) {
+      enqueueAssistantPrompt(prompt, {
+        source: pending.actionType === 'action' ? 'browser.inline.action.ready' : 'browser.inline.open.ready',
+        dedupeKey: `${pending.actionType || 'open'}:${normalizeTranscriptKey(transcript)}:${normalizeTranscriptKey(panelState.url || panelState.clientUrl || '')}`,
+        requestId,
+      });
+
+      finalizeDialogRequest(requestId, pending.actionType === 'action' ? 'browser-action-ready' : 'browser-open-ready', {
+        browserPanelMode: 'client-inline',
+        contextReady,
+      });
+    }
+    clearPendingClientPanelLoad();
+    return true;
+  }, [
+    appendSessionWebHistory,
+    clearPendingClientPanelLoad,
+    enqueueAssistantPrompt,
+    finalizeDialogRequest,
+    getSessionHistorySummary,
+    markDialogRequestState,
+    sendBrowserClientEvent,
+    setBrowserFlowPhase,
+  ]);
+
+  const armPendingClientPanelLoad = React.useCallback(({
+    requestId,
+    transcript,
+    actionType = 'open',
+    targetUrl,
+  }) => {
+    clearPendingClientPanelLoad();
+    const timerId = window.setTimeout(() => {
+      failPendingClientPanelLoad('Не удалось вовремя показать сайт внутри панели.', requestId);
+    }, CLIENT_INLINE_LOAD_TIMEOUT_MS);
+    pendingClientPanelLoadRef.current = {
+      requestId,
+      transcript,
+      actionType,
+      targetUrl: String(targetUrl || '').trim(),
+      timerId,
+      frameLoaded: false,
+      contextReady: false,
+    };
+  }, [clearPendingClientPanelLoad, failPendingClientPanelLoad]);
+
   const performBrowserAction = React.useCallback(async (actionRequest, transcript = '', { requestId = 0 } = {}) => {
+    if (usesClientInlinePanel && browserPanelRef.current?.clientUrl) {
+      const effectiveRequestId = Number.isInteger(requestId) && requestId > 0
+        ? requestId
+        : (normalizeSpeechText(transcript) ? activeDialogRequestRef.current : 0);
+      const supportedClientActions = new Set(['back', 'forward', 'home', 'reload']);
+      if (!supportedClientActions.has(String(actionRequest?.type || '').trim())) {
+        throw new Error('Во встроенной панели сейчас доступны только назад, вперёд, главная и обновить.');
+      }
+
+      const currentPanel = browserPanelRef.current || DEFAULT_PANEL_STATE;
+      const history = Array.isArray(currentPanel.clientHistory) ? currentPanel.clientHistory : [];
+      const currentIndex = Number.isInteger(currentPanel.clientHistoryIndex) ? currentPanel.clientHistoryIndex : -1;
+      let nextUrl = String(currentPanel.clientUrl || currentPanel.url || '').trim();
+      let nextHistory = [...history];
+      let nextHistoryIndex = currentIndex;
+
+      if (actionRequest.type === 'back') {
+        if (currentIndex <= 0) {
+          throw new Error('Назад переходить уже некуда.');
+        }
+        nextHistoryIndex = currentIndex - 1;
+        nextUrl = nextHistory[nextHistoryIndex];
+      } else if (actionRequest.type === 'forward') {
+        if (currentIndex < 0 || currentIndex >= nextHistory.length - 1) {
+          throw new Error('Вперёд переходить уже некуда.');
+        }
+        nextHistoryIndex = currentIndex + 1;
+        nextUrl = nextHistory[nextHistoryIndex];
+      } else if (actionRequest.type === 'home') {
+        nextUrl = String(currentPanel.clientHomeUrl || nextUrl).trim();
+        if (!nextUrl) {
+          throw new Error('Не знаю, какая страница здесь главная.');
+        }
+        nextHistory = nextHistory.slice(0, Math.max(0, currentIndex) + 1);
+        if (nextHistory[nextHistory.length - 1] !== nextUrl) {
+          nextHistory.push(nextUrl);
+        }
+        nextHistoryIndex = nextHistory.length - 1;
+      }
+
+      if (!nextUrl) {
+        throw new Error('Не удалось определить адрес страницы для этого действия.');
+      }
+
+      setBrowserFlowPhase('opening');
+      setBrowserPanel((current) => ({
+        ...current,
+        status: 'loading',
+        browserPanelMode: 'client-inline',
+        clientUrl: nextUrl,
+        url: nextUrl,
+        clientHistory: nextHistory,
+        clientHistoryIndex: nextHistoryIndex,
+        clientReloadKey: Date.now(),
+        clientFrameLoaded: false,
+        clientContextStatus: 'loading',
+        clientContextError: '',
+        error: null,
+        note: 'Обновляю страницу внизу.',
+      }));
+      armPendingClientPanelLoad({
+        requestId: effectiveRequestId,
+        transcript,
+        actionType: 'action',
+        targetUrl: nextUrl,
+      });
+      sendBrowserClientEvent('browser.action.request', {
+        browserPanelMode: 'client-inline',
+        actionType: actionRequest?.type || '',
+        transcript,
+        requestId: effectiveRequestId,
+        url: nextUrl,
+      });
+      recordConversationAction('browser.action.request', {
+        browserPanelMode: 'client-inline',
+        actionType: actionRequest?.type || '',
+        transcript,
+        requestId: effectiveRequestId,
+        url: nextUrl,
+      });
+
+      void requestClientInlineContext(nextUrl, 'что сейчас находится на открытой странице', {
+        requestId: effectiveRequestId,
+      })
+        .then((contextResult) => {
+          if (effectiveRequestId !== activeDialogRequestRef.current) {
+            return;
+          }
+          if (contextResult?.embeddable === false) {
+            failPendingClientPanelLoad('Этот сайт запрещает показывать себя внутри панели.', effectiveRequestId);
+            return;
+          }
+          setBrowserPanel((current) => ({
+            ...current,
+            title: contextResult?.title || current.title,
+            url: contextResult?.url || current.url,
+            embeddable: contextResult?.embeddable !== false,
+            readerText: contextResult?.readerText || current.readerText,
+            lastUpdated: contextResult?.lastUpdated || current.lastUpdated,
+            clientContextStatus: 'ready',
+            clientContextError: '',
+            error: null,
+          }));
+          if (pendingClientPanelLoadRef.current?.requestId === effectiveRequestId) {
+            pendingClientPanelLoadRef.current.contextReady = true;
+            if (pendingClientPanelLoadRef.current.frameLoaded) {
+              finalizePendingClientPanelLoad();
+            }
+          }
+        })
+        .catch((contextError) => {
+          if (effectiveRequestId !== activeDialogRequestRef.current) {
+            return;
+          }
+          setBrowserPanel((current) => ({
+            ...current,
+            clientContextStatus: 'error',
+            clientContextError: contextError.message || 'Не удалось быстро прочитать страницу.',
+            note: current.clientFrameLoaded
+              ? 'Сайт открыт внизу. Текст страницы прочитать не удалось.'
+              : current.note,
+          }));
+          if (pendingClientPanelLoadRef.current?.requestId === effectiveRequestId) {
+            if (pendingClientPanelLoadRef.current.frameLoaded) {
+              finalizePendingClientPanelLoad();
+            }
+          }
+        });
+
+      return {
+        status: 'ready',
+        url: nextUrl,
+      };
+    }
+
     const sessionId = activeBrowserSessionIdRef.current;
     if (!sessionId) {
       throw new Error('Нет активного сайта для действия');
@@ -2816,14 +3937,19 @@ function App() {
     }
     return contextResult;
   }, [
+    armPendingClientPanelLoad,
     cancelAssistantOutput,
     enqueueAssistantPrompt,
+    failPendingClientPanelLoad,
+    finalizePendingClientPanelLoad,
     getSessionHistorySummary,
     recordConversationAction,
     requestActiveBrowserContext,
+    requestClientInlineContext,
     selectedCharacter?.id,
     sendBrowserClientEvent,
     setBrowserFlowPhase,
+    usesClientInlinePanel,
   ]);
 
   const handleBrowserTranscript = React.useCallback(async (transcript, { requestId: dialogRequestId = 0 } = {}) => {
@@ -2843,9 +3969,11 @@ function App() {
       return;
     }
 
+    const hasClientInlineSession = usesClientInlinePanel && Boolean(browserPanelRef.current?.clientUrl);
     const hasActiveBrowserSession = Boolean(activeBrowserSessionIdRef.current);
+    const hasAnyBrowserSession = hasActiveBrowserSession || hasClientInlineSession;
     let intentType = classifyTranscriptIntent(normalized);
-    if (hasActiveBrowserSession && parseImplicitBrowserActionRequest(normalized)) {
+    if (hasAnyBrowserSession && parseImplicitBrowserActionRequest(normalized)) {
       intentType = 'browser_action';
     }
     if (intentType === 'browser_action') {
@@ -2857,7 +3985,7 @@ function App() {
         return;
       }
 
-      if (!activeBrowserSessionIdRef.current) {
+      if (!activeBrowserSessionIdRef.current && !hasClientInlineSession) {
         const canFallbackToSiteOpen = browserActionRequest.type === 'home'
           && (hasExplicitMainPageSiteTarget(normalized)
             || /\b(?:[a-z0-9-]+\.)+(?:by|ru)\b/i.test(normalized)
@@ -2888,7 +4016,7 @@ function App() {
         }
       }
 
-      if (activeBrowserSessionIdRef.current) {
+      if (activeBrowserSessionIdRef.current || hasClientInlineSession) {
         browserIntentInFlightRef.current = true;
         inFlightBrowserKeyRef.current = 'page-action';
         clearAssistantPromptQueue('browser-action');
@@ -2920,7 +4048,7 @@ function App() {
     }
 
     if (intentType === 'page_query') {
-      if (!activeBrowserSessionIdRef.current || browserIntentInFlightRef.current) {
+      if ((!activeBrowserSessionIdRef.current && !hasClientInlineSession) || browserIntentInFlightRef.current) {
         return;
       }
 
@@ -2934,9 +4062,25 @@ function App() {
       });
 
       try {
-        const contextResult = await requestActiveBrowserContext(normalized, {
-          requestId: effectiveRequestId,
-        });
+        if (hasClientInlineSession) {
+          const panelState = browserPanelRef.current || DEFAULT_PANEL_STATE;
+          if (panelState.status === 'loading' || panelState.clientContextStatus === 'loading') {
+            enqueueAssistantPrompt(buildWebClientPendingPrompt(normalized, panelState, getSessionHistorySummary()), {
+              source: 'browser.followup.pending',
+              dedupeKey: `browser-followup-pending:${normalizeTranscriptKey(normalized)}`,
+              requestId: effectiveRequestId,
+            });
+            markDialogRequestState(effectiveRequestId, 'browser-followup-pending');
+            return;
+          }
+        }
+        const contextResult = hasClientInlineSession
+          ? await requestClientInlineContext(browserPanelRef.current?.clientUrl, normalized, {
+            requestId: effectiveRequestId,
+          })
+          : await requestActiveBrowserContext(normalized, {
+            requestId: effectiveRequestId,
+          });
         if (effectiveRequestId !== activeDialogRequestRef.current) {
           return;
         }
@@ -2944,6 +4088,7 @@ function App() {
           browserSessionId: contextResult?.browserSessionId || activeBrowserSessionIdRef.current,
           url: contextResult?.url || '',
           title: contextResult?.title || '',
+          browserPanelMode: hasClientInlineSession ? 'client-inline' : 'remote',
         });
         enqueueAssistantPrompt(buildWebActivePrompt(normalized, contextResult, getSessionHistorySummary()), {
           source: 'browser.followup.ready',
@@ -2957,6 +4102,7 @@ function App() {
         }
         sendBrowserClientEvent('browser.followup.error', {
           browserSessionId: activeBrowserSessionIdRef.current,
+          browserPanelMode: hasClientInlineSession ? 'client-inline' : 'remote',
           question: normalized,
           error: contextError.message || 'Не удалось прочитать текущую страницу',
         });
@@ -3193,11 +4339,11 @@ function App() {
       browserSpeechGuardUntilRef.current = now + 6000;
       setBrowserFlowPhase('opening');
       setBrowserPanel((current) => ({
-        ...current,
-        status: 'loading',
-        url: intent.url,
-        title: intent.titleHint || 'Открываю страницу',
-        sourceType: intent.sourceType || intent.type,
+        ...buildClientPanelState(intent, current, {
+          status: 'loading',
+          note: usesClientInlinePanel ? 'Открываю сайт внизу.' : 'Открываю сайт у пользователя.',
+          browserPanelMode: usesClientInlinePanel ? 'client-inline' : 'remote',
+        }),
         error: null,
       }));
       sendBrowserClientEvent('browser.opening', {
@@ -3205,7 +4351,68 @@ function App() {
         traceId: resolvedTraceId,
         url: intent.url || '',
         sourceType: intent.sourceType || intent.type || '',
+        browserPanelMode: usesClientInlinePanel ? 'client-inline' : 'remote',
       });
+
+      if (usesClientInlinePanel) {
+        setActiveBrowserSessionId('');
+        activeBrowserSessionIdRef.current = '';
+        armPendingClientPanelLoad({
+          requestId: effectiveRequestId,
+          transcript: normalized,
+          actionType: 'open',
+          targetUrl: intent.url || '',
+        });
+
+        void requestClientInlineContext(intent.url || '', 'что сейчас находится на открытой странице', {
+          requestId: effectiveRequestId,
+        })
+          .then((contextResult) => {
+            if (effectiveRequestId !== activeDialogRequestRef.current) {
+              return;
+            }
+            if (contextResult?.embeddable === false) {
+              failPendingClientPanelLoad('Этот сайт запрещает показывать себя внутри панели.', effectiveRequestId);
+              return;
+            }
+            setBrowserPanel((current) => ({
+              ...current,
+              title: contextResult?.title || current.title,
+              url: contextResult?.url || current.url,
+              embeddable: contextResult?.embeddable !== false,
+              readerText: contextResult?.readerText || current.readerText,
+              lastUpdated: contextResult?.lastUpdated || current.lastUpdated,
+              clientContextStatus: 'ready',
+              clientContextError: '',
+              error: null,
+            }));
+            if (pendingClientPanelLoadRef.current?.requestId === effectiveRequestId) {
+              pendingClientPanelLoadRef.current.contextReady = true;
+              if (pendingClientPanelLoadRef.current.frameLoaded) {
+                finalizePendingClientPanelLoad();
+              }
+            }
+          })
+          .catch((contextError) => {
+            if (effectiveRequestId !== activeDialogRequestRef.current) {
+              return;
+            }
+            setBrowserPanel((current) => ({
+              ...current,
+              clientContextStatus: 'error',
+              clientContextError: contextError.message || 'Не удалось быстро прочитать страницу.',
+              note: current.clientFrameLoaded
+                ? 'Сайт открыт внизу. Текст страницы прочитать не удалось.'
+                : current.note,
+            }));
+            if (pendingClientPanelLoadRef.current?.requestId === effectiveRequestId) {
+              if (pendingClientPanelLoadRef.current.frameLoaded) {
+                finalizePendingClientPanelLoad();
+              }
+            }
+          });
+        return;
+      }
 
       try {
         const opened = await jsonRequest('/api/browser/open', {
@@ -3320,11 +4527,16 @@ function App() {
           browserSessionId: nextSessionId,
           panelConfirmed,
         });
-        enqueueAssistantPrompt(buildWebResultPrompt(normalized, confirmedOpen, getSessionHistorySummary()), {
+        enqueueAssistantPrompt(
+          panelConfirmed
+            ? buildWebResultPrompt(normalized, confirmedOpen, getSessionHistorySummary())
+            : buildWebOpenPendingPrompt(normalized, confirmedOpen, getSessionHistorySummary()),
+          {
           source: 'browser.open.ready',
           dedupeKey: `browser-open-ready:${normalizeTranscriptKey(normalized)}`,
           requestId: effectiveRequestId,
-        });
+          },
+        );
       } catch (requestError) {
         if (browserRequestIdRef.current !== requestId) {
           return;
@@ -3336,7 +4548,7 @@ function App() {
         const errorReason = classifyBrowserOpenErrorReason(requestError);
         const errorText = requestError.message || 'Не удалось открыть страницу';
         browserSpeechGuardUntilRef.current = Date.now() + 2500;
-        setBrowserFlowPhase('error');
+        setBrowserFlowPhase('ready');
         setActiveBrowserSessionId('');
         appendSessionWebHistory({
           status: 'failed',
@@ -3348,6 +4560,7 @@ function App() {
         setBrowserPanel({
           ...DEFAULT_PANEL_STATE,
           status: 'error',
+          browserPanelMode: 'remote',
           error: errorText,
         });
         sendBrowserClientEvent('browser.open.error', {
@@ -3391,11 +4604,16 @@ function App() {
     recordConversationAction,
     refreshBrowserView,
     requestActiveBrowserContext,
+    requestClientInlineContext,
     selectedCharacter?.id,
     sendBrowserClientEvent,
     setBrowserFlowPhase,
     finalizeDialogRequest,
     markDialogRequestState,
+    usesClientInlinePanel,
+    armPendingClientPanelLoad,
+    failPendingClientPanelLoad,
+    finalizePendingClientPanelLoad,
   ]);
 
   useEffect(() => {
@@ -3405,7 +4623,67 @@ function App() {
   }, [handleBrowserTranscript]);
 
   const handleBrowserPanelAction = React.useCallback(async (action) => {
-    if (!activeBrowserSessionIdRef.current || !action?.type) {
+    if (!action?.type) {
+      return;
+    }
+
+    if (action.type === 'client-frame-load') {
+      const hasPendingLoad = Boolean(
+        pendingClientPanelLoadRef.current?.targetUrl
+        || pendingClientPanelLoadRef.current?.timerId,
+      );
+      if (!hasPendingLoad && browserPanelRef.current?.status === 'error') {
+        return;
+      }
+      setBrowserPanel((current) => ({
+        ...current,
+        clientFrameLoaded: true,
+        error: hasPendingLoad ? null : current.error,
+      }));
+      if (hasPendingLoad) {
+        pendingClientPanelLoadRef.current.frameLoaded = true;
+        if ((browserPanelRef.current?.clientContextStatus || 'idle') !== 'loading') {
+          finalizePendingClientPanelLoad();
+        } else {
+          setBrowserPanel((current) => ({
+            ...current,
+            note: 'Сайт уже открыт внизу. Дочитываю текст страницы.',
+          }));
+        }
+      }
+      return;
+    }
+
+    if (action.type === 'client-frame-error') {
+      if (pendingClientPanelLoadRef.current?.targetUrl || pendingClientPanelLoadRef.current?.timerId) {
+        failPendingClientPanelLoad('Не удалось показать сайт внутри панели.', pendingClientPanelLoadRef.current.requestId);
+        return;
+      }
+      setBrowserFlowPhase('error');
+      setBrowserPanel((current) => ({
+        ...current,
+        status: 'error',
+        clientFrameLoaded: false,
+        error: 'Не удалось показать сайт внутри панели.',
+      }));
+      return;
+    }
+
+    if (!activeBrowserSessionIdRef.current && browserPanelRef.current?.clientUrl) {
+      try {
+        await performBrowserAction(action);
+      } catch (error) {
+        setBrowserFlowPhase('error');
+        setBrowserPanel((current) => ({
+          ...current,
+          status: 'error',
+          error: error.message || 'Не удалось выполнить действие на странице',
+        }));
+      }
+      return;
+    }
+
+    if (!activeBrowserSessionIdRef.current) {
       return;
     }
 
@@ -3419,7 +4697,7 @@ function App() {
         error: error.message || 'Не удалось выполнить действие на странице',
       }));
     }
-  }, [performBrowserAction, setBrowserFlowPhase]);
+  }, [failPendingClientPanelLoad, finalizePendingClientPanelLoad, performBrowserAction, setBrowserFlowPhase]);
 
   if (loading || !config || !selectedCharacter) {
     return (
@@ -3497,7 +4775,7 @@ function App() {
             <LiveStatusPill
               status={status}
               audioPlayer={audioPlayer}
-              getUserVolume={getServerSttUserVolume}
+              getUserVolume={usesLiveInput ? getLiveUserVolume : getServerSttUserVolume}
               sidecarListening={Boolean(liveInputTranscript)}
               isRecovering={isRecoveringConnection}
             />

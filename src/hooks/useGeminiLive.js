@@ -9,6 +9,8 @@ const DEFAULT_RUNTIME_CONFIG = {
   sessionContextText: '',
   shouldSendGreeting: true,
   captureUserAudio: true,
+  voiceGatewayUrl: '',
+  conversationSessionId: '',
   speechStabilityProfile: 'balanced',
   prayerReadMode: 'knowledge-only',
   safeSpeechFlowEnabled: true,
@@ -23,39 +25,123 @@ const DEFAULT_CALLBACKS = {
   onAssistantTurnCancel: null,
   onAssistantInterrupted: null,
   onSessionGoAway: null,
+  onSessionReady: null,
 };
 
-const defaultBackendUrl = () => {
-  if (typeof window === 'undefined') return 'ws://localhost:3001/gemini-proxy';
+const DEFAULT_BACKEND_WS_BASE =
+  String(import.meta.env?.VITE_BACKEND_WS_BASE || '').trim().replace(/\/+$/, '');
+const DEFAULT_BACKEND_HTTP_BASE =
+  String(import.meta.env?.VITE_BACKEND_HTTP_BASE || '').trim().replace(/\/+$/, '');
 
-  const isLocal =
-    window.location.hostname === 'localhost' ||
-    window.location.hostname === '127.0.0.1';
+const defaultBackendUrl = (pathname = '/gemini-proxy') => {
+  if (DEFAULT_BACKEND_WS_BASE) {
+    return `${DEFAULT_BACKEND_WS_BASE}${pathname}`;
+  }
 
-  if (isLocal) return 'ws://localhost:3001/gemini-proxy';
+  if (typeof window === 'undefined') {
+    return `ws://127.0.0.1:8200${pathname}`;
+  }
 
   const wsProtocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
-  return `${wsProtocol}://${window.location.host}/gemini-proxy`;
+  return `${wsProtocol}://${window.location.host}${pathname}`;
 };
 
-const HOST = import.meta.env.VITE_BACKEND_URL || defaultBackendUrl();
-const ASSISTANT_TURN_IDLE_FLUSH_MS = 7000;
+const defaultBackendHttpUrl = (pathname = '/api/voice/session') => {
+  if (DEFAULT_BACKEND_HTTP_BASE) {
+    return `${DEFAULT_BACKEND_HTTP_BASE}${pathname}`;
+  }
+
+  if (typeof window === 'undefined') {
+    return `http://127.0.0.1:8200${pathname}`;
+  }
+
+  return `${window.location.origin}${pathname}`;
+};
+
+const ASSISTANT_TURN_IDLE_FLUSH_MS = 3200;
 const TRANSIENT_CLOSE_CODES = new Set([1005, 1006, 1012, 1013]);
+const GEMINI_31_FLASH_LIVE_MODEL = 'models/gemini-3.1-flash-live-preview';
+const BATYUSHKA_CHARACTER_IDS = new Set(['alesya-puck', 'batyushka-2', 'batyushka-3']);
+const BATYUSHKA_2_STABLE_CHARACTER_ID = 'batyushka-2';
+
+function isGemini31FlashLiveModel(modelId) {
+  return String(modelId || '').trim() === GEMINI_31_FLASH_LIVE_MODEL;
+}
+
+function isBatyushka2StableRuntime(runtimeConfig) {
+  return String(runtimeConfig?.characterId || '').trim() === BATYUSHKA_2_STABLE_CHARACTER_ID;
+}
+
+function buildGemini31SystemInstruction(runtimeConfig) {
+  const basePrompt = normalizeAssistantText(runtimeConfig?.systemPrompt || '');
+  const prayerInstruction = buildPrayerInstruction(runtimeConfig);
+  const characterInstruction = buildCharacterInstruction(runtimeConfig);
+  const sessionContextText = normalizeAssistantText(runtimeConfig?.sessionContextText || '');
+  const sections = [];
+
+  if (basePrompt) {
+    sections.push(`Персона:\n${basePrompt}`);
+  }
+
+  sections.push(`Правила разговора:
+1. ОТВЕЧАЙ ТОЛЬКО НА РУССКОМ ЯЗЫКЕ. ОТВЕЧАЙ ОДНОЗНАЧНО НА РУССКОМ.
+2. Отвечай коротко и естественно. Обычно 1-3 предложения, если пользователь не просит прочитать текст целиком.
+3. Каждая реплика должна добавлять новый смысл. Не повторяй вопрос пользователя и не запускай новую реплику без нового пользовательского запроса или служебного контекста.
+4. Если служебный контекст сообщает об открытом сайте или действии на странице, опирайся только на него и не противоречь ему.
+5. Не говори, что сайт открыт или действие выполнено, пока это не подтверждено служебным контекстом.
+6. Не выдумывай факты и не вступай в политические обсуждения.`);
+
+  sections.push(`Служебный web-контекст:
+1. WEB_CONTEXT_RESULT значит сайт уже подтвержденно открыт.
+2. WEB_CONTEXT_ACTIVE значит вопрос относится к уже открытой странице.
+3. WEB_CONTEXT_ERROR значит текущая попытка не удалась и надо сказать об этом прямо, без общих отказов.
+4. WEB_ACTION_RESULT значит действие на странице уже выполнено.`);
+
+  if (prayerInstruction) {
+    sections.push(prayerInstruction);
+  }
+
+  if (characterInstruction) {
+    sections.push(characterInstruction);
+  }
+
+  if (sessionContextText) {
+    sections.push(`Текущий контекст сессии:\n${sessionContextText}`);
+  }
+
+  return sections.join('\n\n');
+}
+
+function buildThinkingConfig(runtimeConfig) {
+  if (isGemini31FlashLiveModel(runtimeConfig?.voiceModelId)) {
+    return {
+      thinkingLevel: 'minimal',
+    };
+  }
+
+  return {
+    thinkingBudget: 0,
+  };
+}
 
 function resolveAssistantTurnIdleFlushMs(runtimeConfig) {
   const safeSpeechFlowEnabled = runtimeConfig?.safeSpeechFlowEnabled !== false;
   const profile = String(runtimeConfig?.speechStabilityProfile || 'balanced').trim().toLowerCase();
 
   if (!safeSpeechFlowEnabled || profile === 'legacy') {
-    return ASSISTANT_TURN_IDLE_FLUSH_MS;
+    return 5000;
   }
 
   if (profile === 'strict') {
-    return 9000;
+    return 4200;
   }
 
   if (profile === 'presentation') {
-    return 8500;
+    return 2500;
+  }
+
+  if (isBatyushka2StableRuntime(runtimeConfig)) {
+    return 4300;
   }
 
   return ASSISTANT_TURN_IDLE_FLUSH_MS;
@@ -64,16 +150,18 @@ function resolveAssistantTurnIdleFlushMs(runtimeConfig) {
 function resolveRealtimeInputConfig(runtimeConfig) {
   const safeSpeechFlowEnabled = runtimeConfig?.safeSpeechFlowEnabled !== false;
   const profile = String(runtimeConfig?.speechStabilityProfile || 'balanced').trim().toLowerCase();
-  const strictProfile = safeSpeechFlowEnabled && (profile === 'strict' || profile === 'presentation');
+  const presentationProfile = safeSpeechFlowEnabled && profile === 'presentation';
+  const strictProfile = safeSpeechFlowEnabled && profile === 'strict';
+  const stableBatyushkaProfile = isBatyushka2StableRuntime(runtimeConfig);
 
   return {
     automaticActivityDetection: {
-      startOfSpeechSensitivity: 'START_SENSITIVITY_LOW',
+      startOfSpeechSensitivity: stableBatyushkaProfile ? 'START_SENSITIVITY_HIGH' : 'START_SENSITIVITY_LOW',
       endOfSpeechSensitivity: 'END_SENSITIVITY_LOW',
-      prefixPaddingMs: strictProfile ? 60 : 40,
-      silenceDurationMs: strictProfile ? 1000 : 850,
+      prefixPaddingMs: stableBatyushkaProfile ? 120 : (presentationProfile ? 50 : (strictProfile ? 60 : 40)),
+      silenceDurationMs: stableBatyushkaProfile ? 1180 : (presentationProfile ? 650 : (strictProfile ? 900 : 780)),
     },
-    activityHandling: 'START_OF_ACTIVITY_INTERRUPTS',
+    activityHandling: stableBatyushkaProfile ? 'NO_INTERRUPTION' : 'START_OF_ACTIVITY_INTERRUPTS',
     turnCoverage: 'TURN_INCLUDES_ONLY_ACTIVITY',
   };
 }
@@ -100,7 +188,7 @@ function buildPrayerInstruction(runtimeConfig) {
 
 function buildCharacterInstruction(runtimeConfig) {
   const characterId = String(runtimeConfig?.characterId || '').trim();
-  if (characterId !== 'alesya-puck') {
+  if (!BATYUSHKA_CHARACTER_IDS.has(characterId)) {
     return '';
   }
 
@@ -111,6 +199,10 @@ function buildCharacterInstruction(runtimeConfig) {
 }
 
 function buildSystemInstruction(runtimeConfig) {
+  if (isGemini31FlashLiveModel(runtimeConfig?.voiceModelId)) {
+    return buildGemini31SystemInstruction(runtimeConfig);
+  }
+
   const safeSpeechFlowEnabled = runtimeConfig?.safeSpeechFlowEnabled !== false;
   const prayerInstruction = safeSpeechFlowEnabled ? buildPrayerInstruction(runtimeConfig) : '';
   const characterInstruction = safeSpeechFlowEnabled ? buildCharacterInstruction(runtimeConfig) : '';
@@ -179,6 +271,76 @@ function mergeAssistantText(currentValue, nextValue) {
   return normalizeAssistantText(`${current} ${next}`);
 }
 
+function normalizeWsLikeUrl(rawValue) {
+  const value = String(rawValue || '').trim();
+  if (!value) {
+    return '';
+  }
+
+  if (/^wss?:\/\//i.test(value)) {
+    return value;
+  }
+
+  if (/^https?:\/\//i.test(value)) {
+    return value.replace(/^http/i, 'ws');
+  }
+
+  if (value.startsWith('/')) {
+    return defaultBackendUrl(value);
+  }
+
+  if (/^[a-z0-9.-]+(?::\d+)?\/.+$/i.test(value)) {
+    const wsProtocol = typeof window !== 'undefined' && window.location.protocol === 'https:' ? 'wss' : 'ws';
+    return `${wsProtocol}://${value.replace(/^\/+/, '')}`;
+  }
+
+  return value;
+}
+
+async function requestVoiceGatewaySession(runtimeConfig) {
+  const conversationSessionId = String(runtimeConfig?.conversationSessionId || '').trim();
+  if (!conversationSessionId) {
+    return null;
+  }
+
+  const response = await fetch(defaultBackendHttpUrl('/api/voice/session'), {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      conversationSessionId,
+      characterId: String(runtimeConfig?.characterId || '').trim(),
+      requestedGatewayUrl: String(runtimeConfig?.voiceGatewayUrl || '').trim(),
+    }),
+  });
+
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(payload?.error || `Не удалось подготовить голосовую сессию (HTTP ${response.status})`);
+  }
+
+  return {
+    gatewayUrl: normalizeWsLikeUrl(payload?.voiceGatewayUrl || ''),
+    sessionToken: String(payload?.sessionToken || '').trim(),
+    expiresAt: String(payload?.expiresAt || '').trim(),
+  };
+}
+
+function resolveBackendUrl(runtimeConfig) {
+  const explicitUrl = normalizeWsLikeUrl(
+    runtimeConfig?.voiceGatewayUrl || import.meta.env.VITE_VOICE_GATEWAY_URL || import.meta.env.VITE_BACKEND_URL || '',
+  );
+  if (explicitUrl) {
+    return explicitUrl;
+  }
+
+  const defaultPath = runtimeConfig?.captureUserAudio !== false
+    ? '/voice-proxy'
+    : '/gemini-proxy';
+  return defaultBackendUrl(defaultPath);
+}
+
 export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFIG, callbacks = DEFAULT_CALLBACKS) {
   const [status, setStatus] = useState('disconnected');
   const [error, setError] = useState(null);
@@ -186,6 +348,7 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
   const wsRef = useRef(null);
   const audioContextRef = useRef(null);
   const processorRef = useRef(null);
+  const sourceRef = useRef(null);
   const streamRef = useRef(null);
   const userVolumeRef = useRef(0);
   const setupCompleteRef = useRef(false);
@@ -193,6 +356,7 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
   const callbacksRef = useRef({ ...DEFAULT_CALLBACKS, ...callbacks });
   const assistantTurnRef = useRef({
     active: false,
+    rejected: false,
     text: '',
     timerId: null,
     interrupted: false,
@@ -205,6 +369,7 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
   const suppressAudioRef = useRef(false);
   const sessionResumptionHandleRef = useRef('');
   const pendingGoAwayRef = useRef(null);
+  const lifecycleTokenRef = useRef(0);
 
   const releaseSuppressedAudio = useCallback(() => {
     suppressAudioRef.current = false;
@@ -238,6 +403,7 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
   const resetAssistantTurnState = useCallback(() => {
     assistantTurnRef.current = {
       active: false,
+      rejected: false,
       text: '',
       timerId: null,
       interrupted: false,
@@ -253,10 +419,11 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
     const currentTurn = assistantTurnRef.current;
     const text = normalizeAssistantText(currentTurn.text);
     const hadContent = currentTurn.active || Boolean(text);
+    const rejected = Boolean(currentTurn.rejected);
 
     resetAssistantTurnState();
 
-    if (!hadContent) {
+    if (!hadContent || rejected) {
       return;
     }
 
@@ -285,21 +452,26 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
 
   const ensureAssistantTurnStarted = useCallback(() => {
     if (assistantTurnRef.current.active) {
-      return;
+      return !assistantTurnRef.current.rejected;
     }
 
+    const accepted = callbacksRef.current.onAssistantTurnStart?.() !== false;
     assistantTurnRef.current.active = true;
+    assistantTurnRef.current.rejected = !accepted;
     assistantTurnRef.current.text = '';
     assistantTurnRef.current.interrupted = false;
     assistantTurnRef.current.textChunks = 0;
     assistantTurnRef.current.audioChunks = 0;
     assistantTurnRef.current.startedAt = Date.now();
     assistantTurnRef.current.lastChunkAt = Date.now();
-    callbacksRef.current.onAssistantTurnStart?.();
+    if (!accepted) {
+      suppressAudioRef.current = true;
+    }
+    return accepted;
   }, []);
 
   const noteAssistantTurnChunk = useCallback(({ kind }) => {
-    if (!assistantTurnRef.current.active) {
+    if (!assistantTurnRef.current.active || assistantTurnRef.current.rejected) {
       return;
     }
 
@@ -330,17 +502,23 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
       flushAssistantTurn('cancel');
     }
 
-    const payload = {
-      client_content: {
-        turns: [
-          {
-            role: 'user',
-            parts: [{ text }],
-          },
-        ],
-        turn_complete: true,
-      },
-    };
+    const payload = isGemini31FlashLiveModel(runtimeConfigRef.current?.voiceModelId)
+      ? {
+        realtimeInput: {
+          text,
+        },
+      }
+      : {
+        client_content: {
+          turns: [
+            {
+              role: 'user',
+              parts: [{ text }],
+            },
+          ],
+          turn_complete: true,
+        },
+      };
 
     wsRef.current.send(JSON.stringify(payload));
     return true;
@@ -356,9 +534,38 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
     pendingGoAwayRef.current = null;
   }, []);
 
+  const releaseInputResources = useCallback(() => {
+    if (processorRef.current) {
+      processorRef.current.port?.onmessage && (processorRef.current.port.onmessage = null);
+      processorRef.current.disconnect?.();
+      processorRef.current = null;
+    }
+    if (sourceRef.current) {
+      sourceRef.current.disconnect?.();
+      sourceRef.current = null;
+    }
+    if (audioContextRef.current) {
+      audioContextRef.current.close().catch(() => {});
+      audioContextRef.current = null;
+    }
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => {
+        try {
+          track.enabled = false;
+          track.stop();
+        } catch {
+          // Ignore per-track teardown failures.
+        }
+      });
+      streamRef.current = null;
+    }
+  }, []);
+
   const connect = useCallback(async (runtimeOverride = null) => {
     const currentStatus = statusRef.current;
     if (currentStatus === 'connected' || currentStatus === 'connecting') return;
+    const lifecycleToken = lifecycleTokenRef.current + 1;
+    lifecycleTokenRef.current = lifecycleToken;
     statusRef.current = 'connecting';
     setStatus('connecting');
     setError(null);
@@ -378,6 +585,7 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
       let source = null;
       let workletNode = null;
       let handleAudioBuffer = null;
+      const isStale = () => lifecycleTokenRef.current !== lifecycleToken;
 
       if (activeRuntime.captureUserAudio !== false) {
         const stream = await navigator.mediaDevices.getUserMedia({
@@ -388,14 +596,24 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
             noiseSuppression: true,
           },
         });
+        if (isStale()) {
+          stream.getTracks().forEach((track) => track.stop());
+          return;
+        }
         streamRef.current = stream;
 
         audioContext = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 'interactive' });
+        if (isStale()) {
+          stream.getTracks().forEach((track) => track.stop());
+          audioContext.close().catch(() => {});
+          return;
+        }
         audioContextRef.current = audioContext;
         source = audioContext.createMediaStreamSource(stream);
+        sourceRef.current = source;
         handleAudioBuffer = (buffer) => {
           let inputData = buffer;
-          const GAIN = 2.4;
+          const GAIN = isBatyushka2StableRuntime(activeRuntime) ? 1.45 : 2.4;
           for (let index = 0; index < inputData.length; index += 1) {
             inputData[index] *= GAIN;
           }
@@ -418,7 +636,10 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
             const base64Audio = float32ToBase64(inputData);
             const message = {
               realtimeInput: {
-                mediaChunks: [{ mimeType: 'audio/pcm;rate=16000', data: base64Audio }],
+                audio: {
+                  mimeType: 'audio/pcm;rate=16000',
+                  data: base64Audio,
+                },
               },
             };
             wsRef.current.send(JSON.stringify(message));
@@ -427,6 +648,10 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
 
         try {
           await audioContext.audioWorklet.addModule('/mic-processor.js');
+          if (isStale()) {
+            releaseInputResources();
+            return;
+          }
           workletNode = new AudioWorkletNode(audioContext, 'mic-processor');
           processorRef.current = workletNode;
         } catch (workletError) {
@@ -441,13 +666,42 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
 
         if (audioContext.state === 'suspended') {
           await audioContext.resume();
+          if (isStale()) {
+            releaseInputResources();
+            return;
+          }
         }
       }
 
-      const ws = new WebSocket(HOST);
+      let backendUrl = resolveBackendUrl(activeRuntime);
+      if (activeRuntime.captureUserAudio !== false) {
+        const voiceSession = await requestVoiceGatewaySession(activeRuntime);
+        if (voiceSession?.gatewayUrl) {
+          backendUrl = voiceSession.gatewayUrl;
+          if (voiceSession.sessionToken) {
+            const delimiter = backendUrl.includes('?') ? '&' : '?';
+            backendUrl = `${backendUrl}${delimiter}sessionToken=${encodeURIComponent(voiceSession.sessionToken)}`;
+          }
+        }
+      }
+
+      const ws = new WebSocket(backendUrl);
+      if (isStale()) {
+        try {
+          ws.close();
+        } catch {
+          // Ignore stale websocket close failures.
+        }
+        releaseInputResources();
+        return;
+      }
       wsRef.current = ws;
 
       ws.onopen = () => {
+        if (isStale()) {
+          return;
+        }
+        const setupAlreadyCompleted = setupCompleteRef.current;
         const setupMessage = {
           setup: {
             model: activeRuntime.voiceModelId,
@@ -460,14 +714,7 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
                   },
                 },
               },
-              // Native audio preview currently behaves more reliably with thinking disabled.
-              thinkingConfig: {
-                thinkingBudget: 0,
-              },
-            },
-            realtimeInputConfig: resolveRealtimeInputConfig(activeRuntime),
-            sessionResumption: {
-              handle: sessionResumptionHandleRef.current || undefined,
+              thinkingConfig: buildThinkingConfig(activeRuntime),
             },
             systemInstruction: {
               parts: [
@@ -479,28 +726,46 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
           },
         };
         if (activeRuntime.captureUserAudio !== false) {
+          setupMessage.setup.realtimeInputConfig = resolveRealtimeInputConfig(activeRuntime);
+        }
+        if (isGemini31FlashLiveModel(activeRuntime.voiceModelId)) {
+          setupMessage.setup.contextWindowCompression = {
+            slidingWindow: {},
+          };
+          setupMessage.setup.sessionResumption = {
+            handle: sessionResumptionHandleRef.current || undefined,
+          };
+        }
+        if (activeRuntime.captureUserAudio !== false) {
           setupMessage.setup.inputAudioTranscription = {};
         }
         if (activeRuntime.outputAudioTranscription !== false) {
           setupMessage.setup.outputAudioTranscription = {};
         }
         ws.send(JSON.stringify(setupMessage));
+        if (setupAlreadyCompleted) {
+          setStatus('connected');
+        }
       };
 
       ws.onmessage = async (event) => {
+        if (isStale()) {
+          return;
+        }
         try {
           const data = event.data instanceof Blob
             ? JSON.parse(await event.data.text())
             : JSON.parse(event.data);
 
           if (data.setupComplete) {
+            const wasSetupComplete = setupCompleteRef.current;
             setupCompleteRef.current = true;
             statusRef.current = 'connected';
             setStatus('connected');
-
-            if (activeRuntime.shouldSendGreeting !== false) {
-              sendTextTurn(activeRuntime.greetingText || DEFAULT_RUNTIME_CONFIG.greetingText, { interrupt: false });
-            }
+            callbacksRef.current.onSessionReady?.({
+              resumed: wasSetupComplete,
+              shouldSendGreeting: activeRuntime.shouldSendGreeting !== false,
+            });
             return;
           }
 
@@ -523,18 +788,24 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
           if (data.serverContent?.modelTurn?.parts) {
             for (const part of data.serverContent.modelTurn.parts) {
               if (part.text && !part.thought) {
+                const accepted = ensureAssistantTurnStarted();
+                if (!accepted) {
+                  continue;
+                }
                 releaseSuppressedAudio();
-                ensureAssistantTurnStarted();
                 const nextText = mergeAssistantText(assistantTurnRef.current.text, part.text);
                 assistantTurnRef.current.text = nextText;
                 noteAssistantTurnChunk({ kind: 'text' });
               }
 
               if (part.inlineData && part.inlineData.mimeType.startsWith('audio/pcm')) {
+                const accepted = ensureAssistantTurnStarted();
+                if (!accepted) {
+                  continue;
+                }
                 if (assistantTurnRef.current.active && assistantTurnRef.current.text) {
                   releaseSuppressedAudio();
                 }
-                ensureAssistantTurnStarted();
                 noteAssistantTurnChunk({ kind: 'audio' });
                 if (!suppressAudioRef.current) {
                   const pcmData = base64ToFloat32Array(part.inlineData.data);
@@ -545,13 +816,17 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
           }
 
           if (data.serverContent?.outputTranscription?.text) {
-            releaseSuppressedAudio();
-            ensureAssistantTurnStarted();
+            const accepted = ensureAssistantTurnStarted();
+            if (accepted) {
+              releaseSuppressedAudio();
+            }
             assistantTurnRef.current.text = mergeAssistantText(
               assistantTurnRef.current.text,
               data.serverContent.outputTranscription.text,
             );
-            noteAssistantTurnChunk({ kind: 'text' });
+            if (accepted) {
+              noteAssistantTurnChunk({ kind: 'text' });
+            }
           }
 
           if (data.serverContent?.interrupted) {
@@ -568,7 +843,10 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
               callbacksRef.current.onInputTranscriptionCommit?.({ text: finalInputTranscription });
               clearInputTranscription();
             }
-            if (!assistantTurnRef.current.interrupted) {
+            if (assistantTurnRef.current.rejected) {
+              suppressAudioRef.current = true;
+              flushAssistantTurn('cancel');
+            } else if (!assistantTurnRef.current.interrupted) {
               releaseSuppressedAudio();
               flushAssistantTurn('commit');
             }
@@ -583,6 +861,10 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
       };
 
       ws.onerror = () => {
+        if (isStale()) {
+          return;
+        }
+        releaseInputResources();
         clearInputTranscription();
         statusRef.current = 'error';
         setStatus('error');
@@ -590,6 +872,10 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
       };
 
       ws.onclose = (event) => {
+        if (isStale()) {
+          return;
+        }
+        releaseInputResources();
         clearInputTranscription();
         flushAssistantTurn(statusRef.current === 'error' ? 'cancel' : 'commit');
         const closeCode = Number(event?.code || 0);
@@ -625,14 +911,19 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
         processorRef.current.connect(audioContext.destination);
       }
     } catch (connectionError) {
-      console.error('Connection failed:', connectionError);
-      setError('Ошибка доступа к микрофону или подключения');
-      statusRef.current = 'error';
-      setStatus('error');
+      if (!isNaN(lifecycleToken) && lifecycleTokenRef.current === lifecycleToken) {
+        console.error('Connection failed:', connectionError);
+        releaseInputResources();
+        const connectionMessage = normalizeAssistantText(connectionError?.message || '');
+        setError(connectionMessage || 'Ошибка доступа к микрофону или подключения');
+        statusRef.current = 'error';
+        setStatus('error');
+      }
     }
-  }, [audioPlayer, clearInputTranscription, ensureAssistantTurnStarted, flushAssistantTurn, noteAssistantTurnChunk, releaseSuppressedAudio, sendTextTurn]);
+  }, [audioPlayer, clearInputTranscription, ensureAssistantTurnStarted, flushAssistantTurn, noteAssistantTurnChunk, releaseInputResources, releaseSuppressedAudio, sendTextTurn]);
 
   const disconnect = useCallback(() => {
+    lifecycleTokenRef.current += 1;
     setupCompleteRef.current = false;
     clearInputTranscription();
     releaseSuppressedAudio();
@@ -644,22 +935,11 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
       wsRef.current.close();
       wsRef.current = null;
     }
-    if (processorRef.current) {
-      processorRef.current.disconnect?.();
-      processorRef.current = null;
-    }
-    if (audioContextRef.current) {
-      audioContextRef.current.close();
-      audioContextRef.current = null;
-    }
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach((track) => track.stop());
-      streamRef.current = null;
-    }
+    releaseInputResources();
 
     statusRef.current = 'disconnected';
     setStatus('disconnected');
-  }, [audioPlayer, clearInputTranscription, flushAssistantTurn, releaseSuppressedAudio]);
+  }, [audioPlayer, clearInputTranscription, flushAssistantTurn, releaseInputResources, releaseSuppressedAudio]);
 
   useEffect(() => () => disconnect(), [disconnect]);
 

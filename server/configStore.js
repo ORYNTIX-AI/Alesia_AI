@@ -4,6 +4,7 @@ import {
   BATYUSHKA_AVATAR_MODEL_URL,
   BATYUSHKA_GREETING,
   BATYUSHKA_SYSTEM_PROMPT,
+  createCharacterRuntimeConfig,
   DEFAULT_APP_CONFIG,
   DEFAULT_AVATAR_MODEL_URL,
   DEFAULT_KNOWLEDGE_REFRESH_POLICY,
@@ -39,7 +40,8 @@ const LEGACY_SOURCE_URL_REMAP = new Map([
 ]);
 const CONFIG_SNAPSHOT_DIR = process.env.APP_CONFIG_SNAPSHOT_DIR || path.resolve(path.dirname(APP_CONFIG_PATH), 'safety-snapshots');
 const MAX_CONFIG_SNAPSHOTS = 40;
-const BATYUSHKA_CHARACTER_ID = 'alesya-puck';
+const BATYUSHKA_CHARACTER_IDS = new Set(['alesya-puck', 'batyushka-2', 'batyushka-3']);
+let bootstrapSnapshotCreated = false;
 
 function normalizeVoiceModelId(value) {
   const normalized = String(value || '').trim();
@@ -87,7 +89,7 @@ function normalizeAvatarModelUrl(value, fallbackUrl = DEFAULT_AVATAR_MODEL_URL) 
 function normalizeSystemPrompt(characterId, value, fallbackValue = DEFAULT_SYSTEM_PROMPT) {
   const prompt = String(value || '').trim();
   const fallbackPrompt = String(fallbackValue || DEFAULT_SYSTEM_PROMPT).trim();
-  if (characterId !== BATYUSHKA_CHARACTER_ID) {
+  if (!BATYUSHKA_CHARACTER_IDS.has(characterId)) {
     return prompt || fallbackPrompt || DEFAULT_SYSTEM_PROMPT;
   }
 
@@ -107,9 +109,12 @@ function normalizeSystemPrompt(characterId, value, fallbackValue = DEFAULT_SYSTE
 
 function sanitizeCharacter(rawCharacter, fallbackId, fallbackCharacter = null) {
   const character = rawCharacter || {};
-  const characterId = String(character.id || fallbackId);
-  const voiceName = String(character.voiceName || 'Aoede');
-  const greetingFallback = characterId === BATYUSHKA_CHARACTER_ID
+  const characterId = String(character.id || fallbackId).trim() || fallbackId;
+  const fallbackRuntime = createCharacterRuntimeConfig(fallbackCharacter || {});
+  const runtimeProvider = String(character.runtimeProvider || fallbackRuntime.runtimeProvider || 'gemini-live').trim() || 'gemini-live';
+  const modelId = normalizeVoiceModelId(character.modelId || character.voiceModelId || fallbackRuntime.modelId || DEFAULT_VOICE_MODEL);
+  const voiceName = String(character.voiceName || fallbackCharacter?.voiceName || 'Aoede').trim() || 'Aoede';
+  const greetingFallback = BATYUSHKA_CHARACTER_IDS.has(characterId)
     ? BATYUSHKA_GREETING
     : DEFAULT_GREETING;
   const explicitPriorityTags = Array.isArray(character.knowledgePriorityTags)
@@ -122,21 +127,50 @@ function sanitizeCharacter(rawCharacter, fallbackId, fallbackCharacter = null) {
     ...fallbackPriorityTags,
     ...explicitPriorityTags,
   ]));
+  const runtimeDefaults = createCharacterRuntimeConfig({
+    ...fallbackRuntime,
+    runtimeProvider,
+    modelId,
+    voiceModelId: modelId,
+    liveInputEnabled: character.liveInputEnabled === undefined
+      ? fallbackRuntime.liveInputEnabled
+      : character.liveInputEnabled,
+    voiceGatewayUrl: String(character.voiceGatewayUrl || fallbackRuntime.voiceGatewayUrl || '').trim(),
+    voiceName,
+    ttsVoiceName: String(character.ttsVoiceName || fallbackRuntime.ttsVoiceName || voiceName).trim() || voiceName,
+    sttProfile: String(character.sttProfile || fallbackRuntime.sttProfile || 'general').trim() || 'general',
+    outputAudioTranscription: character.outputAudioTranscription === undefined
+      ? fallbackRuntime.outputAudioTranscription !== false
+      : character.outputAudioTranscription !== false,
+  });
 
   return {
     id: characterId,
-    displayName: String(character.displayName || 'Персонаж'),
-    voiceModelId: normalizeVoiceModelId(character.voiceModelId || DEFAULT_VOICE_MODEL),
+    displayName: String(character.displayName || fallbackCharacter?.displayName || 'Character'),
+    runtimeProvider: runtimeDefaults.runtimeProvider,
+    modelId: runtimeDefaults.modelId,
+    voiceModelId: runtimeDefaults.voiceModelId,
     systemPrompt: normalizeSystemPrompt(characterId, character.systemPrompt, fallbackCharacter?.systemPrompt),
-    voiceName: SUPPORTED_VOICE_NAMES.includes(voiceName) ? voiceName : 'Aoede',
-    backgroundPreset: String(character.backgroundPreset || 'aurora'),
+    voiceName,
+    ttsVoiceName: String(character.ttsVoiceName || runtimeDefaults.ttsVoiceName || voiceName).trim() || voiceName,
+    sttProfile: String(character.sttProfile || runtimeDefaults.sttProfile || 'general').trim() || 'general',
+    outputAudioTranscription: runtimeDefaults.outputAudioTranscription !== false,
+    backgroundPreset: String(character.backgroundPreset || fallbackCharacter?.backgroundPreset || 'aurora'),
     greetingText: String(character.greetingText || fallbackCharacter?.greetingText || greetingFallback),
     avatarModelUrl: normalizeAvatarModelUrl(
       character.avatarModelUrl,
       String(fallbackCharacter?.avatarModelUrl || DEFAULT_AVATAR_MODEL_URL),
     ),
-    avatarInstanceId: String(character.avatarInstanceId || `avatar-${characterId}`),
+    avatarInstanceId: String(character.avatarInstanceId || fallbackCharacter?.avatarInstanceId || ('avatar-' + characterId)),
     knowledgePriorityTags: mergedPriorityTags,
+    liveInputEnabled: runtimeDefaults.liveInputEnabled,
+    voiceGatewayUrl: String(character.voiceGatewayUrl || runtimeDefaults.voiceGatewayUrl || '').trim(),
+    browserPanelMode: String(character.browserPanelMode || fallbackCharacter?.browserPanelMode || 'remote').trim() === 'client-inline'
+      ? 'client-inline'
+      : 'remote',
+    pageContextMode: String(character.pageContextMode || fallbackCharacter?.pageContextMode || 'browser-session').trim() === 'url-fetch'
+      ? 'url-fetch'
+      : 'browser-session',
   };
 }
 
@@ -288,19 +322,39 @@ function sanitizeSafetySwitches(rawSafetySwitches = {}) {
 
 export function sanitizeAppConfig(rawConfig) {
   const config = rawConfig || {};
+  const defaultCharacters = Array.isArray(DEFAULT_APP_CONFIG.characters) ? DEFAULT_APP_CONFIG.characters : [];
   const defaultCharactersById = new Map(
-    (Array.isArray(DEFAULT_APP_CONFIG.characters) ? DEFAULT_APP_CONFIG.characters : [])
-      .map((character) => [String(character.id || ''), character]),
+    defaultCharacters.map((character) => [String(character.id || '').trim(), character]),
   );
-  const characters = Array.isArray(config.characters) && config.characters.length > 0
-    ? config.characters.map((character, index) => {
-      const characterId = String(character?.id || '').trim();
-      const fallbackCharacter = defaultCharactersById.get(characterId)
-        || DEFAULT_APP_CONFIG.characters[index]
-        || null;
-      return sanitizeCharacter(character, `character-${index + 1}`, fallbackCharacter);
-    })
-    : DEFAULT_APP_CONFIG.characters.map((character) => ({ ...character }));
+  const incomingCharacters = Array.isArray(config.characters) ? config.characters : [];
+  const mergedCharacters = [];
+  const seenCharacterIds = new Set();
+
+  incomingCharacters.forEach((character, index) => {
+    const characterId = String(character?.id || '').trim();
+    const fallbackCharacter = defaultCharactersById.get(characterId)
+      || defaultCharacters[index]
+      || null;
+    const sanitizedCharacter = sanitizeCharacter(character, 'character-' + (index + 1), fallbackCharacter);
+    if (!sanitizedCharacter.id || seenCharacterIds.has(sanitizedCharacter.id)) {
+      return;
+    }
+    mergedCharacters.push(sanitizedCharacter);
+    seenCharacterIds.add(sanitizedCharacter.id);
+  });
+
+  defaultCharacters.forEach((defaultCharacter, index) => {
+    const characterId = String(defaultCharacter?.id || '').trim();
+    if (!characterId || seenCharacterIds.has(characterId)) {
+      return;
+    }
+    mergedCharacters.push(sanitizeCharacter(defaultCharacter, 'default-character-' + (index + 1), defaultCharacter));
+    seenCharacterIds.add(characterId);
+  });
+
+  const characters = mergedCharacters.length > 0
+    ? mergedCharacters
+    : defaultCharacters.map((character, index) => sanitizeCharacter(character, 'default-character-' + (index + 1), character));
 
   const activeCharacterId = characters.some((character) => character.id === config.activeCharacterId)
     ? config.activeCharacterId
@@ -355,6 +409,10 @@ async function ensureConfigFile() {
 
 export async function loadAppConfig() {
   await ensureConfigFile();
+  if (!bootstrapSnapshotCreated) {
+    await createConfigSnapshot('bootstrap');
+    bootstrapSnapshotCreated = true;
+  }
   const raw = await fs.readFile(APP_CONFIG_PATH, 'utf8');
   const parsed = JSON.parse(raw);
   const sanitized = sanitizeAppConfig(parsed);

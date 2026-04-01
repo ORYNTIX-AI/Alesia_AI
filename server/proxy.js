@@ -11,8 +11,10 @@ import {
   closeBrowser,
   configureBrowserController,
   detectBrowserIntent,
+  fetchBrowserUrlContext,
   getBrowserSessionView,
   getBrowserSessionContext,
+  cancelPendingBrowserOperations,
   openBrowserIntent,
   performBrowserSessionAction,
   queryBrowserSession,
@@ -45,19 +47,28 @@ import {
   updateConversationSessionState,
 } from './conversationStore.js';
 import { getRuntimeLogPath, logRuntime } from './runtimeLogger.js';
+import {
+  consumeVoiceSessionToken,
+  getVoiceSessionStoreStats,
+  issueVoiceSessionToken,
+} from './voiceSessionStore.js';
 
 const PROXY_SCHEME = (process.env.PROXY_SCHEME || 'socks5h').toLowerCase();
 const PROXY_HOST = process.env.PROXY_HOST || '45.145.57.227';
 const PROXY_PORT = process.env.PROXY_PORT || 13475;
 const PROXY_USER = process.env.PROXY_USER || 'PhKW0n';
 const PROXY_PASS = process.env.PROXY_PASS || 'zaahsk';
+const PROXY_CONNECT_TIMEOUT_MS = Math.max(3000, Number(process.env.PROXY_CONNECT_TIMEOUT_MS || 6000));
+const GEMINI_CONNECT_MAX_ATTEMPTS = Math.max(1, Number(process.env.GEMINI_CONNECT_MAX_ATTEMPTS || 4));
+const GEMINI_CONNECT_RETRY_DELAY_MS = Math.max(250, Number(process.env.GEMINI_CONNECT_RETRY_DELAY_MS || 500));
 const encodedProxyUser = encodeURIComponent(PROXY_USER);
 const encodedProxyPass = encodeURIComponent(PROXY_PASS);
 const proxyAuth = PROXY_USER && PROXY_PASS ? `${encodedProxyUser}:${encodedProxyPass}@` : '';
 const PROXY_URL = `${PROXY_SCHEME}://${proxyAuth}${PROXY_HOST}:${PROXY_PORT}`;
+const proxyAgentOptions = { timeout: PROXY_CONNECT_TIMEOUT_MS };
 const proxyAgent = PROXY_SCHEME.startsWith('socks')
-  ? new SocksProxyAgent(PROXY_URL)
-  : new HttpsProxyAgent(PROXY_URL);
+  ? new SocksProxyAgent(PROXY_URL, proxyAgentOptions)
+  : new HttpsProxyAgent(PROXY_URL, proxyAgentOptions);
 
 const API_KEY = process.env.GEMINI_API_KEY;
 if (!API_KEY) {
@@ -71,14 +82,24 @@ configureBrowserController({
 const GEMINI_WS_URL = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${API_KEY}`;
 const STT_MODEL = process.env.STT_MODEL || DEFAULT_VOICE_MODEL;
 
+const YANDEX_API_KEY = normalizeWhitespace(process.env.YANDEX_API_KEY || '');
+const YANDEX_IAM_TOKEN = normalizeWhitespace(process.env.YANDEX_IAM_TOKEN || '');
+const YANDEX_FOLDER_ID = normalizeWhitespace(process.env.YANDEX_FOLDER_ID || '');
+const YANDEX_DEFAULT_MODEL_ID = normalizeWhitespace(process.env.YANDEX_MODEL_ID || 'yandexgpt-lite/latest');
+const YANDEX_STT_URL = 'https://stt.api.cloud.yandex.net/speech/v1/stt:recognize';
+const YANDEX_TTS_URL = 'https://tts.api.cloud.yandex.net/speech/v1/tts:synthesize';
+const YANDEX_LLM_URL = 'https://llm.api.cloud.yandex.net/foundationModels/v1/completion';
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const distDir = path.resolve(__dirname, '../dist');
 const indexHtmlPath = path.join(distDir, 'index.html');
 
 const app = express();
+app.set('trust proxy', true);
 const server = createServer(app);
-const wss = new WebSocketServer({ noServer: true });
+const geminiProxyWss = new WebSocketServer({ noServer: true });
+const voiceGatewayWss = new WebSocketServer({ noServer: true });
 const sttWss = new WebSocketServer({ noServer: true });
 let shutdownInProgress = false;
 const INVALID_FORWARD_CLOSE_CODES = new Set([1004, 1005, 1006, 1015]);
@@ -165,6 +186,40 @@ function sanitizeGeminiProxySetupMessage(rawData) {
   } catch {
     return rawData;
   }
+}
+
+function createGeminiUpstreamSocket() {
+  return new WebSocket(GEMINI_WS_URL, {
+    agent: proxyAgent,
+    handshakeTimeout: PROXY_CONNECT_TIMEOUT_MS,
+  });
+}
+
+function shouldRetryGeminiConnect({ attempt = 1, error = null, code = 0, reason = '' } = {}) {
+  if (attempt >= GEMINI_CONNECT_MAX_ATTEMPTS) {
+    return false;
+  }
+
+  const closeCode = Number(code) || 0;
+  const message = normalizeWhitespace(error?.message || reason || '').toLowerCase();
+  if (!message && !closeCode) {
+    return false;
+  }
+
+  if (closeCode === 1006) {
+    return true;
+  }
+
+  return message.includes('timed out')
+    || message.includes('timeout')
+    || message.includes('econnreset')
+    || message.includes('socket hang up')
+    || message.includes('network')
+    || message.includes('proxy');
+}
+
+function getGeminiRetryDelayMs(attempt = 1) {
+  return GEMINI_CONNECT_RETRY_DELAY_MS * Math.max(1, attempt);
 }
 
 function isSendableCloseCode(code) {
@@ -314,6 +369,10 @@ ${phraseHints}`;
 }
 
 function classifyBrowserOpenErrorReason(error) {
+  const explicitCode = normalizeWhitespace(error?.code || '').toLowerCase();
+  if (explicitCode) {
+    return explicitCode;
+  }
   const message = normalizeWhitespace(error?.message || '').toLowerCase();
   if (!message) {
     return 'navigation_failed';
@@ -336,10 +395,141 @@ function classifyBrowserOpenErrorReason(error) {
   return 'navigation_failed';
 }
 
+
+function getYandexAuthorizationHeader() {
+  if (YANDEX_API_KEY) {
+    return 'Api-Key ' + YANDEX_API_KEY;
+  }
+  if (YANDEX_IAM_TOKEN) {
+    return 'Bearer ' + YANDEX_IAM_TOKEN;
+  }
+  throw new Error('Yandex auth is not configured');
+}
+
+function buildYandexModelUri(modelId = '') {
+  const normalizedModelId = normalizeWhitespace(modelId || YANDEX_DEFAULT_MODEL_ID || 'yandexgpt-lite/latest');
+  if (!normalizedModelId) {
+    throw new Error('Yandex model id is not configured');
+  }
+  if (/^[a-z]+:\/\//i.test(normalizedModelId)) {
+    return normalizedModelId;
+  }
+  if (!YANDEX_FOLDER_ID) {
+    throw new Error('YANDEX_FOLDER_ID is not configured');
+  }
+  return 'gpt://' + YANDEX_FOLDER_ID + '/' + normalizedModelId;
+}
+
+async function parseJsonResponse(response) {
+  const textPayload = await response.text();
+  if (!textPayload) {
+    return {};
+  }
+  try {
+    return JSON.parse(textPayload);
+  } catch {
+    return { raw: textPayload };
+  }
+}
+
+async function requestYandexStt({ audioBuffer, language = 'ru-RU', topic = 'general', sampleRateHertz = 16000 }) {
+  const params = new URLSearchParams({
+    lang: language || 'ru-RU',
+    topic: topic || 'general',
+    format: 'lpcm',
+    sampleRateHertz: String(sampleRateHertz || 16000),
+  });
+  const response = await fetch(YANDEX_STT_URL + '?' + params.toString(), {
+    method: 'POST',
+    headers: {
+      Authorization: getYandexAuthorizationHeader(),
+      'Content-Type': 'application/octet-stream',
+    },
+    body: audioBuffer,
+  });
+  const payload = await parseJsonResponse(response);
+  if (!response.ok) {
+    throw new Error(payload?.error_message || payload?.message || ('Yandex STT failed (' + response.status + ')'));
+  }
+  return normalizeWhitespace(payload?.result || payload?.text || '');
+}
+
+async function requestYandexCompletion({ modelId = '', systemPrompt = '', userText = '' }) {
+  const body = {
+    modelUri: buildYandexModelUri(modelId),
+    completionOptions: {
+      stream: false,
+      temperature: 0.18,
+      maxTokens: '220',
+    },
+    messages: [
+      ...(normalizeWhitespace(systemPrompt) ? [{ role: 'system', text: systemPrompt }] : []),
+      { role: 'user', text: userText },
+    ],
+  };
+  const response = await fetch(YANDEX_LLM_URL, {
+    method: 'POST',
+    headers: {
+      Authorization: getYandexAuthorizationHeader(),
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  });
+  const payload = await parseJsonResponse(response);
+  if (!response.ok) {
+    throw new Error(payload?.message || payload?.error || ('Yandex completion failed (' + response.status + ')'));
+  }
+  const alternative = payload?.result?.alternatives?.[0] || payload?.alternatives?.[0] || {};
+  return normalizeWhitespace(
+    alternative?.message?.text
+      || alternative?.text
+      || payload?.result?.message?.text
+      || payload?.result?.text
+      || ''
+  );
+}
+
+async function requestYandexTts({ text, voice = 'ermil', sampleRateHertz = 24000 }) {
+  const form = new URLSearchParams({
+    text,
+    lang: 'ru-RU',
+    voice: normalizeWhitespace(voice || 'ermil') || 'ermil',
+    format: 'lpcm',
+    sampleRateHertz: String(sampleRateHertz || 24000),
+  });
+  const response = await fetch(YANDEX_TTS_URL, {
+    method: 'POST',
+    headers: {
+      Authorization: getYandexAuthorizationHeader(),
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: form,
+  });
+  const audioArrayBuffer = await response.arrayBuffer();
+  if (!response.ok) {
+    const errorText = Buffer.from(audioArrayBuffer).toString('utf8');
+    let message = 'Yandex TTS failed (' + response.status + ')';
+    try {
+      const parsed = JSON.parse(errorText);
+      message = parsed?.message || parsed?.error_message || message;
+    } catch {
+      if (normalizeWhitespace(errorText)) {
+        message = errorText;
+      }
+    }
+    throw new Error(message);
+  }
+  return {
+    audioBase64: Buffer.from(audioArrayBuffer).toString('base64'),
+    sampleRateHertz: Number(sampleRateHertz || 24000),
+  };
+}
+
 app.use(express.json({ limit: '2mb' }));
 
 app.get('/health', async (req, res) => {
   const config = await loadAppConfig();
+  const voiceSessionStats = getVoiceSessionStoreStats();
   res.json({
     status: 'ok',
     proxy: PROXY_HOST,
@@ -348,6 +538,7 @@ app.get('/health', async (req, res) => {
     logPath: getRuntimeLogPath(),
     characters: config.characters.length,
     knowledgeSources: Array.isArray(config.knowledgeSources) ? config.knowledgeSources.length : 0,
+    voiceSessionTokens: voiceSessionStats.activeTokens,
   });
 });
 
@@ -380,6 +571,102 @@ app.put('/api/app-config', async (req, res) => {
   } catch (error) {
     console.error('Failed to save app config', error);
     res.status(400).json({ error: 'Не удалось сохранить конфиг приложения' });
+  }
+});
+
+app.post('/api/voice/session', async (req, res) => {
+  try {
+    const conversationSessionId = normalizeWhitespace(req.body?.conversationSessionId || '');
+    const characterId = normalizeWhitespace(req.body?.characterId || '');
+    if (!conversationSessionId) {
+      return res.status(400).json({ error: 'Не передан идентификатор голосовой сессии' });
+    }
+
+    const requestedGatewayUrl = normalizeWhitespace(req.body?.requestedGatewayUrl || '');
+    const isAbsoluteGatewayUrl = /^wss?:\/\//i.test(requestedGatewayUrl);
+    const forwardedProto = normalizeWhitespace(req.get('x-forwarded-proto') || '').toLowerCase();
+    const forwardedHost = normalizeWhitespace(req.get('x-forwarded-host') || '');
+    const wsProtocol = (forwardedProto === 'https' || req.protocol === 'https') ? 'wss' : 'ws';
+    const publicHost = forwardedHost || req.get('host') || '127.0.0.1:8200';
+    const defaultGatewayUrl = `${wsProtocol}://${publicHost}/voice-proxy`;
+    const voiceGatewayUrl = requestedGatewayUrl
+      ? (isAbsoluteGatewayUrl ? requestedGatewayUrl : `${wsProtocol}://${publicHost}${requestedGatewayUrl.startsWith('/') ? requestedGatewayUrl : `/${requestedGatewayUrl}`}`)
+      : defaultGatewayUrl;
+    const session = issueVoiceSessionToken({
+      conversationSessionId,
+      characterId,
+    });
+
+    logRuntime('voice.session.issued', {
+      conversationSessionId,
+      characterId,
+      expiresAt: session.expiresAt,
+    });
+
+    return res.json({
+      conversationSessionId,
+      voiceGatewayUrl,
+      sessionToken: session.token,
+      expiresAt: new Date(session.expiresAt).toISOString(),
+      mode: 'proxy-ws',
+    });
+  } catch (error) {
+    return res.status(400).json({ error: error.message || 'Не удалось подготовить голосовую сессию' });
+  }
+});
+
+
+app.post('/api/yandex/stt', async (req, res) => {
+  try {
+    const audioBase64 = String(req.body?.audioBase64 || '').trim();
+    const language = normalizeWhitespace(req.body?.language || 'ru-RU') || 'ru-RU';
+    const sampleRateHertz = Math.max(8000, Number(req.body?.sampleRateHertz || 16000) || 16000);
+    if (!audioBase64) {
+      return res.status(400).json({ error: '?? ???????? ??????????? ??? Yandex STT' });
+    }
+    const audioBuffer = Buffer.from(audioBase64, 'base64');
+    const textResult = await requestYandexStt({
+      audioBuffer,
+      language,
+      sampleRateHertz,
+      topic: 'general',
+    });
+    return res.json({ text: textResult });
+  } catch (error) {
+    return res.status(400).json({ error: error.message || '?? ??????? ????????? Yandex STT' });
+  }
+});
+
+app.post('/api/yandex/turn', async (req, res) => {
+  try {
+    const userText = normalizeWhitespace(req.body?.text || '');
+    const systemPrompt = String(req.body?.systemPrompt || '');
+    const modelId = normalizeWhitespace(req.body?.modelId || YANDEX_DEFAULT_MODEL_ID) || YANDEX_DEFAULT_MODEL_ID;
+    const voiceName = normalizeWhitespace(req.body?.voiceName || 'ermil') || 'ermil';
+    const sampleRateHertz = Math.max(8000, Number(req.body?.sampleRateHertz || 24000) || 24000);
+    if (!userText) {
+      return res.status(400).json({ error: '?? ??????? ????? ??????? ??? Yandex turn' });
+    }
+    const assistantText = await requestYandexCompletion({
+      modelId,
+      systemPrompt,
+      userText,
+    });
+    if (!assistantText) {
+      return res.status(502).json({ error: 'Yandex ?? ?????? ????? ??????' });
+    }
+    const ttsResult = await requestYandexTts({
+      text: assistantText,
+      voice: voiceName,
+      sampleRateHertz,
+    });
+    return res.json({
+      text: assistantText,
+      audioBase64: ttsResult.audioBase64,
+      sampleRateHertz: ttsResult.sampleRateHertz,
+    });
+  } catch (error) {
+    return res.status(400).json({ error: error.message || '?? ??????? ????????? Yandex turn' });
   }
 });
 
@@ -511,6 +798,47 @@ app.post('/api/browser/open', async (req, res) => {
       error: error.message || 'Не удалось открыть страницу',
       errorReason,
     });
+  }
+});
+
+app.post('/api/browser/cancel', async (req, res) => {
+  try {
+    const reason = normalizeWhitespace(req.body?.reason || 'client-cancel') || 'client-cancel';
+    cancelPendingBrowserOperations(reason);
+    return res.json({ ok: true, reason });
+  } catch (error) {
+    return res.status(400).json({ error: error.message || 'Не удалось отменить открытие сайта' });
+  }
+});
+
+app.post('/api/browser/url-context', async (req, res) => {
+  const startedAt = Date.now();
+  const url = String(req.body?.url || '').trim();
+  const question = String(req.body?.question || '').trim();
+  const requestId = Number.isFinite(Number(req.body?.requestId)) ? Number(req.body?.requestId) : 0;
+
+  try {
+    if (!url) {
+      return res.status(400).json({ error: 'URL страницы не передан' });
+    }
+
+    const result = await fetchBrowserUrlContext({ url, question });
+    logRuntime('browser.url-context.result', {
+      requestId,
+      url: result?.url || url,
+      title: result?.title || '',
+      textLength: result?.readerText?.length || 0,
+      ms: Date.now() - startedAt,
+    });
+    return res.json(result);
+  } catch (error) {
+    logRuntime('browser.url-context.error', {
+      requestId,
+      url,
+      ms: Date.now() - startedAt,
+      error,
+    }, 'error');
+    return res.status(400).json({ error: error.message || 'Не удалось прочитать страницу по URL' });
   }
 });
 
@@ -908,72 +1236,239 @@ if (fs.existsSync(distDir)) {
   app.use(express.static(distDir, { index: false }));
 }
 
-wss.on('connection', (clientWs) => {
-  logRuntime('ws.client.connected');
+function attachGeminiBridgeConnection(clientWs, { route = 'gemini-proxy', voiceSession = null } = {}) {
+  logRuntime('ws.client.connected', {
+    route,
+    conversationSessionId: voiceSession?.conversationSessionId || '',
+    characterId: voiceSession?.characterId || '',
+  });
 
   let geminiWs = null;
   let messageBuffer = [];
   let isConnected = false;
+  let connectAttempt = 0;
+  let connectRetryTimer = null;
+  let lastConnectError = null;
+  let clientClosed = false;
+  let lastSetupMessage = null;
+  let lastSetupPayload = null;
+  let latestSessionResumptionHandle = '';
 
-  try {
-    geminiWs = new WebSocket(GEMINI_WS_URL, { agent: proxyAgent });
+  const buildSetupMessageForReconnect = () => {
+    if (!lastSetupPayload || typeof lastSetupPayload !== 'object') {
+      return lastSetupMessage;
+    }
 
-    geminiWs.on('open', () => {
-      logRuntime('ws.gemini.connected');
+    const payload = structuredClone(lastSetupPayload);
+    if (payload?.setup && payload.setup.sessionResumption) {
+      if (latestSessionResumptionHandle) {
+        payload.setup.sessionResumption.handle = latestSessionResumptionHandle;
+      } else {
+        delete payload.setup.sessionResumption.handle;
+      }
+    }
+
+    return JSON.stringify(payload);
+  };
+
+  const clearConnectRetryTimer = () => {
+    if (!connectRetryTimer) {
+      return;
+    }
+    clearTimeout(connectRetryTimer);
+    connectRetryTimer = null;
+  };
+
+  const scheduleConnectRetry = (details = {}) => {
+    if (clientClosed || clientWs.readyState !== WebSocket.OPEN) {
+      return false;
+    }
+    if (!shouldRetryGeminiConnect({ attempt: connectAttempt, ...details })) {
+      return false;
+    }
+
+    const delayMs = getGeminiRetryDelayMs(connectAttempt);
+    logRuntime('ws.gemini.retry.scheduled', {
+      attempt: connectAttempt + 1,
+      delayMs,
+      reason: normalizeWhitespace(details.error?.message || details.reason || ''),
+      code: Number(details.code) || 0,
+    });
+    clearConnectRetryTimer();
+    connectRetryTimer = setTimeout(() => {
+      connectGemini();
+    }, delayMs);
+    return true;
+  };
+
+  const connectGemini = () => {
+    if (clientClosed || clientWs.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    clearConnectRetryTimer();
+    isConnected = false;
+    connectAttempt += 1;
+    lastConnectError = null;
+    const upstream = createGeminiUpstreamSocket();
+    geminiWs = upstream;
+    logRuntime('ws.gemini.connect.attempt', {
+      route,
+      attempt: connectAttempt,
+      conversationSessionId: voiceSession?.conversationSessionId || '',
+    });
+
+    upstream.on('open', () => {
+      if (geminiWs !== upstream) {
+        upstream.close();
+        return;
+      }
+
+      logRuntime('ws.gemini.connected', {
+        route,
+        conversationSessionId: voiceSession?.conversationSessionId || '',
+      });
       isConnected = true;
+      connectAttempt = 0;
+      lastConnectError = null;
+
+      const setupMessage = buildSetupMessageForReconnect();
+      if (setupMessage) {
+        upstream.send(setupMessage);
+      }
 
       if (messageBuffer.length > 0) {
-        logRuntime('ws.gemini.flush-buffer', { messageCount: messageBuffer.length });
-        messageBuffer.forEach((message) => geminiWs.send(message));
+        logRuntime('ws.gemini.flush-buffer', {
+          route,
+          messageCount: messageBuffer.length,
+        });
+        messageBuffer.forEach((message) => upstream.send(message));
         messageBuffer = [];
       }
     });
 
-    clientWs.on('message', (data) => {
-      const outgoing = sanitizeGeminiProxySetupMessage(data);
-      if (isConnected && geminiWs.readyState === WebSocket.OPEN) {
-        geminiWs.send(outgoing);
-      } else {
-        messageBuffer.push(outgoing);
+    upstream.on('message', (data) => {
+      try {
+        const parsed = data instanceof Buffer ? JSON.parse(data.toString('utf8')) : JSON.parse(String(data));
+        if (parsed?.sessionResumptionUpdate) {
+          const nextHandle = normalizeWhitespace(parsed.sessionResumptionUpdate.newHandle || '');
+          latestSessionResumptionHandle = parsed.sessionResumptionUpdate.resumable && nextHandle ? nextHandle : '';
+        }
+      } catch {
+        // Ignore non-JSON upstream messages.
       }
-    });
 
-    geminiWs.on('message', (data) => {
       if (clientWs.readyState === WebSocket.OPEN) {
         clientWs.send(data);
       }
     });
 
-    geminiWs.on('error', (error) => {
-      logRuntime('ws.gemini.error', { error }, 'error');
+    upstream.on('error', (error) => {
+      if (geminiWs !== upstream) {
+        return;
+      }
+
+      lastConnectError = error;
+      logRuntime('ws.gemini.error', {
+        route,
+        error,
+        attempt: connectAttempt,
+        conversationSessionId: voiceSession?.conversationSessionId || '',
+      }, 'error');
+    });
+
+    upstream.on('close', (code, reason) => {
+      if (geminiWs !== upstream) {
+        return;
+      }
+
+      const closeReason = reason.toString();
+      isConnected = false;
+      logRuntime('ws.gemini.closed', {
+        route,
+        code,
+        reason: closeReason,
+        attempt: connectAttempt,
+        conversationSessionId: voiceSession?.conversationSessionId || '',
+      });
+
+      if (lastSetupMessage && scheduleConnectRetry({ error: lastConnectError, code, reason: closeReason })) {
+        return;
+      }
+
       if (clientWs.readyState === WebSocket.OPEN) {
-        safeCloseSocket(clientWs, 1011, `Gemini Error: ${error.message}`, 'gemini-proxy-upstream-error');
+        safeCloseSocket(clientWs, code, closeReason, `${route}-upstream-close`);
+      }
+    });
+  };
+
+  try {
+    connectGemini();
+
+    clientWs.on('message', (data) => {
+      const outgoing = sanitizeGeminiProxySetupMessage(data);
+      const textPayload = typeof outgoing === 'string'
+        ? outgoing
+        : (Buffer.isBuffer(outgoing) ? outgoing.toString('utf8') : '');
+      const isSetupMessage = Boolean(textPayload && textPayload.includes('"setup"'));
+      if (isSetupMessage) {
+        try {
+          lastSetupPayload = JSON.parse(textPayload);
+          const requestedHandle = normalizeWhitespace(lastSetupPayload?.setup?.sessionResumption?.handle || '');
+          latestSessionResumptionHandle = requestedHandle || latestSessionResumptionHandle;
+          lastSetupMessage = buildSetupMessageForReconnect();
+        } catch {
+          lastSetupPayload = null;
+          lastSetupMessage = outgoing;
+        }
+      }
+
+      if (isConnected && geminiWs.readyState === WebSocket.OPEN) {
+        geminiWs.send(isSetupMessage ? (lastSetupMessage || outgoing) : outgoing);
+      } else if (!isSetupMessage) {
+        messageBuffer.push(outgoing);
       }
     });
 
-    geminiWs.on('close', (code, reason) => {
-      logRuntime('ws.gemini.closed', { code, reason: reason.toString() });
-      if (clientWs.readyState === WebSocket.OPEN) {
-        safeCloseSocket(clientWs, code, reason.toString(), 'gemini-proxy-upstream-close');
-      }
-    });
   } catch (error) {
-    logRuntime('ws.gemini.create-failed', { error }, 'error');
-    safeCloseSocket(clientWs, 1011, 'Proxy Error', 'gemini-proxy-create-failed');
+    logRuntime('ws.gemini.create-failed', { route, error }, 'error');
+    safeCloseSocket(clientWs, 1011, 'Proxy Error', `${route}-create-failed`);
   }
 
   clientWs.on('close', () => {
-    logRuntime('ws.client.disconnected');
-    if (geminiWs && geminiWs.readyState === WebSocket.OPEN) {
+    clientClosed = true;
+    clearConnectRetryTimer();
+    logRuntime('ws.client.disconnected', {
+      route,
+      conversationSessionId: voiceSession?.conversationSessionId || '',
+    });
+    if (geminiWs && (geminiWs.readyState === WebSocket.OPEN || geminiWs.readyState === WebSocket.CONNECTING)) {
       geminiWs.close();
     }
   });
 
   clientWs.on('error', (error) => {
-    logRuntime('ws.client.error', { error }, 'error');
-    if (geminiWs && geminiWs.readyState === WebSocket.OPEN) {
+    clientClosed = true;
+    clearConnectRetryTimer();
+    logRuntime('ws.client.error', {
+      route,
+      error,
+      conversationSessionId: voiceSession?.conversationSessionId || '',
+    }, 'error');
+    if (geminiWs && (geminiWs.readyState === WebSocket.OPEN || geminiWs.readyState === WebSocket.CONNECTING)) {
       geminiWs.close();
     }
+  });
+}
+
+geminiProxyWss.on('connection', (clientWs) => {
+  attachGeminiBridgeConnection(clientWs, { route: 'gemini-proxy' });
+});
+
+voiceGatewayWss.on('connection', (clientWs, _request, voiceSession) => {
+  attachGeminiBridgeConnection(clientWs, {
+    route: 'voice-proxy',
+    voiceSession,
   });
 });
 
@@ -981,8 +1476,27 @@ server.on('upgrade', (request, socket, head) => {
   try {
     const parsed = new URL(request.url || '/', 'http://localhost');
     if (parsed.pathname === '/gemini-proxy') {
-      wss.handleUpgrade(request, socket, head, (ws) => {
-        wss.emit('connection', ws, request);
+      geminiProxyWss.handleUpgrade(request, socket, head, (ws) => {
+        geminiProxyWss.emit('connection', ws, request);
+      });
+      return;
+    }
+
+    if (parsed.pathname === '/voice-proxy') {
+      const sessionToken = normalizeWhitespace(parsed.searchParams.get('sessionToken') || '');
+      const voiceSession = consumeVoiceSessionToken(sessionToken);
+      if (!voiceSession) {
+        try {
+          socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
+        } catch {
+          // Ignore response write failures during rejected upgrade.
+        }
+        socket.destroy();
+        return;
+      }
+
+      voiceGatewayWss.handleUpgrade(request, socket, head, (ws) => {
+        voiceGatewayWss.emit('connection', ws, request, voiceSession);
       });
       return;
     }
@@ -1015,7 +1529,19 @@ sttWss.on('connection', (clientWs, request) => {
   let voicedAudioSeen = false;
   let pendingAudioMessages = [];
   let sttLanguage = 'ru-RU';
+  let connectAttempt = 0;
+  let connectRetryTimer = null;
+  let lastConnectError = null;
+  let clientClosed = false;
   const configPromise = loadAppConfig().catch(() => null);
+
+  const clearConnectRetryTimer = () => {
+    if (!connectRetryTimer) {
+      return;
+    }
+    clearTimeout(connectRetryTimer);
+    connectRetryTimer = null;
+  };
 
   const flushPendingAudio = () => {
     if (!setupSent || !geminiWs || geminiWs.readyState !== WebSocket.OPEN || !pendingAudioMessages.length) {
@@ -1032,6 +1558,29 @@ sttWss.on('connection', (clientWs, request) => {
     if (clientWs.readyState === WebSocket.OPEN) {
       clientWs.send(JSON.stringify(payload));
     }
+  };
+
+  const scheduleConnectRetry = (details = {}) => {
+    if (clientClosed || clientWs.readyState !== WebSocket.OPEN) {
+      return false;
+    }
+    if (!shouldRetryGeminiConnect({ attempt: connectAttempt, ...details })) {
+      return false;
+    }
+
+    const delayMs = getGeminiRetryDelayMs(connectAttempt);
+    logRuntime('stt.stream.retry.scheduled', {
+      conversationSessionId,
+      attempt: connectAttempt + 1,
+      delayMs,
+      reason: normalizeWhitespace(details.error?.message || details.reason || ''),
+      code: Number(details.code) || 0,
+    });
+    clearConnectRetryTimer();
+    connectRetryTimer = setTimeout(() => {
+      connectGemini();
+    }, delayMs);
+    return true;
   };
 
   const getBufferedTranscript = () => normalizeWhitespace(inputTranscriptBuffer || lastPartialText || '');
@@ -1110,93 +1659,131 @@ sttWss.on('connection', (clientWs, request) => {
     });
   };
 
-  try {
-    geminiWs = new WebSocket(GEMINI_WS_URL, { agent: proxyAgent });
-  } catch (error) {
-    logRuntime('stt.stream.error', {
-      conversationSessionId,
-      error,
-    }, 'error');
-    safeCloseSocket(clientWs, 1011, 'STT proxy create failed', 'stt-proxy-create-failed');
-    return;
-  }
-
-  geminiWs.on('open', () => {
-    geminiReady = true;
-    void sendSttSetup();
-  });
-
-  geminiWs.on('message', async (raw) => {
+  const connectGemini = () => {
     try {
-      const data = raw instanceof Blob ? JSON.parse(await raw.text()) : JSON.parse(raw);
+      clearConnectRetryTimer();
+      connectAttempt += 1;
+      lastConnectError = null;
+      geminiReady = false;
+      setupSent = false;
+      const upstream = createGeminiUpstreamSocket();
+      geminiWs = upstream;
+      logRuntime('stt.stream.connect.attempt', {
+        conversationSessionId,
+        attempt: connectAttempt,
+      });
 
-      if (data.setupComplete) {
-        sendToClient({ type: 'ready' });
-        logRuntime('stt.stream.ready', {
+      upstream.on('open', () => {
+        if (geminiWs !== upstream) {
+          upstream.close();
+          return;
+        }
+
+        geminiReady = true;
+        connectAttempt = 0;
+        lastConnectError = null;
+        void sendSttSetup();
+      });
+
+      upstream.on('message', async (raw) => {
+        try {
+          const data = raw instanceof Blob ? JSON.parse(await raw.text()) : JSON.parse(raw);
+
+          if (data.setupComplete) {
+            sendToClient({ type: 'ready' });
+            logRuntime('stt.stream.ready', {
+              conversationSessionId,
+              sttSessionId: `gemini-live:${conversationSessionId}`,
+            });
+            flushPendingAudio();
+            return;
+          }
+
+          if (data.serverContent?.inputTranscription?.text) {
+            inputTranscriptBuffer += data.serverContent.inputTranscription.text;
+            lastPartialText = normalizeWhitespace(inputTranscriptBuffer);
+            lastPartialUpdatedAt = Date.now();
+            sendToClient({
+              type: 'partial',
+              text: lastPartialText,
+            });
+          }
+
+          if (data.serverContent?.turnComplete || data.serverContent?.generationComplete) {
+            finalizeBufferedTranscript('upstream-turn-complete');
+            return;
+          }
+
+          if (data.serverContent?.interrupted) {
+            inputTranscriptBuffer = '';
+            lastPartialText = '';
+            lastPartialUpdatedAt = 0;
+            trailingSilenceMs = 0;
+            voicedAudioSeen = false;
+            sendToClient({ type: 'partial', text: '' });
+          }
+
+          if (data.error) {
+            sendToClient({ type: 'error', error: data.error.message || 'STT upstream error' });
+          }
+        } catch (error) {
+          logRuntime('stt.stream.message.error', {
+            conversationSessionId,
+            error,
+          }, 'error');
+        }
+      });
+
+      upstream.on('error', (error) => {
+        if (geminiWs !== upstream) {
+          return;
+        }
+
+        lastConnectError = error;
+        logRuntime('stt.stream.error', {
           conversationSessionId,
-          sttSessionId: `gemini-live:${conversationSessionId}`,
+          error,
+          attempt: connectAttempt,
+        }, 'error');
+        if (geminiReady) {
+          sendToClient({ type: 'error', error: error.message || 'STT upstream error' });
+          if (clientWs.readyState === WebSocket.OPEN) {
+            safeCloseSocket(clientWs, 1011, error.message || 'STT upstream error', 'stt-upstream-error');
+          }
+        }
+      });
+
+      upstream.on('close', (code, reason) => {
+        if (geminiWs !== upstream) {
+          return;
+        }
+
+        const closeReason = reason.toString();
+        if (!geminiReady && scheduleConnectRetry({ error: lastConnectError, code, reason: closeReason })) {
+          return;
+        }
+
+        finalizeBufferedTranscript('upstream-close');
+        logRuntime('stt.stream.closed', {
+          conversationSessionId,
+          code,
+          reason: closeReason,
+          attempt: connectAttempt,
         });
-        flushPendingAudio();
-        return;
-      }
-
-      if (data.serverContent?.inputTranscription?.text) {
-        inputTranscriptBuffer += data.serverContent.inputTranscription.text;
-        lastPartialText = normalizeWhitespace(inputTranscriptBuffer);
-        lastPartialUpdatedAt = Date.now();
-        sendToClient({
-          type: 'partial',
-          text: lastPartialText,
-        });
-      }
-
-      if (data.serverContent?.turnComplete || data.serverContent?.generationComplete) {
-        finalizeBufferedTranscript('upstream-turn-complete');
-        return;
-      }
-
-      if (data.serverContent?.interrupted) {
-        inputTranscriptBuffer = '';
-        lastPartialText = '';
-        lastPartialUpdatedAt = 0;
-        trailingSilenceMs = 0;
-        voicedAudioSeen = false;
-        sendToClient({ type: 'partial', text: '' });
-      }
-
-      if (data.error) {
-        sendToClient({ type: 'error', error: data.error.message || 'STT upstream error' });
-      }
+        if (clientWs.readyState === WebSocket.OPEN) {
+          safeCloseSocket(clientWs, code, closeReason, 'stt-upstream-close');
+        }
+      });
     } catch (error) {
-      logRuntime('stt.stream.message.error', {
+      logRuntime('stt.stream.error', {
         conversationSessionId,
         error,
       }, 'error');
+      safeCloseSocket(clientWs, 1011, 'STT proxy create failed', 'stt-proxy-create-failed');
     }
-  });
+  };
 
-  geminiWs.on('error', (error) => {
-    logRuntime('stt.stream.error', {
-      conversationSessionId,
-      error,
-    }, 'error');
-    sendToClient({ type: 'error', error: error.message || 'STT upstream error' });
-    if (clientWs.readyState === WebSocket.OPEN) {
-      safeCloseSocket(clientWs, 1011, error.message || 'STT upstream error', 'stt-upstream-error');
-    }
-  });
-
-  geminiWs.on('close', (code, reason) => {
-    finalizeBufferedTranscript('upstream-close');
-    logRuntime('stt.stream.closed', {
-      conversationSessionId,
-      code,
-      reason: reason.toString(),
-    });
-    if (clientWs.readyState === WebSocket.OPEN) {
-      safeCloseSocket(clientWs, code, reason.toString(), 'stt-upstream-close');
-    }
-  });
+  connectGemini();
 
   clientWs.on('message', (raw) => {
     try {
@@ -1226,7 +1813,10 @@ sttWss.on('connection', (clientWs, request) => {
 
         const message = JSON.stringify({
           realtimeInput: {
-            mediaChunks: [{ mimeType: 'audio/pcm;rate=16000', data: payload.data }],
+            audio: {
+              mimeType: 'audio/pcm;rate=16000',
+              data: payload.data,
+            },
           },
         });
 
@@ -1248,18 +1838,22 @@ sttWss.on('connection', (clientWs, request) => {
   });
 
   clientWs.on('close', () => {
+    clientClosed = true;
+    clearConnectRetryTimer();
     finalizeBufferedTranscript('client-close');
-    if (geminiWs && geminiWs.readyState === WebSocket.OPEN) {
+    if (geminiWs && (geminiWs.readyState === WebSocket.OPEN || geminiWs.readyState === WebSocket.CONNECTING)) {
       geminiWs.close();
     }
   });
 
   clientWs.on('error', (error) => {
+    clientClosed = true;
+    clearConnectRetryTimer();
     logRuntime('stt.client.error', {
       conversationSessionId,
       error,
     }, 'error');
-    if (geminiWs && geminiWs.readyState === WebSocket.OPEN) {
+    if (geminiWs && (geminiWs.readyState === WebSocket.OPEN || geminiWs.readyState === WebSocket.CONNECTING)) {
       geminiWs.close();
     }
   });
@@ -1328,7 +1922,15 @@ async function shutdown(signal) {
   forcedExitTimer.unref?.();
 
   try {
-    for (const client of wss.clients) {
+    for (const client of geminiProxyWss.clients) {
+      try {
+        client.close(1001, 'Server shutting down');
+      } catch {
+        // Ignore close errors during shutdown.
+      }
+    }
+
+    for (const client of voiceGatewayWss.clients) {
       try {
         client.close(1001, 'Server shutting down');
       } catch {
@@ -1345,7 +1947,11 @@ async function shutdown(signal) {
     }
 
     await new Promise((resolve) => {
-      wss.close(() => resolve());
+      geminiProxyWss.close(() => resolve());
+    });
+
+    await new Promise((resolve) => {
+      voiceGatewayWss.close(() => resolve());
     });
 
     await new Promise((resolve) => {
