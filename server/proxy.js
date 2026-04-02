@@ -1233,7 +1233,19 @@ app.post('/api/browser/client-event', (req, res) => {
 });
 
 if (fs.existsSync(distDir)) {
-  app.use(express.static(distDir, { index: false }));
+  app.use(express.static(distDir, {
+    index: false,
+    setHeaders(res, filePath) {
+      const normalizedPath = String(filePath || '').replace(/\\/g, '/');
+      if (normalizedPath.endsWith('/sw.js') || normalizedPath.endsWith('/manifest.webmanifest') || normalizedPath.endsWith('/index.html')) {
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+        return;
+      }
+      if (normalizedPath.includes('/assets/')) {
+        res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+      }
+    },
+  }));
 }
 
 function attachGeminiBridgeConnection(clientWs, { route = 'gemini-proxy', voiceSession = null } = {}) {
@@ -1869,6 +1881,7 @@ app.use((req, res, next) => {
   }
 
   if (fs.existsSync(indexHtmlPath)) {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
     return res.sendFile(indexHtmlPath);
   }
 
