@@ -489,13 +489,13 @@ async function requestYandexCompletion({ modelId = '', systemPrompt = '', userTe
   );
 }
 
-async function requestYandexTts({ text, voice = 'ermil', sampleRateHertz = 24000 }) {
+async function requestYandexTts({ text, voice = 'ermil', sampleRateHertz = 48000 }) {
   const form = new URLSearchParams({
     text,
     lang: 'ru-RU',
     voice: normalizeWhitespace(voice || 'ermil') || 'ermil',
     format: 'lpcm',
-    sampleRateHertz: String(sampleRateHertz || 24000),
+    sampleRateHertz: String(sampleRateHertz || 48000),
   });
   const response = await fetch(YANDEX_TTS_URL, {
     method: 'POST',
@@ -521,7 +521,7 @@ async function requestYandexTts({ text, voice = 'ermil', sampleRateHertz = 24000
   }
   return {
     audioBase64: Buffer.from(audioArrayBuffer).toString('base64'),
-    sampleRateHertz: Number(sampleRateHertz || 24000),
+    sampleRateHertz: Number(sampleRateHertz || 48000),
   };
 }
 
@@ -643,7 +643,7 @@ app.post('/api/yandex/turn', async (req, res) => {
     const systemPrompt = String(req.body?.systemPrompt || '');
     const modelId = normalizeWhitespace(req.body?.modelId || YANDEX_DEFAULT_MODEL_ID) || YANDEX_DEFAULT_MODEL_ID;
     const voiceName = normalizeWhitespace(req.body?.voiceName || 'ermil') || 'ermil';
-    const sampleRateHertz = Math.max(8000, Number(req.body?.sampleRateHertz || 24000) || 24000);
+    const sampleRateHertz = Math.max(8000, Number(req.body?.sampleRateHertz || 48000) || 48000);
     if (!userText) {
       return res.status(400).json({ error: '?? ??????? ????? ??????? ??? Yandex turn' });
     }
