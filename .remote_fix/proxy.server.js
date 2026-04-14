@@ -624,7 +624,7 @@ app.post('/api/yandex/stt', async (req, res) => {
     const language = normalizeWhitespace(req.body?.language || 'ru-RU') || 'ru-RU';
     const sampleRateHertz = Math.max(8000, Number(req.body?.sampleRateHertz || 16000) || 16000);
     if (!audioBase64) {
-      return res.status(400).json({ error: 'Не переданы аудиоданные для Yandex STT' });
+      return res.status(400).json({ error: '?? ???????? ??????????? ??? Yandex STT' });
     }
     const audioBuffer = Buffer.from(audioBase64, 'base64');
     const textResult = await requestYandexStt({
@@ -635,7 +635,7 @@ app.post('/api/yandex/stt', async (req, res) => {
     });
     return res.json({ text: textResult });
   } catch (error) {
-    return res.status(400).json({ error: error.message || 'Не удалось выполнить Yandex STT' });
+    return res.status(400).json({ error: error.message || '?? ??????? ????????? Yandex STT' });
   }
 });
 
@@ -647,7 +647,7 @@ app.post('/api/yandex/turn', async (req, res) => {
     const voiceName = normalizeWhitespace(req.body?.voiceName || 'ermil') || 'ermil';
     const sampleRateHertz = Math.max(8000, Number(req.body?.sampleRateHertz || 48000) || 48000);
     if (!userText) {
-      return res.status(400).json({ error: 'Не передан текст запроса для Yandex turn' });
+      return res.status(400).json({ error: '?? ??????? ????? ??????? ??? Yandex turn' });
     }
     const assistantText = await requestYandexCompletion({
       modelId,
@@ -655,7 +655,7 @@ app.post('/api/yandex/turn', async (req, res) => {
       userText,
     });
     if (!assistantText) {
-      return res.status(502).json({ error: 'Yandex не вернул текст ответа' });
+      return res.status(502).json({ error: 'Yandex ?? ?????? ????? ??????' });
     }
     const ttsResult = await requestYandexTts({
       text: assistantText,
@@ -668,31 +668,7 @@ app.post('/api/yandex/turn', async (req, res) => {
       sampleRateHertz: ttsResult.sampleRateHertz,
     });
   } catch (error) {
-    return res.status(400).json({ error: error.message || 'Не удалось выполнить Yandex turn' });
-  }
-});
-
-app.post('/api/yandex/tts', async (req, res) => {
-  try {
-    const text = normalizeWhitespace(req.body?.text || '');
-    const voiceName = normalizeWhitespace(req.body?.voiceName || 'ermil') || 'ermil';
-    const sampleRateHertz = Math.max(8000, Number(req.body?.sampleRateHertz || 48000) || 48000);
-    if (!text) {
-      return res.status(400).json({ error: 'Не передан текст для Yandex TTS' });
-    }
-
-    const ttsResult = await requestYandexTts({
-      text,
-      voice: voiceName,
-      sampleRateHertz,
-    });
-
-    return res.json({
-      audioBase64: ttsResult.audioBase64,
-      sampleRateHertz: ttsResult.sampleRateHertz,
-    });
-  } catch (error) {
-    return res.status(400).json({ error: error.message || 'Не удалось синтезировать Yandex TTS' });
+    return res.status(400).json({ error: error.message || '?? ??????? ????????? Yandex turn' });
   }
 });
 
@@ -1940,7 +1916,7 @@ app.use((req, res, next) => {
   return res.status(404).send('Frontend bundle not found');
 });
 
-const PORT = Number(process.env.PORT || 3000);
+const PORT = Number(process.env.PORT || 3001);
 server.listen(PORT, () => {
   logRuntime('server.started', {
     port: PORT,

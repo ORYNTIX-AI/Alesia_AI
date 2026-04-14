@@ -1,0 +1,20 @@
+- generic [ref=e4]:
+  - generic [ref=e5]:
+    - generic [ref=e6]:
+      - generic [ref=e7]: Батюшка 3
+      - generic [ref=e8]: Готова к разговору
+    - generic [ref=e9]:
+      - button "Переключить тему" [ref=e10] [cursor=pointer]:
+        - img [ref=e11]
+      - button "Включить полноэкранный режим" [ref=e13] [cursor=pointer]:
+        - img [ref=e14]
+      - button "Открыть настройки персонажа" [ref=e16] [cursor=pointer]:
+        - img [ref=e17]
+  - generic [ref=e19]:
+    - button "Предыдущий персонаж" [ref=e20] [cursor=pointer]:
+      - img [ref=e21]
+    - generic [ref=e30]: Восстановление...
+    - button "Следующий персонаж" [ref=e34] [cursor=pointer]:
+      - img [ref=e35]
+  - button "Завершить сессию" [active] [ref=e41] [cursor=pointer]
+  - generic [ref=e43]: Соединение восстанавливается автоматически (попытка 1).

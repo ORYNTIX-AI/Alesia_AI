@@ -1,0 +1,228 @@
+{
+  "id": "a0adb0f7-8d43-4a7c-bf13-2b0b67de3d56",
+  "createdAt": "2026-04-13T05:48:12.800Z",
+  "updatedAt": "2026-04-13T05:48:27.497Z",
+  "lastCharacterId": "batyushka-3",
+  "status": "closed",
+  "turns": [
+    {
+      "ts": "2026-04-13T05:48:19.887Z",
+      "role": "user",
+      "source": "yandex-realtime-transcription",
+      "text": "привет"
+    },
+    {
+      "ts": "2026-04-13T05:48:19.977Z",
+      "role": "assistant",
+      "source": "yandex-realtime",
+      "text": "Здравствуйте! Чем могу помочь?"
+    }
+  ],
+  "actionLog": [
+    {
+      "ts": "2026-04-13T05:48:12.887Z",
+      "event": "voice.input.start",
+      "details": {
+        "conversationSessionId": "a0adb0f7-8d43-4a7c-bf13-2b0b67de3d56",
+        "inputSessionId": "yandex-realtime:a0adb0f7-8d43-4a7c-bf13-2b0b67de3d56",
+        "mode": "yandex-realtime"
+      }
+    },
+    {
+      "ts": "2026-04-13T05:48:14.095Z",
+      "event": "model.session.ready",
+      "details": {
+        "conversationSessionId": "a0adb0f7-8d43-4a7c-bf13-2b0b67de3d56",
+        "resumed": false,
+        "shouldSendGreeting": false
+      }
+    },
+    {
+      "ts": "2026-04-13T05:48:19.749Z",
+      "event": "assistant.queue.clear",
+      "details": {
+        "reason": "new-user-request:yandex-realtime-input-final"
+      }
+    },
+    {
+      "ts": "2026-04-13T05:48:19.826Z",
+      "event": "runtime.request.activate",
+      "details": {
+        "requestId": 1,
+        "source": "yandex-realtime-input-final"
+      }
+    },
+    {
+      "ts": "2026-04-13T05:48:19.847Z",
+      "event": "runtime.request.state",
+      "details": {
+        "requestId": 1,
+        "state": "active",
+        "source": "yandex-realtime-input-final"
+      }
+    },
+    {
+      "ts": "2026-04-13T05:48:19.870Z",
+      "event": "stt.stream.final",
+      "details": {
+        "conversationSessionId": "a0adb0f7-8d43-4a7c-bf13-2b0b67de3d56",
+        "source": "yandex-realtime-input",
+        "textLength": 6
+      }
+    },
+    {
+      "ts": "2026-04-13T05:48:19.878Z",
+      "event": "user.turn.final",
+      "details": {
+        "conversationSessionId": "a0adb0f7-8d43-4a7c-bf13-2b0b67de3d56",
+        "source": "yandex-realtime-input",
+        "textLength": 6
+      }
+    },
+    {
+      "ts": "2026-04-13T05:48:19.894Z",
+      "event": "runtime.request.state",
+      "details": {
+        "requestId": 1,
+        "state": "runtime-turn-started",
+        "textLength": 6
+      }
+    },
+    {
+      "ts": "2026-04-13T05:48:19.904Z",
+      "event": "runtime.turn.orchestrated.start",
+      "details": {
+        "conversationSessionId": "a0adb0f7-8d43-4a7c-bf13-2b0b67de3d56",
+        "textLength": 6,
+        "hasActiveBrowserSession": false
+      }
+    },
+    {
+      "ts": "2026-04-13T05:48:19.913Z",
+      "event": "assistant.queue.enqueue",
+      "details": {
+        "source": "runtime.repeat-request",
+        "textLength": 162,
+        "priority": "high",
+        "queueSize": 1,
+        "requestId": 1
+      }
+    },
+    {
+      "ts": "2026-04-13T05:48:19.936Z",
+      "event": "assistant.queue.sent",
+      "details": {
+        "source": "runtime.repeat-request",
+        "textLength": 162,
+        "queueSize": 0,
+        "requestId": 1
+      }
+    },
+    {
+      "ts": "2026-04-13T05:48:19.943Z",
+      "event": "assistant.turn.start",
+      "details": {
+        "conversationSessionId": "a0adb0f7-8d43-4a7c-bf13-2b0b67de3d56",
+        "responseId": "resp_ae1fd5e8951d4148b2bb57e90d23139f"
+      }
+    },
+    {
+      "ts": "2026-04-13T05:48:19.950Z",
+      "event": "assistant.queue.release",
+      "details": {
+        "reason": "commit"
+      }
+    },
+    {
+      "ts": "2026-04-13T05:48:19.957Z",
+      "event": "assistant.turn.commit",
+      "details": {
+        "conversationSessionId": "a0adb0f7-8d43-4a7c-bf13-2b0b67de3d56",
+        "textLength": 30,
+        "textChunks": 2,
+        "audioChunks": 0,
+        "durationMs": 79,
+        "responseId": "resp_ae1fd5e8951d4148b2bb57e90d23139f",
+        "source": "runtime.repeat-request"
+      }
+    },
+    {
+      "ts": "2026-04-13T05:48:19.971Z",
+      "event": "runtime.request.final",
+      "details": {
+        "requestId": 1,
+        "outcome": "answered",
+        "textLength": 30
+      }
+    },
+    {
+      "ts": "2026-04-13T05:48:19.991Z",
+      "event": "assistant.turn.drop",
+      "details": {
+        "conversationSessionId": "a0adb0f7-8d43-4a7c-bf13-2b0b67de3d56",
+        "reason": "unexpected-start",
+        "browserIntentInFlight": false,
+        "browserFlowState": "idle",
+        "responseId": "resp_c071f56ab47640bd852efab7a245a52f"
+      }
+    },
+    {
+      "ts": "2026-04-13T05:48:20.337Z",
+      "event": "stt.stream.echo-drop",
+      "details": {
+        "conversationSessionId": "a0adb0f7-8d43-4a7c-bf13-2b0b67de3d56",
+        "source": "yandex-realtime-input",
+        "textLength": 18,
+        "reason": "recent-assistant-turn"
+      }
+    },
+    {
+      "ts": "2026-04-13T05:48:20.370Z",
+      "event": "assistant.turn.drop",
+      "details": {
+        "conversationSessionId": "a0adb0f7-8d43-4a7c-bf13-2b0b67de3d56",
+        "reason": "unexpected-start",
+        "browserIntentInFlight": false,
+        "browserFlowState": "idle",
+        "responseId": "resp_ec6f83a7a9a746b480a3578cc3dbe945"
+      }
+    },
+    {
+      "ts": "2026-04-13T05:48:27.412Z",
+      "event": "session.stop.request",
+      "details": {
+        "conversationSessionId": "a0adb0f7-8d43-4a7c-bf13-2b0b67de3d56"
+      }
+    },
+    {
+      "ts": "2026-04-13T05:48:27.437Z",
+      "event": "voice.input.closed",
+      "details": {
+        "conversationSessionId": "a0adb0f7-8d43-4a7c-bf13-2b0b67de3d56",
+        "inputSessionId": "yandex-realtime:a0adb0f7-8d43-4a7c-bf13-2b0b67de3d56",
+        "mode": "yandex-realtime"
+      }
+    },
+    {
+      "ts": "2026-04-13T05:48:27.458Z",
+      "event": "assistant.queue.clear",
+      "details": {
+        "reason": "manual-stop"
+      }
+    },
+    {
+      "ts": "2026-04-13T05:48:27.497Z",
+      "event": "session.teardown.complete",
+      "details": {
+        "conversationSessionId": "a0adb0f7-8d43-4a7c-bf13-2b0b67de3d56"
+      }
+    }
+  ],
+  "browserSessionId": "",
+  "browserContext": null,
+  "activeSttSessionId": "",
+  "greetingSent": false,
+  "lastFinalTranscriptHash": "привет",
+  "knowledgeHits": [],
+  "summary": "Пользователь: привет\nАссистент: Здравствуйте! Чем могу помочь?"
+}

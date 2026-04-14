@@ -10,8 +10,6 @@ import { useYandexRealtimeSession } from './hooks/useYandexRealtimeSession';
 import { useYandexVoiceSession } from './hooks/useYandexVoiceSession';
 import { useServerStt } from './hooks/useServerStt';
 import { AudioStreamPlayer } from './utils/AudioStreamPlayer';
-import { base64ToFloat32Array } from './utils/audioConverter';
-import { TesterDrawer } from './components/TesterDrawer';
 
 const DEFAULT_PANEL_STATE = {
   status: 'idle',
@@ -64,14 +62,9 @@ const BROWSER_INTENT_RETRY_LIMIT = 1;
 const BROWSER_INTENT_RETRY_BACKOFF_MS = 180;
 const ASSISTANT_QUEUE_TURN_TIMEOUT_MS = 14000;
 const ASSISTANT_QUEUE_MAX_HARD_TIMEOUT_MS = 38000;
-const ASSISTANT_QUEUE_RETRY_DELAY_MS = 320;
 const MAX_RECENT_INTENT_TURNS = 10;
 const BARGE_IN_MIN_GAP_MS = 1200;
 const ASSISTANT_BARGE_IN_WARMUP_MS = 320;
-const SILENT_TURN_FALLBACK_SAMPLE_RATE = 48000;
-const SILENT_TURN_FALLBACK_FIRST_CHUNK_TIMEOUT_MS = 4500;
-const SILENT_TURN_FALLBACK_NEXT_CHUNK_TIMEOUT_MS = 6000;
-const SILENT_TURN_FALLBACK_CHUNK_MAX_CHARS = 160;
 const STOP_SPEECH_PATTERN = /(^|\s)(стоп|остановись|замолчи|хватит|тише|пауза|stop)(?=\s|$)/i;
 const USER_FINAL_DEDUP_WINDOW_MS = 4200;
 const SERVER_STT_FRAGMENT_HOLD_MS = 900;
@@ -82,18 +75,6 @@ const SERVER_STT_SITE_FRAGMENT_HOLD_MS = 520;
 const SERVER_STT_SHORT_FRAGMENT_HOLD_MS = 650;
 const LIVE_INPUT_COMMIT_EXTRA_MS = 120;
 const CLIENT_INLINE_LOAD_TIMEOUT_MS = 12000;
-const TESTER_SETTINGS_STORAGE_KEY = 'alesia-tester-settings-v1';
-const MAX_TESTER_EVENTS = 80;
-const DEFAULT_TESTER_SETTINGS = Object.freeze({
-  pauseMs: 420,
-  interruptHoldMs: 220,
-  echoGuard: 62,
-  firstReplySentences: 1,
-  memoryTurnCount: 6,
-  autoReconnect: true,
-  showPartialTranscript: true,
-  showDropReasons: true,
-});
 
 const BACKGROUND_PRESETS = {
   aurora: {
@@ -325,9 +306,6 @@ function buildSignature(character, globalRuntimeConfig = {}) {
     normalizeSpeechStabilityProfile(globalRuntimeConfig.speechStabilityProfile),
     String(globalRuntimeConfig.prayerReadMode || 'knowledge-only').trim().toLowerCase(),
     globalRuntimeConfig.safeSpeechFlowEnabled === false ? 'safe-off' : 'safe-on',
-    String(globalRuntimeConfig.pauseMs || '').trim(),
-    String(globalRuntimeConfig.firstReplySentences || '').trim(),
-    String(globalRuntimeConfig.memoryTurnCount || '').trim(),
   ].join('|');
 }
 
@@ -394,146 +372,6 @@ function normalizeSpeechText(transcript) {
   return String(transcript || '')
     .replace(/\s+/g, ' ')
     .trim();
-}
-
-function splitLongSpeechFragment(fragment, maxLength = SILENT_TURN_FALLBACK_CHUNK_MAX_CHARS) {
-  const words = normalizeSpeechText(fragment).split(/\s+/).filter(Boolean);
-  if (words.length === 0) {
-    return [];
-  }
-
-  const parts = [];
-  let current = '';
-
-  words.forEach((word) => {
-    if (!current) {
-      current = word;
-      return;
-    }
-
-    const combined = `${current} ${word}`;
-    if (combined.length <= maxLength) {
-      current = combined;
-      return;
-    }
-
-    parts.push(current);
-    current = word;
-  });
-
-  if (current) {
-    parts.push(current);
-  }
-
-  return parts;
-}
-
-function splitSpeechPlaybackChunks(text, maxLength = SILENT_TURN_FALLBACK_CHUNK_MAX_CHARS) {
-  const normalized = normalizeSpeechText(text);
-  if (!normalized) {
-    return [];
-  }
-
-  const sentenceParts = (normalized.match(/[^.!?…]+[.!?…]?/gu) || [normalized])
-    .map((part) => normalizeSpeechText(part))
-    .filter(Boolean);
-
-  const chunks = [];
-  let current = '';
-
-  sentenceParts.forEach((sentence) => {
-    if (sentence.length > maxLength) {
-      if (current) {
-        chunks.push(current);
-        current = '';
-      }
-      chunks.push(...splitLongSpeechFragment(sentence, maxLength));
-      return;
-    }
-
-    if (!current) {
-      current = sentence;
-      return;
-    }
-
-    const combined = `${current} ${sentence}`;
-    if (combined.length <= maxLength) {
-      current = combined;
-      return;
-    }
-
-    chunks.push(current);
-    current = sentence;
-  });
-
-  if (current) {
-    chunks.push(current);
-  }
-
-  return chunks.length > 0 ? chunks : splitLongSpeechFragment(normalized, maxLength);
-}
-
-function clampNumber(value, min, max, fallback) {
-  const numeric = Number(value);
-  if (!Number.isFinite(numeric)) {
-    return fallback;
-  }
-  return Math.min(max, Math.max(min, numeric));
-}
-
-function normalizeTesterSettings(rawValue = {}) {
-  const settings = rawValue && typeof rawValue === 'object' ? rawValue : {};
-  return {
-    pauseMs: clampNumber(settings.pauseMs, 260, 900, DEFAULT_TESTER_SETTINGS.pauseMs),
-    interruptHoldMs: clampNumber(settings.interruptHoldMs, 120, 640, DEFAULT_TESTER_SETTINGS.interruptHoldMs),
-    echoGuard: clampNumber(settings.echoGuard, 0, 100, DEFAULT_TESTER_SETTINGS.echoGuard),
-    firstReplySentences: clampNumber(settings.firstReplySentences, 1, 3, DEFAULT_TESTER_SETTINGS.firstReplySentences),
-    memoryTurnCount: clampNumber(settings.memoryTurnCount, 2, 12, DEFAULT_TESTER_SETTINGS.memoryTurnCount),
-    autoReconnect: settings.autoReconnect !== false,
-    showPartialTranscript: settings.showPartialTranscript !== false,
-    showDropReasons: settings.showDropReasons !== false,
-  };
-}
-
-function loadTesterSettings() {
-  if (typeof window === 'undefined') {
-    return { ...DEFAULT_TESTER_SETTINGS };
-  }
-
-  try {
-    const raw = window.localStorage.getItem(TESTER_SETTINGS_STORAGE_KEY);
-    if (!raw) {
-      return { ...DEFAULT_TESTER_SETTINGS };
-    }
-    return normalizeTesterSettings(JSON.parse(raw));
-  } catch {
-    return { ...DEFAULT_TESTER_SETTINGS };
-  }
-}
-
-function sanitizeTesterEventDetails(details = {}) {
-  if (!details || typeof details !== 'object' || Array.isArray(details)) {
-    return {};
-  }
-
-  const entries = Object.entries(details).slice(0, 8).map(([key, value]) => {
-    if (typeof value === 'string') {
-      return [key, truncatePromptValue(value, 180)];
-    }
-    if (typeof value === 'number' || typeof value === 'boolean') {
-      return [key, value];
-    }
-    if (value == null) {
-      return [key, ''];
-    }
-    try {
-      return [key, truncatePromptValue(JSON.stringify(value), 180)];
-    } catch {
-      return [key, truncatePromptValue(String(value), 180)];
-    }
-  });
-
-  return Object.fromEntries(entries);
 }
 
 function isPrayerRequest(transcript) {
@@ -647,32 +485,6 @@ function isGreetingOnlyTranscript(transcript) {
 
   return /^(?:(?:привет|здравствуйте|здравствуй|добрый день|доброе утро|добрый вечер|доброго дня|хай|hello|hi|hey)(?:\s+|$))+$/i
     .test(cleaned);
-}
-
-function classifyShortHumanTurn(transcript) {
-  const normalized = normalizeSpeechText(transcript).toLowerCase();
-  if (!normalized) {
-    return 'none';
-  }
-
-  if (isGreetingOnlyTranscript(normalized)) {
-    return 'greeting';
-  }
-
-  if (/^(Р°РіР°|СѓРіСѓ|РґР°|РїРѕРЅСЏС‚РЅРѕ|СЏСЃРЅРѕ|Р»Р°РґРЅРѕ|С…РѕСЂРѕС€Рѕ|СЃРїР°СЃРёР±Рѕ|СЏ СЃР»СѓС€Р°СЋ|СЃР»СѓС€Р°СЋ)$/i.test(normalized)) {
-    return 'backchannel';
-  }
-
-  if (/^(Р° С‚С‹|Р° РІС‹|Рё С‚С‹|Рё РІС‹|РєС‚Рѕ С‚С‹|РєС‚Рѕ РІС‹|РєР°Рє С‚РµР±СЏ Р·РѕРІСѓС‚|РєР°Рє РІР°СЃ Р·РѕРІСѓС‚|С‡С‚Рѕ С‚С‹ СѓРјРµРµС€СЊ|С‡С‚Рѕ РІС‹ СѓРјРµРµС‚Рµ|С‡С‚Рѕ С‚С‹ РјРѕР¶РµС€СЊ|С‡С‚Рѕ РІС‹ РјРѕР¶РµС‚Рµ)\b/i.test(normalized)) {
-    return 'question';
-  }
-
-  const words = normalized.split(/\s+/).filter(Boolean);
-  if (words.length <= 4 && /^(РєС‚Рѕ|С‡С‚Рѕ|РєР°Рє|РіРґРµ|РєРѕРіРґР°|РїРѕС‡РµРјСѓ|Р·Р°С‡РµРј|Р° С‚С‹|Р° РІС‹)\b/i.test(normalized)) {
-    return 'question';
-  }
-
-  return 'none';
 }
 
 function extractBrowserTarget(transcript) {
@@ -1750,17 +1562,6 @@ function App() {
   const [initialized, setInitialized] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsDraft, setSettingsDraft] = useState(null);
-  const [testerOpen, setTesterOpen] = useState(false);
-  const [testerSettings, setTesterSettings] = useState(() => loadTesterSettings());
-  const [testerEvents, setTesterEvents] = useState([]);
-  const [lastRecognizedTurn, setLastRecognizedTurn] = useState('');
-  const [lastIssueText, setLastIssueText] = useState('');
-  const [assistantOutputState, setAssistantOutputState] = useState({
-    responseId: '',
-    state: 'idle',
-    lastText: '',
-    audioStarted: false,
-  });
   const [browserPanel, setBrowserPanel] = useState(DEFAULT_PANEL_STATE);
   const [browserFlowState, setBrowserFlowState] = useState('idle');
   const [activeBrowserSessionId, setActiveBrowserSessionId] = useState('');
@@ -1814,11 +1615,8 @@ function App() {
   const assistantInFlightRequestIdRef = useRef(0);
   const assistantAwaitingResponseRef = useRef(false);
   const assistantPromptTimerRef = useRef(null);
-  const assistantPromptRetryTimerRef = useRef(null);
   const assistantPromptSeqRef = useRef(0);
   const assistantPromptMetaRef = useRef({ source: '', finalizeRequestOnCommit: true });
-  const testerEventsRef = useRef([]);
-  const silentAssistantFallbackRef = useRef(new Set());
   const recordConversationActionRef = useRef(null);
   const handleBrowserTranscriptRef = useRef(null);
   const handleOrchestratedTurnRef = useRef(null);
@@ -1840,8 +1638,6 @@ function App() {
     frameLoaded: false,
     contextReady: false,
   });
-  const activeVoiceStatusRef = useRef('disconnected');
-  const activeVoiceDisconnectRef = useRef(() => {});
   const [runtimeProviderOverride, setRuntimeProviderOverride] = useState('');
 
   const selectedCharacter = config?.characters?.find((character) => character.id === config.activeCharacterId) || config?.characters?.[0] || null;
@@ -1864,11 +1660,6 @@ function App() {
       immediateOnSpeechStart: false,
     }
     : resolveSpeechStabilityConfig(speechStabilityProfile, safeSpeechFlowEnabled);
-  const tunedSpeechStabilityConfig = {
-    ...speechStabilityConfig,
-    bargeInHoldMs: clampNumber(testerSettings.interruptHoldMs, 120, 640, speechStabilityConfig.bargeInHoldMs),
-    botVolumeGuard: clampNumber(0.035 + (testerSettings.echoGuard / 100) * 0.16, 0.035, 0.195, speechStabilityConfig.botVolumeGuard),
-  };
   const prayerReadMode = String(config?.prayerReadMode || 'knowledge-only').trim().toLowerCase();
   const usesLiveInput = Boolean(selectedCharacter?.liveInputEnabled || usesYandexRuntime);
   const usesClientInlinePanel = isClientInlinePanelMode(selectedCharacter?.browserPanelMode);
@@ -1959,11 +1750,6 @@ function App() {
       enabledTools: Array.isArray(selectedCharacter.enabledTools) ? selectedCharacter.enabledTools : [],
       webSearchEnabled: selectedCharacter.webSearchEnabled === true,
       maxToolResults: selectedCharacter.maxToolResults || 4,
-      voiceInteractionTuning: {
-        pauseMs: testerSettings.pauseMs,
-        firstReplySentences: testerSettings.firstReplySentences,
-        memoryTurnCount: testerSettings.memoryTurnCount,
-      },
       fallbackRuntimeProvider: realtimeFallbackProvider,
       speechStabilityProfile,
       prayerReadMode,
@@ -2011,16 +1797,6 @@ function App() {
     }
   }, []);
 
-  useEffect(() => {
-    if (typeof window === 'undefined') {
-      return;
-    }
-    window.localStorage.setItem(
-      TESTER_SETTINGS_STORAGE_KEY,
-      JSON.stringify(normalizeTesterSettings(testerSettings)),
-    );
-  }, [testerSettings]);
-
   const sendBrowserClientEvent = React.useCallback((event, details = {}) => {
     void fetch('/api/browser/client-event', {
       method: 'POST',
@@ -2029,37 +1805,7 @@ function App() {
     }).catch(() => {});
   }, []);
 
-  const pushTesterEvent = React.useCallback((event, details = {}) => {
-    const entry = {
-      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      ts: new Date().toISOString(),
-      event: String(event || '').trim() || 'runtime.event',
-      details: sanitizeTesterEventDetails(details),
-    };
-
-    const nextEvents = [
-      ...testerEventsRef.current,
-      entry,
-    ].slice(-MAX_TESTER_EVENTS);
-    testerEventsRef.current = nextEvents;
-    setTesterEvents(nextEvents);
-
-    if (
-      testerSettings.showDropReasons
-      && (
-        entry.event.includes('drop')
-        || entry.event.includes('error')
-        || entry.event.includes('closed')
-        || entry.event.includes('silent')
-      )
-    ) {
-      const reason = String(entry.details.reason || entry.details.error || entry.event).trim();
-      setLastIssueText(reason || entry.event);
-    }
-  }, [testerSettings.showDropReasons]);
-
   const recordConversationAction = React.useCallback((event, details = {}) => {
-    pushTesterEvent(event, details);
     const sessionId = conversationSessionIdRef.current;
     if (!sessionId) {
       return;
@@ -2074,18 +1820,11 @@ function App() {
         characterId: selectedCharacter?.id || '',
       }),
     }).catch(() => {});
-  }, [pushTesterEvent, selectedCharacter?.id]);
+  }, [selectedCharacter?.id]);
 
   useEffect(() => {
     recordConversationActionRef.current = recordConversationAction;
   }, [recordConversationAction]);
-
-  const clearAssistantPromptRetryTimer = React.useCallback(() => {
-    if (assistantPromptRetryTimerRef.current) {
-      clearTimeout(assistantPromptRetryTimerRef.current);
-      assistantPromptRetryTimerRef.current = null;
-    }
-  }, []);
 
   const markDialogRequestState = React.useCallback((requestId, state, details = {}) => {
     const safeRequestId = Number(requestId);
@@ -2140,8 +1879,6 @@ function App() {
       return;
     }
 
-    clearAssistantPromptRetryTimer();
-
     let nextPrompt = null;
     while (assistantPromptQueueRef.current.length > 0) {
       const candidate = assistantPromptQueueRef.current.shift();
@@ -2187,19 +1924,11 @@ function App() {
       assistantInFlightRequestIdRef.current = 0;
       assistantAwaitingResponseRef.current = false;
       assistantPromptMetaRef.current = { source: '', finalizeRequestOnCommit: true };
-      assistantPromptQueueRef.current.unshift(nextPrompt);
-      recordConversationAction('assistant.queue.defer', {
+      recordConversationAction('assistant.queue.drop', {
         reason: 'send-failed',
         source: nextPrompt.source || '',
         requestId: nextPrompt.requestId || 0,
       });
-      if (!assistantPromptRetryTimerRef.current && !manualStopRef.current && initialized) {
-        assistantPromptRetryTimerRef.current = setTimeout(() => {
-          assistantPromptRetryTimerRef.current = null;
-          recordConversationAction('assistant.queue.retry', { reason: 'send-failed' });
-          drainAssistantPromptQueue();
-        }, ASSISTANT_QUEUE_RETRY_DELAY_MS);
-      }
       return;
     }
 
@@ -2231,7 +1960,7 @@ function App() {
       queueSize: assistantPromptQueueRef.current.length,
       requestId: nextPrompt.requestId || 0,
     });
-  }, [clearAssistantPromptRetryTimer, clearAssistantPromptTimer, initialized, recordConversationAction]);
+  }, [clearAssistantPromptTimer, recordConversationAction]);
 
   const enqueueAssistantPrompt = React.useCallback((text, {
     interrupt = true,
@@ -2293,11 +2022,10 @@ function App() {
     assistantInFlightRequestIdRef.current = 0;
     assistantAwaitingResponseRef.current = false;
     assistantPromptMetaRef.current = { source: '', finalizeRequestOnCommit: true };
-    clearAssistantPromptRetryTimer();
     clearAssistantPromptTimer();
     recordConversationAction('assistant.queue.release', { reason });
     drainAssistantPromptQueue();
-  }, [clearAssistantPromptRetryTimer, clearAssistantPromptTimer, drainAssistantPromptQueue, recordConversationAction]);
+  }, [clearAssistantPromptTimer, drainAssistantPromptQueue, recordConversationAction]);
 
   const clearAssistantPromptQueue = React.useCallback((reason = 'reset') => {
     assistantPromptQueueRef.current = [];
@@ -2305,10 +2033,9 @@ function App() {
     assistantInFlightRequestIdRef.current = 0;
     assistantAwaitingResponseRef.current = false;
     assistantPromptMetaRef.current = { source: '', finalizeRequestOnCommit: true };
-    clearAssistantPromptRetryTimer();
     clearAssistantPromptTimer();
     recordConversationAction('assistant.queue.clear', { reason });
-  }, [clearAssistantPromptRetryTimer, clearAssistantPromptTimer, recordConversationAction]);
+  }, [clearAssistantPromptTimer, recordConversationAction]);
 
   const cancelPendingBrowserWork = React.useCallback((reason = 'new-user-request') => {
     browserIntentAbortRef.current?.abort?.();
@@ -2482,20 +2209,10 @@ function App() {
     assistantPromptQueueRef.current = [];
     assistantPromptInFlightRef.current = false;
     assistantInFlightRequestIdRef.current = 0;
-    silentAssistantFallbackRef.current = new Set();
     recentTurnsForIntentRef.current = [];
     dialogRequestStatesRef.current = new Map();
     bargeInCandidateRef.current = { startedAt: 0, textKey: '' };
     lastBargeInAtRef.current = 0;
-    setAssistantOutputState({
-      responseId: '',
-      state: 'idle',
-      lastText: '',
-      audioStarted: false,
-    });
-    setLastRecognizedTurn('');
-    setLastIssueText('');
-    clearAssistantPromptRetryTimer();
     clearAssistantPromptTimer();
     clearPendingServerFinal();
     clearPendingLiveFinal();
@@ -2523,7 +2240,7 @@ function App() {
       clearInterval(browserViewPollTimerRef.current);
       browserViewPollTimerRef.current = null;
     }
-  }, [clearAssistantPromptRetryTimer, clearAssistantPromptTimer, clearPendingLiveFinal, clearPendingServerFinal]);
+  }, [clearAssistantPromptTimer, clearPendingLiveFinal, clearPendingServerFinal]);
 
   const commitRecognizedUserTranscript = React.useCallback((transcript, {
     source = 'server-stt',
@@ -2541,24 +2258,20 @@ function App() {
     const botBufferedMs = Number(audioPlayer?.getBufferedMs?.() || 0);
     const lastAssistantTs = Number(lastAssistantTurnRef.current?.timestamp || 0);
     const timeSinceAssistantMs = lastAssistantTs > 0 ? Date.now() - lastAssistantTs : Number.POSITIVE_INFINITY;
-    const shortTurnType = classifyShortHumanTurn(normalized);
-    const recentAssistantSpeech = usesYandexRuntime && (botBufferedMs > 0 || timeSinceAssistantMs < 2400);
-
-    if (recentAssistantSpeech && shortTurnType === 'backchannel') {
-      recordConversationAction('stt.stream.backchannel', {
-        conversationSessionId: conversationSessionIdRef.current || '',
-        source,
-        textLength: normalized.length,
-      });
-      return false;
-    }
-
-    if (isLikelyAssistantEchoFinal(normalized, lastAssistantTurnRef.current, botVolume, tunedSpeechStabilityConfig)) {
+    if (!STOP_SPEECH_PATTERN.test(normalized) && usesYandexRuntime && (botBufferedMs > 0 || timeSinceAssistantMs < 2400)) {
       recordConversationAction('stt.stream.echo-drop', {
         conversationSessionId: conversationSessionIdRef.current || '',
         source,
         textLength: normalized.length,
-        reason: recentAssistantSpeech ? 'assistant-overlap' : 'assistant-echo',
+        reason: botBufferedMs > 0 ? 'bot-audio-buffered' : 'recent-assistant-turn',
+      });
+      return false;
+    }
+    if (isLikelyAssistantEchoFinal(normalized, lastAssistantTurnRef.current, botVolume, speechStabilityConfig)) {
+      recordConversationAction('stt.stream.echo-drop', {
+        conversationSessionId: conversationSessionIdRef.current || '',
+        source,
+        textLength: normalized.length,
       });
       return false;
     }
@@ -2599,13 +2312,11 @@ function App() {
       });
       return false;
     }
-    if (botVolume > tunedSpeechStabilityConfig.botVolumeGuard && shortTurnType !== 'backchannel') {
+    if (botVolume > speechStabilityConfig.botVolumeGuard) {
       triggerBargeIn(`bargein-final-${source}`);
     }
 
     const requestId = beginUserRequest(requestSource);
-    setLastRecognizedTurn(normalized);
-    setLastIssueText('');
     lastLiveFinalRef.current = {
       key: transcriptKey,
       timestamp: now,
@@ -2647,11 +2358,10 @@ function App() {
     beginUserRequest,
     recordConversationAction,
     recordConversationTurn,
-    tunedSpeechStabilityConfig,
+    speechStabilityConfig,
     triggerBargeIn,
     updateConversationSessionState,
     usesClientInlinePanel,
-    usesYandexRuntime,
   ]);
 
   const schedulePendingServerFinal = React.useCallback((delayMs = SERVER_STT_FRAGMENT_HOLD_MS) => {
@@ -2769,7 +2479,7 @@ function App() {
     }
 
     const botVolume = audioPlayer?.getVolume?.() || 0;
-    if (botVolume <= tunedSpeechStabilityConfig.botVolumeGuard) {
+    if (botVolume <= speechStabilityConfig.botVolumeGuard) {
       bargeInCandidateRef.current = { startedAt: 0, textKey: '' };
       return;
     }
@@ -2780,21 +2490,16 @@ function App() {
       return;
     }
 
-    if (classifyShortHumanTurn(normalized) === 'backchannel') {
-      bargeInCandidateRef.current = { startedAt: 0, textKey: '' };
-      return;
-    }
-
     if ((now - assistantTurnStartedAtRef.current) < ASSISTANT_BARGE_IN_WARMUP_MS) {
       return;
     }
 
-    if (tunedSpeechStabilityConfig.profile === 'legacy') {
+    if (speechStabilityConfig.profile === 'legacy') {
       triggerBargeIn('bargein-input');
       return;
     }
 
-    if (normalized.length < tunedSpeechStabilityConfig.minTranscriptLength) {
+    if (normalized.length < speechStabilityConfig.minTranscriptLength) {
       return;
     }
 
@@ -2804,11 +2509,11 @@ function App() {
       return;
     }
 
-    if ((now - bargeInCandidateRef.current.startedAt) >= tunedSpeechStabilityConfig.bargeInHoldMs) {
+    if ((now - bargeInCandidateRef.current.startedAt) >= speechStabilityConfig.bargeInHoldMs) {
       bargeInCandidateRef.current = { startedAt: 0, textKey: '' };
       triggerBargeIn('bargein-input-hold');
     }
-  }, [audioPlayer, clearPendingLiveFinal, tunedSpeechStabilityConfig, triggerBargeIn]);
+  }, [audioPlayer, clearPendingLiveFinal, speechStabilityConfig, triggerBargeIn]);
 
   const bootstrapConversationContext = React.useCallback(async (sessionId, { shouldSendGreeting = false } = {}) => {
     const restorePayload = await jsonRequest(
@@ -3194,293 +2899,6 @@ function App() {
     };
   }, [activeBrowserSessionId, browserFlowState, refreshBrowserView]);
 
-  const synthesizeSilentAssistantTurn = React.useCallback(async ({
-    text,
-    responseId = '',
-    requestId = 0,
-    source = '',
-  } = {}) => {
-    const normalizedText = normalizeSpeechText(text);
-    const fallbackKey = `${responseId || requestId}:${normalizeTranscriptKey(normalizedText)}`;
-    if (!normalizedText || !fallbackKey || silentAssistantFallbackRef.current.has(fallbackKey)) {
-      return false;
-    }
-
-    silentAssistantFallbackRef.current.add(fallbackKey);
-    setAssistantOutputState((current) => ({
-      ...current,
-      responseId: responseId || current.responseId || '',
-      state: 'восстанавливаю звук',
-      lastText: normalizedText,
-    }));
-    recordConversationAction('assistant.turn.silent', {
-      conversationSessionId: conversationSessionIdRef.current || '',
-      requestId,
-      responseId,
-      textLength: normalizedText.length,
-      source,
-    });
-
-    const isStaleFallback = () => (
-      manualStopRef.current
-      || !conversationSessionIdRef.current
-      || (requestId > 0 && requestId !== activeDialogRequestRef.current)
-    );
-
-    const requestTtsChunk = async (chunkText, timeoutMs) => jsonRequest('/api/yandex/tts', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        text: chunkText,
-        voiceName: selectedCharacter?.ttsVoiceName || selectedCharacter?.voiceName || 'ermil',
-        sampleRateHertz: SILENT_TURN_FALLBACK_SAMPLE_RATE,
-      }),
-    }, timeoutMs);
-
-    try {
-      const chunks = splitSpeechPlaybackChunks(normalizedText);
-      let hasPlayableAudio = false;
-      let finalizedAnswered = false;
-
-      for (let index = 0; index < chunks.length; index += 1) {
-        if (isStaleFallback()) {
-          return false;
-        }
-
-        const chunkText = chunks[index];
-        const timeoutMs = index === 0
-          ? SILENT_TURN_FALLBACK_FIRST_CHUNK_TIMEOUT_MS
-          : SILENT_TURN_FALLBACK_NEXT_CHUNK_TIMEOUT_MS;
-        let payload = null;
-        let lastChunkError = null;
-        const maxAttempts = index === 0 ? 2 : 1;
-
-        for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-          try {
-            payload = await requestTtsChunk(chunkText, timeoutMs);
-            lastChunkError = null;
-            break;
-          } catch (error) {
-            lastChunkError = error;
-          }
-        }
-
-        if (!payload) {
-          if (hasPlayableAudio) {
-            recordConversationAction('assistant.turn.audio-fallback.partial', {
-              conversationSessionId: conversationSessionIdRef.current || '',
-              requestId,
-              responseId,
-              chunkIndex: index + 1,
-              chunkCount: chunks.length,
-              error: lastChunkError?.message || 'partial-fallback-failed',
-            });
-            return true;
-          }
-          throw lastChunkError || new Error('silent-turn-repair-failed');
-        }
-
-        if (isStaleFallback()) {
-          return false;
-        }
-
-        const pcm = base64ToFloat32Array(String(payload?.audioBase64 || ''));
-        const sampleRateHertz = Math.max(
-          8000,
-          Number(payload?.sampleRateHertz || SILENT_TURN_FALLBACK_SAMPLE_RATE) || SILENT_TURN_FALLBACK_SAMPLE_RATE,
-        );
-        if (!pcm.length) {
-          if (hasPlayableAudio) {
-            recordConversationAction('assistant.turn.audio-fallback.partial', {
-              conversationSessionId: conversationSessionIdRef.current || '',
-              requestId,
-              responseId,
-              chunkIndex: index + 1,
-              chunkCount: chunks.length,
-              error: 'empty-audio',
-            });
-            return true;
-          }
-          throw new Error('empty-audio');
-        }
-
-        audioPlayer.addChunk?.(pcm, sampleRateHertz);
-        if (hasPlayableAudio) {
-          continue;
-        }
-
-        hasPlayableAudio = true;
-        setAssistantOutputState({
-          responseId,
-          state: 'РіРѕРІРѕСЂРёС‚',
-          lastText: normalizedText,
-          audioStarted: true,
-        });
-        recordConversationAction('assistant.turn.audio-fallback.ok', {
-          conversationSessionId: conversationSessionIdRef.current || '',
-          requestId,
-          responseId,
-          sampleRateHertz,
-          chunkCount: chunks.length,
-        });
-        recordConversationAction('assistant.turn.audio-start', {
-          conversationSessionId: conversationSessionIdRef.current || '',
-          requestId,
-          responseId,
-          fallback: true,
-        });
-        recordConversationAction('assistant.turn.lips-started', {
-          conversationSessionId: conversationSessionIdRef.current || '',
-          requestId,
-          responseId,
-          fallback: true,
-        });
-
-        assistantTurnCountRef.current += 1;
-        lastAssistantTurnRef.current = {
-          text: normalizedText,
-          timestamp: Date.now(),
-        };
-        if (assistantTurnCountRef.current === 1 && sessionShouldSendGreeting) {
-          updateConversationSessionState({ greetingSent: true });
-          setSessionShouldSendGreeting(false);
-        }
-        recordConversationTurn(
-          'assistant',
-          normalizedText,
-          usesYandexRealtimeRuntime ? 'yandex-realtime-audio-fallback' : 'yandex-legacy-audio-fallback',
-        );
-        if (requestId > 0 && !finalizedAnswered) {
-          finalizedAnswered = true;
-          finalizeDialogRequest(requestId, 'answered', {
-            textLength: normalizedText.length,
-            repairedAudio: true,
-          });
-        }
-      }
-
-      return hasPlayableAudio;
-    } catch (error) {
-      const message = error?.message || 'silent-turn-repair-failed';
-      setAssistantOutputState((current) => ({
-        ...current,
-        responseId: responseId || current.responseId || '',
-        state: 'РѕС€РёР±РєР° Р·РІСѓРєР°',
-        lastText: normalizedText,
-      }));
-      setLastIssueText(message);
-      recordConversationAction('assistant.turn.audio-fallback.error', {
-        conversationSessionId: conversationSessionIdRef.current || '',
-        requestId,
-        responseId,
-        error: message,
-      });
-      if (requestId > 0) {
-        finalizeDialogRequest(requestId, 'answer-audio-missed', {
-          textLength: normalizedText.length,
-        });
-      }
-      return false;
-    }
-
-    try {
-      const payload = await jsonRequest('/api/yandex/tts', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          text: normalizedText,
-          voiceName: selectedCharacter?.ttsVoiceName || selectedCharacter?.voiceName || 'ermil',
-          sampleRateHertz: 48000,
-        }),
-      }, 12000);
-
-      const pcm = base64ToFloat32Array(String(payload?.audioBase64 || ''));
-      const sampleRateHertz = Math.max(8000, Number(payload?.sampleRateHertz || 48000) || 48000);
-      if (!pcm.length) {
-        throw new Error('empty-audio');
-      }
-
-      audioPlayer.addChunk?.(pcm, sampleRateHertz);
-      setAssistantOutputState({
-        responseId,
-        state: 'говорит',
-        lastText: normalizedText,
-        audioStarted: true,
-      });
-      recordConversationAction('assistant.turn.audio-fallback.ok', {
-        conversationSessionId: conversationSessionIdRef.current || '',
-        requestId,
-        responseId,
-        sampleRateHertz,
-      });
-      recordConversationAction('assistant.turn.audio-start', {
-        conversationSessionId: conversationSessionIdRef.current || '',
-        requestId,
-        responseId,
-        fallback: true,
-      });
-      recordConversationAction('assistant.turn.lips-started', {
-        conversationSessionId: conversationSessionIdRef.current || '',
-        requestId,
-        responseId,
-        fallback: true,
-      });
-
-      assistantTurnCountRef.current += 1;
-      lastAssistantTurnRef.current = {
-        text: normalizedText,
-        timestamp: Date.now(),
-      };
-      if (assistantTurnCountRef.current === 1 && sessionShouldSendGreeting) {
-        updateConversationSessionState({ greetingSent: true });
-        setSessionShouldSendGreeting(false);
-      }
-      recordConversationTurn(
-        'assistant',
-        normalizedText,
-        usesYandexRealtimeRuntime ? 'yandex-realtime-audio-fallback' : 'yandex-legacy-audio-fallback',
-      );
-      if (requestId > 0) {
-        finalizeDialogRequest(requestId, 'answered', {
-          textLength: normalizedText.length,
-          repairedAudio: true,
-        });
-      }
-      return true;
-    } catch (error) {
-      const message = error?.message || 'silent-turn-repair-failed';
-      setAssistantOutputState((current) => ({
-        ...current,
-        responseId: responseId || current.responseId || '',
-        state: 'ошибка звука',
-        lastText: normalizedText,
-      }));
-      setLastIssueText(message);
-      recordConversationAction('assistant.turn.audio-fallback.error', {
-        conversationSessionId: conversationSessionIdRef.current || '',
-        requestId,
-        responseId,
-        error: message,
-      });
-      if (requestId > 0) {
-        finalizeDialogRequest(requestId, 'answer-audio-missed', {
-          textLength: normalizedText.length,
-        });
-      }
-      return false;
-    }
-  }, [
-    audioPlayer,
-    finalizeDialogRequest,
-    recordConversationAction,
-    recordConversationTurn,
-    selectedCharacter?.ttsVoiceName,
-    selectedCharacter?.voiceName,
-    sessionShouldSendGreeting,
-    updateConversationSessionState,
-    usesYandexRealtimeRuntime,
-  ]);
-
   const voiceSessionCallbacks = {
       onSessionReady: ({ resumed = false, shouldSendGreeting = false }) => {
         const shouldAutoGreet = shouldSendGreeting && !(usesYandexRealtimeRuntime && selectedCharacter?.id === 'batyushka-3');
@@ -3554,33 +2972,11 @@ function App() {
         }
         assistantTurnStartedAtRef.current = Date.now();
         assistantPromptInFlightRef.current = true;
-        setAssistantOutputState({
-          responseId,
-          state: 'готовит ответ',
-          lastText: '',
-          audioStarted: false,
-        });
         recordConversationAction('assistant.turn.start', {
           conversationSessionId: conversationSessionIdRef.current || '',
           responseId,
         });
         return true;
-      },
-      onAssistantAudioStart: ({ responseId = '' } = {}) => {
-        setAssistantOutputState((current) => ({
-          responseId: responseId || current.responseId || '',
-          state: 'говорит',
-          lastText: current.lastText || '',
-          audioStarted: true,
-        }));
-        recordConversationAction('assistant.turn.audio-start', {
-          conversationSessionId: conversationSessionIdRef.current || '',
-          responseId,
-        });
-        recordConversationAction('assistant.turn.lips-started', {
-          conversationSessionId: conversationSessionIdRef.current || '',
-          responseId,
-        });
       },
       onAssistantTurnCommit: ({ responseId = '', text, textChunks = 0, audioChunks = 0, durationMs = 0 }) => {
         const inFlightRequestId = assistantInFlightRequestIdRef.current;
@@ -3618,15 +3014,6 @@ function App() {
           });
           return;
         }
-        if (usesYandexRuntime && audioChunks <= 0) {
-          void synthesizeSilentAssistantTurn({
-            text: normalizedAssistantText,
-            responseId,
-            requestId: inFlightRequestId || activeDialogRequestRef.current,
-            source: promptMeta?.source || '',
-          });
-          return;
-        }
         if (normalizedAssistantText) {
           assistantTurnCountRef.current += 1;
           lastAssistantTurnRef.current = {
@@ -3638,12 +3025,6 @@ function App() {
             setSessionShouldSendGreeting(false);
           }
         }
-        setAssistantOutputState({
-          responseId,
-          state: 'ответ отправлен',
-          lastText: normalizedAssistantText,
-          audioStarted: audioChunks > 0,
-        });
         recordConversationAction('assistant.turn.commit', {
           conversationSessionId: conversationSessionIdRef.current || '',
           textLength: String(text || '').length,
@@ -3678,12 +3059,6 @@ function App() {
           });
           return;
         }
-        setAssistantOutputState((current) => ({
-          responseId: responseId || current.responseId || '',
-          state: interrupted ? 'прерван' : 'отменен',
-          lastText: normalizeSpeechText(text) || current.lastText || '',
-          audioStarted: false,
-        }));
         recordConversationAction('assistant.turn.cancel', {
           conversationSessionId: conversationSessionIdRef.current || '',
           textLength: String(text || '').length,
@@ -3693,11 +3068,6 @@ function App() {
         });
       },
       onAssistantInterrupted: () => {
-        setAssistantOutputState((current) => ({
-          ...current,
-          state: 'прерван',
-          audioStarted: false,
-        }));
         recordConversationAction('assistant.turn.interrupted', {
           conversationSessionId: conversationSessionIdRef.current || '',
         });
@@ -3779,7 +3149,7 @@ function App() {
           timeLeftMs: timeLeftMs ?? '',
           reconnectDelayMs,
         });
-        if (!initialized || manualStopRef.current || activeVoiceStatusRef.current !== 'connected' || !nextSignature) {
+        if (!initialized || manualStopRef.current || status !== 'connected' || !nextSignature) {
           return;
         }
         if (pendingReconnectSignatureRef.current) {
@@ -3796,7 +3166,7 @@ function App() {
             pendingReconnectSignatureRef.current = null;
             return;
           }
-          activeVoiceDisconnectRef.current?.();
+          disconnect();
         }, reconnectDelayMs);
       },
   };
@@ -3877,8 +3247,6 @@ function App() {
     cancelAssistantOutput,
     clearSessionResumption,
   } = activeVoiceSession;
-  activeVoiceStatusRef.current = status;
-  activeVoiceDisconnectRef.current = disconnect;
 
   useEffect(() => {
     sendTextTurnRef.current = sendTextTurn;
@@ -3888,15 +3256,6 @@ function App() {
   useEffect(() => {
     cancelAssistantOutputRef.current = cancelAssistantOutput;
   }, [cancelAssistantOutput]);
-
-  useEffect(() => {
-    if (status !== 'connected' || assistantPromptInFlightRef.current || assistantPromptQueueRef.current.length === 0) {
-      return;
-    }
-
-    clearAssistantPromptRetryTimer();
-    drainAssistantPromptQueue();
-  }, [clearAssistantPromptRetryTimer, drainAssistantPromptQueue, status]);
 
   useEffect(() => {
     if (usesYandexRealtimeRuntime) {
@@ -3936,10 +3295,10 @@ function App() {
     conversationSessionId,
     language: 'ru-RU',
     onSpeechStart: () => {
-      if (!tunedSpeechStabilityConfig.immediateOnSpeechStart) {
+      if (!speechStabilityConfig.immediateOnSpeechStart) {
         return;
       }
-      if ((audioPlayer?.getVolume?.() || 0) > tunedSpeechStabilityConfig.botVolumeGuard) {
+      if ((audioPlayer?.getVolume?.() || 0) > speechStabilityConfig.botVolumeGuard) {
         triggerBargeIn('bargein-stt');
       }
     },
@@ -4199,9 +3558,6 @@ function App() {
     speechStabilityProfile,
     prayerReadMode,
     safeSpeechFlowEnabled,
-    pauseMs: testerSettings.pauseMs,
-    firstReplySentences: testerSettings.firstReplySentences,
-    memoryTurnCount: testerSettings.memoryTurnCount,
   });
   const sessionNeedsReconnect = status === 'connected' && Boolean(appliedSessionSignature) && appliedSessionSignature !== currentSignature;
   const isRecoveringConnection = initialized && reconnectAttempt > 0 && status !== 'connected';
@@ -4263,11 +3619,6 @@ function App() {
           captureUserAudio: usesLiveInput,
           voiceGatewayUrl: selectedCharacter?.voiceGatewayUrl || '',
           outputAudioTranscription: selectedCharacter?.outputAudioTranscription !== false,
-          voiceInteractionTuning: {
-            pauseMs: testerSettings.pauseMs,
-            firstReplySentences: testerSettings.firstReplySentences,
-            memoryTurnCount: testerSettings.memoryTurnCount,
-          },
           conversationSessionId: sessionId,
         });
       })
@@ -4287,15 +3638,12 @@ function App() {
     selectedCharacter?.voiceModelId,
     selectedCharacter?.voiceName,
     status,
-    testerSettings.firstReplySentences,
-    testerSettings.memoryTurnCount,
-    testerSettings.pauseMs,
     usesLiveInput,
     usesYandexRuntime,
   ]);
 
   useEffect(() => {
-    if (!initialized || manualStopRef.current || pendingReconnectSignatureRef.current || !testerSettings.autoReconnect) {
+    if (!initialized || manualStopRef.current || pendingReconnectSignatureRef.current) {
       return;
     }
 
@@ -4342,11 +3690,6 @@ function App() {
             captureUserAudio: usesLiveInput,
             voiceGatewayUrl: selectedCharacter?.voiceGatewayUrl || '',
             outputAudioTranscription: selectedCharacter?.outputAudioTranscription !== false,
-            voiceInteractionTuning: {
-              pauseMs: testerSettings.pauseMs,
-              firstReplySentences: testerSettings.firstReplySentences,
-              memoryTurnCount: testerSettings.memoryTurnCount,
-            },
             conversationSessionId: sessionId,
           });
         })
@@ -4380,10 +3723,6 @@ function App() {
     selectedCharacter?.voiceModelId,
     selectedCharacter?.voiceName,
     status,
-    testerSettings.autoReconnect,
-    testerSettings.firstReplySentences,
-    testerSettings.memoryTurnCount,
-    testerSettings.pauseMs,
     usesLiveInput,
     usesYandexRuntime,
   ]);
@@ -4428,8 +3767,6 @@ function App() {
     yandexRealtimeSession.disconnect?.();
     setInitialized(true);
     setLiveInputTranscript('');
-    testerEventsRef.current = [];
-    setTesterEvents([]);
     resetSessionRuntimeState();
     const nextConversationSessionId = buildConversationSessionId();
     await jsonRequest('/api/conversation/session', {
@@ -4475,11 +3812,6 @@ function App() {
       captureUserAudio: usesLiveInput,
       voiceGatewayUrl: selectedCharacter?.voiceGatewayUrl || '',
       outputAudioTranscription: selectedCharacter?.outputAudioTranscription !== false,
-      voiceInteractionTuning: {
-        pauseMs: testerSettings.pauseMs,
-        firstReplySentences: testerSettings.firstReplySentences,
-        memoryTurnCount: testerSettings.memoryTurnCount,
-      },
       conversationSessionId: nextConversationSessionId,
     });
   };
@@ -4592,9 +3924,6 @@ function App() {
       speechStabilityProfile: savedConfig?.speechStabilityProfile,
       prayerReadMode: savedConfig?.prayerReadMode,
       safeSpeechFlowEnabled: savedConfig?.safetySwitches?.safeSpeechFlowEnabled !== false,
-      pauseMs: testerSettings.pauseMs,
-      firstReplySentences: testerSettings.firstReplySentences,
-      memoryTurnCount: testerSettings.memoryTurnCount,
     });
 
     if (status === 'connected' && nextSignature && nextSignature !== appliedSessionSignature) {
@@ -5940,33 +5269,6 @@ function App() {
         onSave={handleSaveSettings}
         saving={saving}
       />
-      <TesterDrawer
-        isOpen={testerOpen}
-        onToggle={() => setTesterOpen((current) => !current)}
-        settings={testerSettings}
-        onSettingsChange={(nextPatch) => {
-          setTesterSettings((current) => normalizeTesterSettings({
-            ...current,
-            ...nextPatch,
-          }));
-        }}
-        status={{
-          connection: status,
-          assistantState: assistantOutputState.state,
-          bufferedAudioMs: Number(audioPlayer?.getBufferedMs?.() || 0),
-          partialTranscript: testerSettings.showPartialTranscript ? liveInputTranscript : '',
-          lastUserTurn: lastRecognizedTurn,
-          lastAssistantTurn: assistantOutputState.lastText || lastAssistantTurnRef.current?.text || '',
-          lastIssue: testerSettings.showDropReasons ? lastIssueText : '',
-        }}
-        events={testerEvents}
-        onClearEvents={() => {
-          testerEventsRef.current = [];
-          setTesterEvents([]);
-          setLastIssueText('');
-        }}
-      />
-      <div className="app-footer-version">v0.0.2</div>
     </div>
   );
 }

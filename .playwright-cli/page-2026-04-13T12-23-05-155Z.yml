@@ -1,0 +1,7 @@
+- generic [ref=e3]:
+  - heading "Something went wrong." [level=1] [ref=e4]
+  - paragraph [ref=e5]: The application crashed.
+  - generic [ref=e6]:
+    - text: "ReferenceError: Cannot access 'qn' before initialization"
+    - text: at J5 (https://alesia-ai.constitution.of.by/assets/index-DnjYFAdl.js:4296:2866) at $5 (https://alesia-ai.constitution.of.by/assets/index-DnjYFAdl.js:4296:69176)
+  - button "Reload Application" [ref=e7] [cursor=pointer]

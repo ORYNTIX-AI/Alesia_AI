@@ -1,0 +1,109 @@
+- generic [ref=e3]:
+  - generic [ref=e4]:
+    - generic [ref=e5]:
+      - generic [ref=e6]:
+        - generic [ref=e7]: Батюшка 3
+        - generic [ref=e8]: Готова к разговору
+      - generic [ref=e9]:
+        - button "Переключить тему" [ref=e10] [cursor=pointer]:
+          - img [ref=e11]
+        - button "Включить полноэкранный режим" [ref=e13] [cursor=pointer]:
+          - img [ref=e14]
+        - button "Открыть настройки персонажа" [ref=e16] [cursor=pointer]:
+          - img [ref=e17]
+    - generic [ref=e19]:
+      - button "Предыдущий персонаж" [ref=e20] [cursor=pointer]:
+        - img [ref=e21]
+      - generic [ref=e30]: Восстановление...
+      - button "Следующий персонаж" [ref=e34] [cursor=pointer]:
+        - img [ref=e35]
+    - button "Завершить сессию" [active] [ref=e40] [cursor=pointer]
+    - generic [ref=e41]: Соединение восстанавливается автоматически (попытка 1).
+  - button "Тестер" [ref=e39] [cursor=pointer]
+  - complementary:
+    - generic:
+      - generic:
+        - generic: Живой журнал
+        - heading "Тестовая панель" [level=2]
+      - button "Закрыть панель": ×
+    - generic:
+      - generic:
+        - heading "Сейчас" [level=3]
+        - generic:
+          - generic:
+            - generic: Соединение
+            - strong: connecting
+          - generic:
+            - generic: Ответ
+            - strong: idle
+          - generic:
+            - generic: Буфер звука
+            - strong: 0 мс
+          - generic:
+            - generic: Последняя причина
+            - strong: —
+        - generic:
+          - generic:
+            - generic: Текущая расшифровка
+            - strong: —
+          - generic:
+            - generic: Последняя фраза пользователя
+            - strong: —
+          - generic:
+            - generic: Последний ответ
+            - strong: —
+      - generic:
+        - heading "Настройки" [level=3]
+        - generic:
+          - generic: Пауза перед ответом
+          - generic:
+            - slider "Пауза перед ответом 420 мс": "420"
+            - strong: 420 мс
+        - generic:
+          - generic: Задержка перед перебиванием
+          - generic:
+            - slider "Задержка перед перебиванием 220 мс": "220"
+            - strong: 220 мс
+        - generic:
+          - generic: Сила защиты от эха
+          - generic:
+            - slider "Сила защиты от эха 62": "62"
+            - strong: "62"
+        - generic:
+          - generic: Длина первой фразы
+          - generic:
+            - slider "Длина первой фразы 1 предл.": "1"
+            - strong: 1 предл.
+        - generic:
+          - generic: Память последних реплик
+          - generic:
+            - slider "Память последних реплик 6 шт.": "6"
+            - strong: 6 шт.
+        - generic:
+          - generic: Автовосстановление связи
+          - checkbox "Автовосстановление связи" [checked]
+        - generic:
+          - generic: Показывать текущую расшифровку
+          - checkbox "Показывать текущую расшифровку" [checked]
+        - generic:
+          - generic: Показывать причины потерь
+          - checkbox "Показывать причины потерь" [checked]
+      - generic:
+        - generic:
+          - heading "События" [level=3]
+          - button "Очистить"
+        - generic:
+          - article:
+            - generic:
+              - strong: voice.input.start
+              - generic: 14:01:05
+            - generic:
+              - generic:
+                - generic: conversationSessionId
+                - strong: b400619f-5a5f-46d0-b62a-6ff6cb9eff83
+              - generic:
+                - generic: inputSessionId
+                - strong: yandex-realtime:b400619f-5a5f-46d0-b62a-6ff6cb9eff83
+              - generic:
+                - generic: mode
+                - strong: yandex-realtime

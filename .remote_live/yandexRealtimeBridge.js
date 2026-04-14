@@ -124,46 +124,11 @@ function normalizeEnabledTools(runtimeConfig = {}) {
   );
 }
 
-function normalizeVoiceInteractionTuning(runtimeConfig = {}) {
-  const tuning = runtimeConfig?.voiceInteractionTuning && typeof runtimeConfig.voiceInteractionTuning === 'object'
-    ? runtimeConfig.voiceInteractionTuning
-    : {};
-
-  const pauseMs = Math.min(900, Math.max(260, Number(tuning.pauseMs || 400) || 400));
-  const firstReplySentences = Math.min(3, Math.max(1, Number(tuning.firstReplySentences || 2) || 2));
-  const memoryTurnCount = Math.min(12, Math.max(2, Number(tuning.memoryTurnCount || 6) || 6));
-
-  return {
-    pauseMs,
-    firstReplySentences,
-    memoryTurnCount,
-    prefixPaddingMs: Math.min(420, Math.max(180, Math.round(pauseMs * 0.72))),
-  };
-}
-
-function formatRecentTurnsMemory(recentTurns = [], maxTurns = 6) {
-  const safeTurns = (Array.isArray(recentTurns) ? recentTurns : [])
-    .slice(-Math.max(2, maxTurns))
-    .map((turn) => {
-      const role = turn?.role === 'assistant' ? 'Assistant' : 'User';
-      return `${role}: ${truncate(turn?.text || '', 180)}`;
-    })
-    .filter(Boolean);
-
-  if (!safeTurns.length) {
-    return '';
-  }
-
-  return safeTurns.join('\n');
-}
-
 function buildRealtimeInstructions(runtimeConfig = {}, restoreContext = null) {
   const parts = [];
   const systemPrompt = normalizeWhitespace(runtimeConfig.systemPrompt || '');
   const sessionContextText = normalizeWhitespace(runtimeConfig.sessionContextText || '');
   const summary = normalizeWhitespace(restoreContext?.summary || '');
-  const tuning = normalizeVoiceInteractionTuning(runtimeConfig);
-  const recentTurnsMemory = formatRecentTurnsMemory(restoreContext?.recentTurns, tuning.memoryTurnCount);
 
   if (systemPrompt) {
     parts.push(systemPrompt);
@@ -180,21 +145,11 @@ function buildRealtimeInstructions(runtimeConfig = {}, restoreContext = null) {
 8. Use browser tools only when the user explicitly asks to open or inspect a site.
 9. Prefer confirmed knowledge first. Do not invent church facts or prayer texts.
 10. If the user asks who you are or what your name is, say only that your name is Nikolai. Never call yourself "Batyushka 3".`);
-  parts.push(`Live delivery rules:
-1. Start speaking quickly after the user finishes.
-2. The first spoken burst should be no longer than ${tuning.firstReplySentences} short sentence(s).
-3. Do not get stuck in repeated generic formulas like "How can I help?".
-4. Treat short human replies like greetings, "угу", "да" and "а ты" as normal conversation, not as something to ignore silently.`);
 
   if (sessionContextText) {
     parts.push(`Session bootstrap:\n${sessionContextText}`);
-  } else {
-    if (summary) {
-      parts.push(`Conversation memory:\n${summary}`);
-    }
-    if (recentTurnsMemory) {
-      parts.push(`Recent turns:\n${recentTurnsMemory}`);
-    }
+  } else if (summary) {
+    parts.push(`Conversation memory:\n${summary}`);
   }
 
   return parts.join('\n\n');
@@ -310,7 +265,6 @@ function buildWebSearchToolDefinition(runtimeConfig) {
 
 function buildSessionStartPayload(runtimeConfig = {}, restoreContext = null) {
   const enabledTools = normalizeEnabledTools(runtimeConfig);
-  const tuning = normalizeVoiceInteractionTuning(runtimeConfig);
   const tools = [
     ...buildKnowledgeToolDefinition(enabledTools, runtimeConfig),
     ...buildWebSearchToolDefinition(runtimeConfig),
@@ -334,8 +288,8 @@ function buildSessionStartPayload(runtimeConfig = {}, restoreContext = null) {
           turn_detection: {
             type: 'server_vad',
             threshold: 0.5,
-            prefix_padding_ms: tuning.prefixPaddingMs,
-            silence_duration_ms: tuning.pauseMs,
+            prefix_padding_ms: 300,
+            silence_duration_ms: 400,
             create_response: false,
             interrupt_response: true,
           },
@@ -507,6 +461,61 @@ async function sendForcedAssistantReply(clientWs, connectionState, text, options
   sendJson(clientWs, { type: 'assistant_turn_done', responseId });
 }
 
+function _shouldForceBrowserOpenRuLegacy(text = '') {
+  const normalized = normalizeWhitespace(text).toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+  return /(^|\s)(открой|открыть|зайди|перейди|покажи\s+сайт|открой\s+сайт|загрузи\s+сайт)(?=\s|$)/i.test(normalized);
+}
+
+function _buildForcedBrowserReply(result = {}) {
+  const title = normalizeWhitespace(result.title || '');
+  const url = normalizeWhitespace(result.url || '');
+  const summary = truncate(result.summary || '', 120);
+  if (summary) {
+    return `Открыл сайт${title ? ` «${title}»` : ''}${url ? `: ${url}` : ''}. Коротко: ${summary}`;
+  }
+  if (title || url) {
+    return `Открыл сайт${title ? ` «${title}»` : ''}${url ? `: ${url}` : ''}.`;
+  }
+  return 'Сайт открыт.';
+}
+
+function _resolveKnownChurchSiteUrl(text = '') {
+  const normalized = normalizeWhitespace(text).toLowerCase();
+  if (!normalized) {
+    return '';
+  }
+  if (/(московск(?:ого|ий)\s+патриархат|московский\s+патриархат|патриархия)/i.test(normalized)) {
+    return 'https://patriarchia.ru/';
+  }
+  if (/(белорусск(?:ая|ой)\s+православн(?:ая|ой)\s+церк|church\.by|минск(?:ая|ой)\s+епарх)/i.test(normalized)) {
+    return 'http://church.by/';
+  }
+  if (/(азбук[аи]|azbyka)/i.test(normalized)) {
+    return 'https://azbyka.ru/';
+  }
+  if (/(правмир|pravmir)/i.test(normalized)) {
+    return 'https://www.pravmir.ru/';
+  }
+  return '';
+}
+
+function _shouldForceSelfIntro(text = '') {
+  const normalized = normalizeWhitespace(text).toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+  return /(кто\s+ты|кто\s+вы|как\s+тебя\s+зовут|как\s+вас\s+зовут|представься|представьтесь)/i.test(normalized);
+}
+
+function _buildForcedSelfIntroReply(connectionState) {
+  if (connectionState.characterId === 'batyushka-3') {
+    return 'Я Николай. Спокойно и по делу помогаю по церковным вопросам, могу подсказать и открыть нужный церковный сайт.';
+  }
+  return 'Я голосовой помощник. Могу коротко и естественно ответить на вопрос и, если нужно, открыть сайт.';
+}
 
 
 function shouldForceBrowserOpenRu(text = '') {
@@ -950,9 +959,6 @@ function normalizeAssistantOutputEvent(eventPayload, connectionState = null) {
 export function attachYandexRealtimeBridgeConnection(clientWs, { voiceSession = null, route = 'yandex-realtime-proxy' } = {}) {
   let upstreamWs = null;
   let upstreamConnectPromise = null;
-  const YANDEX_RECONNECT_MAX_ATTEMPTS = 3;
-  const YANDEX_RECONNECT_BASE_DELAY_MS = 800;
-  let reconnectTimer = null;
   const connectionState = {
     route,
     conversationSessionId: normalizeWhitespace(voiceSession?.conversationSessionId || ''),
@@ -970,14 +976,6 @@ export function attachYandexRealtimeBridgeConnection(clientWs, { voiceSession = 
     activeResponseId: '',
     pendingResponseDoneTimers: new Map(),
     closedResponseIds: new Set(),
-    reconnectAttempt: 0,
-  };
-
-  const clearReconnectTimer = () => {
-    if (reconnectTimer) {
-      clearTimeout(reconnectTimer);
-      reconnectTimer = null;
-    }
   };
 
   const clearResponseCreateTimer = () => {
@@ -1147,55 +1145,10 @@ export function attachYandexRealtimeBridgeConnection(clientWs, { voiceSession = 
         characterId: connectionState.characterId,
         code,
         reason: closeReason,
-        reconnectAttempt: connectionState.reconnectAttempt,
       });
-      if (connectionState.clientClosed) {
-        return;
+      if (!connectionState.clientClosed) {
+        closeBothSockets(clientWs, upstreamWs, Number(code) || 1011, closeReason || 'Yandex realtime closed');
       }
-      // Auto-reconnect upstream if client is still alive
-      if (connectionState.sessionConfigured && connectionState.reconnectAttempt < YANDEX_RECONNECT_MAX_ATTEMPTS) {
-        connectionState.reconnectAttempt += 1;
-        const delayMs = YANDEX_RECONNECT_BASE_DELAY_MS * Math.pow(2, connectionState.reconnectAttempt - 1);
-        logRuntime('yandex.realtime.reconnect.scheduled', {
-          route,
-          attempt: connectionState.reconnectAttempt,
-          delayMs,
-          conversationSessionId: connectionState.conversationSessionId,
-        });
-        sendJson(clientWs, {
-          type: 'goaway',
-          reason: 'upstream_reconnect',
-          attempt: connectionState.reconnectAttempt,
-        });
-        clearReconnectTimer();
-        reconnectTimer = setTimeout(async () => {
-          reconnectTimer = null;
-          if (connectionState.clientClosed) {
-            return;
-          }
-          try {
-            upstreamConnectPromise = null;
-            upstreamWs = null;
-            await ensureUpstreamConnection(connectionState.runtimeConfig);
-            await configureSession(connectionState.runtimeConfig);
-            logRuntime('yandex.realtime.reconnect.ok', {
-              route,
-              attempt: connectionState.reconnectAttempt,
-              conversationSessionId: connectionState.conversationSessionId,
-            });
-            connectionState.reconnectAttempt = 0;
-          } catch (reconnectError) {
-            logRuntime('yandex.realtime.reconnect.failed', {
-              route,
-              attempt: connectionState.reconnectAttempt,
-              error: reconnectError,
-            }, 'error');
-            closeBothSockets(clientWs, upstreamWs, 1011, 'Yandex realtime reconnect failed');
-          }
-        }, delayMs);
-        return;
-      }
-      closeBothSockets(clientWs, upstreamWs, Number(code) || 1011, closeReason || 'Yandex realtime closed');
     });
   };
 
@@ -1414,26 +1367,12 @@ export function attachYandexRealtimeBridgeConnection(clientWs, { voiceSession = 
         break;
       }
       case 'interrupt': {
+        // Yandex realtime may close the whole upstream socket after response.cancel.
+        // Keep the local barge-in behavior, but avoid cancelling upstream here.
         const responseId = normalizeWhitespace(payload.responseId || connectionState.activeResponseId || '');
         if (responseId) {
           clearPendingResponseDone(connectionState, responseId);
           rememberClosedResponseId(connectionState, responseId);
-          // Send response.cancel to Yandex to stop generating audio.
-          // If Yandex closes the socket after cancel, auto-reconnect will handle it.
-          if (upstreamWs && upstreamWs.readyState === WebSocket.OPEN) {
-            try {
-              upstreamWs.send(JSON.stringify({
-                type: 'response.cancel',
-                response_id: responseId,
-              }));
-            } catch (cancelError) {
-              logRuntime('yandex.realtime.cancel.error', {
-                route,
-                responseId,
-                error: cancelError,
-              }, 'error');
-            }
-          }
           sendJson(clientWs, {
             type: 'assistant_turn_cancelled',
             responseId,

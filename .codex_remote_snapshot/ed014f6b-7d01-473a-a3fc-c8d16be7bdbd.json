@@ -1,0 +1,101 @@
+{
+  "id": "ed014f6b-7d01-473a-a3fc-c8d16be7bdbd",
+  "createdAt": "2026-04-08T13:27:38.290Z",
+  "updatedAt": "2026-04-08T13:29:58.037Z",
+  "lastCharacterId": "batyushka-3",
+  "status": "active",
+  "turns": [],
+  "actionLog": [
+    {
+      "ts": "2026-04-08T13:27:38.414Z",
+      "event": "voice.input.start",
+      "details": {
+        "conversationSessionId": "ed014f6b-7d01-473a-a3fc-c8d16be7bdbd",
+        "inputSessionId": "yandex-realtime:ed014f6b-7d01-473a-a3fc-c8d16be7bdbd",
+        "mode": "yandex-realtime"
+      }
+    },
+    {
+      "ts": "2026-04-08T13:27:58.615Z",
+      "event": "assistant.queue.clear",
+      "details": {
+        "reason": "model-status-change"
+      }
+    },
+    {
+      "ts": "2026-04-08T13:28:01.138Z",
+      "event": "model.reconnect.restore",
+      "details": {
+        "attempt": 2,
+        "conversationSessionId": "ed014f6b-7d01-473a-a3fc-c8d16be7bdbd"
+      }
+    },
+    {
+      "ts": "2026-04-08T13:28:21.297Z",
+      "event": "assistant.queue.clear",
+      "details": {
+        "reason": "model-status-change"
+      }
+    },
+    {
+      "ts": "2026-04-08T13:28:26.058Z",
+      "event": "model.reconnect.restore",
+      "details": {
+        "attempt": 3,
+        "conversationSessionId": "ed014f6b-7d01-473a-a3fc-c8d16be7bdbd"
+      }
+    },
+    {
+      "ts": "2026-04-08T13:28:46.331Z",
+      "event": "assistant.queue.clear",
+      "details": {
+        "reason": "model-status-change"
+      }
+    },
+    {
+      "ts": "2026-04-08T13:28:55.920Z",
+      "event": "model.reconnect.restore",
+      "details": {
+        "attempt": 4,
+        "conversationSessionId": "ed014f6b-7d01-473a-a3fc-c8d16be7bdbd"
+      }
+    },
+    {
+      "ts": "2026-04-08T13:29:16.099Z",
+      "event": "assistant.queue.clear",
+      "details": {
+        "reason": "model-status-change"
+      }
+    },
+    {
+      "ts": "2026-04-08T13:29:27.755Z",
+      "event": "model.reconnect.restore",
+      "details": {
+        "attempt": 5,
+        "conversationSessionId": "ed014f6b-7d01-473a-a3fc-c8d16be7bdbd"
+      }
+    },
+    {
+      "ts": "2026-04-08T13:29:47.539Z",
+      "event": "assistant.queue.clear",
+      "details": {
+        "reason": "model-status-change"
+      }
+    },
+    {
+      "ts": "2026-04-08T13:29:58.037Z",
+      "event": "model.reconnect.restore",
+      "details": {
+        "attempt": 6,
+        "conversationSessionId": "ed014f6b-7d01-473a-a3fc-c8d16be7bdbd"
+      }
+    }
+  ],
+  "browserSessionId": "",
+  "browserContext": null,
+  "activeSttSessionId": "yandex-realtime:ed014f6b-7d01-473a-a3fc-c8d16be7bdbd",
+  "greetingSent": false,
+  "lastFinalTranscriptHash": "",
+  "knowledgeHits": [],
+  "summary": ""
+}

@@ -25,7 +25,6 @@ const DEFAULT_CALLBACKS = {
   onInputTranscription: null,
   onInputTranscriptionCommit: null,
   onAssistantTurnStart: null,
-  onAssistantAudioStart: null,
   onAssistantTurnCommit: null,
   onAssistantTurnCancel: null,
   onAssistantInterrupted: null,
@@ -512,12 +511,9 @@ export function useYandexRealtimeSession(audioPlayer, runtimeConfig = DEFAULT_RU
             }
             const pcm = base64ToFloat32Array(String(payload?.audio || ''));
             if (pcm.length) {
-              if (assistantTurnRef.current.audioChunks === 0) {
-                callbacksRef.current.onAssistantAudioStart?.({ responseId });
-              }
               audioPlayer.addChunk?.(pcm, Number(payload?.sampleRate || OUTPUT_SAMPLE_RATE) || OUTPUT_SAMPLE_RATE);
-              assistantTurnRef.current.audioChunks += 1;
             }
+            assistantTurnRef.current.audioChunks += 1;
             scheduleAssistantTurnFlush();
             break;
           }
@@ -555,13 +551,6 @@ export function useYandexRealtimeSession(audioPlayer, runtimeConfig = DEFAULT_RU
             }
             break;
           }
-          case 'goaway':
-            // Bridge is reconnecting upstream — stay connected, just signal recovery
-            callbacksRef.current.onGoaway?.({
-              reason: normalizeText(payload?.reason || 'upstream_reconnect'),
-              attempt: Number(payload?.attempt || 0),
-            });
-            break;
           default:
             break;
         }

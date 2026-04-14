@@ -1,0 +1,444 @@
+{
+  "id": "4c46bfc5-4682-4e59-8fd3-a7e36df82738",
+  "createdAt": "2026-04-10T09:50:34.555Z",
+  "updatedAt": "2026-04-10T09:50:58.014Z",
+  "lastCharacterId": "batyushka-3",
+  "status": "closed",
+  "turns": [
+    {
+      "ts": "2026-04-10T09:50:42.136Z",
+      "role": "user",
+      "source": "yandex-realtime-transcription",
+      "text": "привет яндекс"
+    },
+    {
+      "ts": "2026-04-10T09:50:42.630Z",
+      "role": "user",
+      "source": "yandex-realtime-transcription",
+      "text": "привет как тебя зовут"
+    },
+    {
+      "ts": "2026-04-10T09:50:52.499Z",
+      "role": "assistant",
+      "source": "yandex-realtime",
+      "text": "Пожалуйста, задайте ваш вопрос."
+    },
+    {
+      "ts": "2026-04-10T09:50:57.832Z",
+      "role": "user",
+      "source": "yandex-realtime-transcription",
+      "text": "а ты"
+    }
+  ],
+  "actionLog": [
+    {
+      "ts": "2026-04-10T09:50:34.738Z",
+      "event": "voice.input.start",
+      "details": {
+        "conversationSessionId": "4c46bfc5-4682-4e59-8fd3-a7e36df82738",
+        "inputSessionId": "yandex-realtime:4c46bfc5-4682-4e59-8fd3-a7e36df82738",
+        "mode": "yandex-realtime"
+      }
+    },
+    {
+      "ts": "2026-04-10T09:50:36.096Z",
+      "event": "model.reconnect.restore",
+      "details": {
+        "attempt": 1,
+        "conversationSessionId": "4c46bfc5-4682-4e59-8fd3-a7e36df82738"
+      }
+    },
+    {
+      "ts": "2026-04-10T09:50:39.755Z",
+      "event": "model.session.ready",
+      "details": {
+        "conversationSessionId": "4c46bfc5-4682-4e59-8fd3-a7e36df82738",
+        "resumed": false,
+        "shouldSendGreeting": false
+      }
+    },
+    {
+      "ts": "2026-04-10T09:50:41.971Z",
+      "event": "assistant.queue.clear",
+      "details": {
+        "reason": "new-user-request:yandex-realtime-input-final"
+      }
+    },
+    {
+      "ts": "2026-04-10T09:50:42.071Z",
+      "event": "runtime.request.activate",
+      "details": {
+        "requestId": 1,
+        "source": "yandex-realtime-input-final"
+      }
+    },
+    {
+      "ts": "2026-04-10T09:50:42.092Z",
+      "event": "runtime.request.state",
+      "details": {
+        "requestId": 1,
+        "state": "active",
+        "source": "yandex-realtime-input-final"
+      }
+    },
+    {
+      "ts": "2026-04-10T09:50:42.127Z",
+      "event": "stt.stream.final",
+      "details": {
+        "conversationSessionId": "4c46bfc5-4682-4e59-8fd3-a7e36df82738",
+        "source": "yandex-realtime-input",
+        "textLength": 13
+      }
+    },
+    {
+      "ts": "2026-04-10T09:50:42.131Z",
+      "event": "user.turn.final",
+      "details": {
+        "conversationSessionId": "4c46bfc5-4682-4e59-8fd3-a7e36df82738",
+        "source": "yandex-realtime-input",
+        "textLength": 13
+      }
+    },
+    {
+      "ts": "2026-04-10T09:50:42.141Z",
+      "event": "runtime.request.state",
+      "details": {
+        "requestId": 1,
+        "state": "runtime-turn-started",
+        "textLength": 13
+      }
+    },
+    {
+      "ts": "2026-04-10T09:50:42.145Z",
+      "event": "runtime.turn.orchestrated.start",
+      "details": {
+        "conversationSessionId": "4c46bfc5-4682-4e59-8fd3-a7e36df82738",
+        "textLength": 13,
+        "hasActiveBrowserSession": false
+      }
+    },
+    {
+      "ts": "2026-04-10T09:50:42.454Z",
+      "event": "runtime.request.final",
+      "details": {
+        "requestId": 1,
+        "outcome": "superseded",
+        "source": "yandex-realtime-input-final"
+      }
+    },
+    {
+      "ts": "2026-04-10T09:50:42.467Z",
+      "event": "assistant.queue.clear",
+      "details": {
+        "reason": "new-user-request:yandex-realtime-input-final"
+      }
+    },
+    {
+      "ts": "2026-04-10T09:50:42.580Z",
+      "event": "runtime.request.activate",
+      "details": {
+        "requestId": 2,
+        "source": "yandex-realtime-input-final"
+      }
+    },
+    {
+      "ts": "2026-04-10T09:50:42.596Z",
+      "event": "runtime.request.state",
+      "details": {
+        "requestId": 2,
+        "state": "active",
+        "source": "yandex-realtime-input-final"
+      }
+    },
+    {
+      "ts": "2026-04-10T09:50:42.615Z",
+      "event": "stt.stream.final",
+      "details": {
+        "conversationSessionId": "4c46bfc5-4682-4e59-8fd3-a7e36df82738",
+        "source": "yandex-realtime-input",
+        "textLength": 21
+      }
+    },
+    {
+      "ts": "2026-04-10T09:50:42.622Z",
+      "event": "user.turn.final",
+      "details": {
+        "conversationSessionId": "4c46bfc5-4682-4e59-8fd3-a7e36df82738",
+        "source": "yandex-realtime-input",
+        "textLength": 21
+      }
+    },
+    {
+      "ts": "2026-04-10T09:50:42.638Z",
+      "event": "assistant.turn.drop",
+      "details": {
+        "conversationSessionId": "4c46bfc5-4682-4e59-8fd3-a7e36df82738",
+        "reason": "unexpected-start",
+        "browserIntentInFlight": false,
+        "browserFlowState": "idle",
+        "responseId": "resp_dd9275ea835e406baaf7cf03ee077580"
+      }
+    },
+    {
+      "ts": "2026-04-10T09:50:42.735Z",
+      "event": "runtime.turn.orchestrated.context",
+      "details": {
+        "conversationSessionId": "4c46bfc5-4682-4e59-8fd3-a7e36df82738",
+        "knowledgeHitCount": 5,
+        "hasActivePageContext": false
+      }
+    },
+    {
+      "ts": "2026-04-10T09:50:42.762Z",
+      "event": "runtime.request.state",
+      "details": {
+        "requestId": 1,
+        "state": "runtime-turn-context-ready",
+        "knowledgeHitCount": 5,
+        "hasActivePageContext": false
+      }
+    },
+    {
+      "ts": "2026-04-10T09:50:42.774Z",
+      "event": "runtime.request.state",
+      "details": {
+        "requestId": 2,
+        "state": "runtime-turn-started",
+        "textLength": 21
+      }
+    },
+    {
+      "ts": "2026-04-10T09:50:42.797Z",
+      "event": "runtime.turn.orchestrated.start",
+      "details": {
+        "conversationSessionId": "4c46bfc5-4682-4e59-8fd3-a7e36df82738",
+        "textLength": 21,
+        "hasActiveBrowserSession": false
+      }
+    },
+    {
+      "ts": "2026-04-10T09:50:43.324Z",
+      "event": "runtime.turn.orchestrated.context",
+      "details": {
+        "conversationSessionId": "4c46bfc5-4682-4e59-8fd3-a7e36df82738",
+        "knowledgeHitCount": 5,
+        "hasActivePageContext": false
+      }
+    },
+    {
+      "ts": "2026-04-10T09:50:43.340Z",
+      "event": "runtime.request.state",
+      "details": {
+        "requestId": 2,
+        "state": "runtime-turn-context-ready",
+        "knowledgeHitCount": 5,
+        "hasActivePageContext": false
+      }
+    },
+    {
+      "ts": "2026-04-10T09:50:43.351Z",
+      "event": "assistant.queue.enqueue",
+      "details": {
+        "source": "runtime.turn",
+        "textLength": 1097,
+        "priority": "normal",
+        "queueSize": 1,
+        "requestId": 2
+      }
+    },
+    {
+      "ts": "2026-04-10T09:50:43.357Z",
+      "event": "assistant.queue.sent",
+      "details": {
+        "source": "runtime.turn",
+        "textLength": 1097,
+        "queueSize": 0,
+        "requestId": 2
+      }
+    },
+    {
+      "ts": "2026-04-10T09:50:49.820Z",
+      "event": "assistant.turn.start",
+      "details": {
+        "conversationSessionId": "4c46bfc5-4682-4e59-8fd3-a7e36df82738",
+        "responseId": "resp_ed3992728b314f7180c9beaceeae8fe1"
+      }
+    },
+    {
+      "ts": "2026-04-10T09:50:52.458Z",
+      "event": "assistant.queue.release",
+      "details": {
+        "reason": "commit"
+      }
+    },
+    {
+      "ts": "2026-04-10T09:50:52.470Z",
+      "event": "assistant.turn.commit",
+      "details": {
+        "conversationSessionId": "4c46bfc5-4682-4e59-8fd3-a7e36df82738",
+        "textLength": 31,
+        "textChunks": 2,
+        "audioChunks": 0,
+        "durationMs": 2601,
+        "responseId": "resp_ed3992728b314f7180c9beaceeae8fe1",
+        "source": "runtime.turn"
+      }
+    },
+    {
+      "ts": "2026-04-10T09:50:52.489Z",
+      "event": "runtime.request.final",
+      "details": {
+        "requestId": 2,
+        "outcome": "answered",
+        "textLength": 31
+      }
+    },
+    {
+      "ts": "2026-04-10T09:50:57.687Z",
+      "event": "assistant.queue.clear",
+      "details": {
+        "reason": "new-user-request:yandex-realtime-input-final"
+      }
+    },
+    {
+      "ts": "2026-04-10T09:50:57.697Z",
+      "event": "runtime.request.activate",
+      "details": {
+        "requestId": 3,
+        "source": "yandex-realtime-input-final"
+      }
+    },
+    {
+      "ts": "2026-04-10T09:50:57.704Z",
+      "event": "runtime.request.state",
+      "details": {
+        "requestId": 3,
+        "state": "active",
+        "source": "yandex-realtime-input-final"
+      }
+    },
+    {
+      "ts": "2026-04-10T09:50:57.758Z",
+      "event": "stt.stream.final",
+      "details": {
+        "conversationSessionId": "4c46bfc5-4682-4e59-8fd3-a7e36df82738",
+        "source": "yandex-realtime-input",
+        "textLength": 4
+      }
+    },
+    {
+      "ts": "2026-04-10T09:50:57.772Z",
+      "event": "user.turn.final",
+      "details": {
+        "conversationSessionId": "4c46bfc5-4682-4e59-8fd3-a7e36df82738",
+        "source": "yandex-realtime-input",
+        "textLength": 4
+      }
+    },
+    {
+      "ts": "2026-04-10T09:50:57.855Z",
+      "event": "runtime.request.state",
+      "details": {
+        "requestId": 3,
+        "state": "runtime-turn-started",
+        "textLength": 4
+      }
+    },
+    {
+      "ts": "2026-04-10T09:50:57.939Z",
+      "event": "runtime.turn.orchestrated.start",
+      "details": {
+        "conversationSessionId": "4c46bfc5-4682-4e59-8fd3-a7e36df82738",
+        "textLength": 4,
+        "hasActiveBrowserSession": false
+      }
+    },
+    {
+      "ts": "2026-04-10T09:50:57.949Z",
+      "event": "assistant.turn.drop",
+      "details": {
+        "conversationSessionId": "4c46bfc5-4682-4e59-8fd3-a7e36df82738",
+        "reason": "unexpected-start",
+        "browserIntentInFlight": false,
+        "browserFlowState": "idle",
+        "responseId": "resp_fdcd24ce95c843cd8671928492211917"
+      }
+    },
+    {
+      "ts": "2026-04-10T09:50:57.969Z",
+      "event": "runtime.request.final",
+      "details": {
+        "requestId": 3,
+        "outcome": "session-stopped"
+      }
+    },
+    {
+      "ts": "2026-04-10T09:50:57.986Z",
+      "event": "session.stop.request",
+      "details": {
+        "conversationSessionId": "4c46bfc5-4682-4e59-8fd3-a7e36df82738"
+      }
+    },
+    {
+      "ts": "2026-04-10T09:50:57.992Z",
+      "event": "voice.input.closed",
+      "details": {
+        "conversationSessionId": "4c46bfc5-4682-4e59-8fd3-a7e36df82738",
+        "inputSessionId": "yandex-realtime:4c46bfc5-4682-4e59-8fd3-a7e36df82738",
+        "mode": "yandex-realtime"
+      }
+    },
+    {
+      "ts": "2026-04-10T09:50:58.001Z",
+      "event": "assistant.queue.clear",
+      "details": {
+        "reason": "manual-stop"
+      }
+    },
+    {
+      "ts": "2026-04-10T09:50:58.014Z",
+      "event": "session.teardown.complete",
+      "details": {
+        "conversationSessionId": "4c46bfc5-4682-4e59-8fd3-a7e36df82738"
+      }
+    }
+  ],
+  "browserSessionId": "",
+  "browserContext": null,
+  "activeSttSessionId": "",
+  "greetingSent": false,
+  "lastFinalTranscriptHash": "аты",
+  "knowledgeHits": [
+    {
+      "title": "Молитва «Отче наш»: текст и толкование молитвы",
+      "canonicalUrl": "https://azbyka.ru/molitvoslov/molitva-gospodnya-otche-nash.html",
+      "text": "Да святится имя Твое, да приидет Царствие Твое; да будет воля Твоя и на земле, как на небе; хлеб наш насущный дай нам на сей день; и прости нам долги наши, как и мы прощаем должни…",
+      "score": 5.4
+    },
+    {
+      "title": "Молитва «Отче наш»: текст и толкование молитвы",
+      "canonicalUrl": "https://azbyka.ru/molitvoslov/molitva-gospodnya-otche-nash.html",
+      "text": "преподобный Амвросий Оптинский …Молиться же об этом должно: Во-первых, с чистым намерением – да будет воля Твоя , ибо я, сердечно желая следовать ей бескорыстно, не ради награды и…",
+      "score": 5.4
+    },
+    {
+      "title": "Молитва «Отче наш»: текст и толкование молитвы",
+      "canonicalUrl": "https://azbyka.ru/molitvoslov/molitva-gospodnya-otche-nash.html",
+      "text": "Πάτερ Ἡμῶν) «Отче наш» на латыни (Pater noster) «Отче наш» на разных языках Рекомендуем молитвы Иисусова молитва Славословие Царю Небесный Пожертвовать 43 TG -каналы Комментироват…",
+      "score": 5.4
+    },
+    {
+      "title": "Молитва «Отче наш»: текст и толкование молитвы",
+      "canonicalUrl": "https://azbyka.ru/molitvoslov/molitva-gospodnya-otche-nash.html",
+      "text": "Думаю, оно привлекло, как аллегория всего важнейшего для нас: Вера, любовь, познания Божьей истины, терпения, радости молитв, покаяния и т.д. полагаю, что здесь слово хлеб собират…",
+      "score": 5.4
+    },
+    {
+      "title": "Молитва «Отче наш»: текст и толкование молитвы",
+      "canonicalUrl": "https://azbyka.ru/molitvoslov/molitva-gospodnya-otche-nash.html",
+      "text": "Ответить Игорь, 16.08.2023 Упал вставай, согрешил кайся. Никогда не обещай, а исправляйся, делать грех очень легко, а вот воздержаться оч. трудно. Упал вставай потихоньку по чуть…",
+      "score": 5.4
+    }
+  ],
+  "summary": "Пользователь: привет яндекс\nПользователь: привет как тебя зовут\nАссистент: Пожалуйста, задайте ваш вопрос.\nПользователь: а ты\nПоследние знания: Молитва «Отче наш»: текст и толкование молитвы: Да святится имя Твое, да приидет Царствие Твое; да будет воля Твоя и на земле, как на небе; хлеб на… | Молитва «Отче наш»: текст и толкование молитвы: преподобный Амвросий Оптинский …Молиться же об этом должно: Во-первых, с чистым намерением – да буд… | Молитва «Отче наш»: текст и толкование молитвы: Πάτερ Ἡμῶν) «Отче наш» на латыни (Pater noster) «Отче наш» на разных языках Рекомендуем молитвы Иис… | Молитва «Отче наш»: текст и толкование молитвы: Думаю, оно привлекло, как аллегория всего важнейшего для нас: Вера, любовь, познания Божьей истины,… | Молитва «Отче наш»: текст и толкование молитвы: Ответить Игорь, 16.08.2023 Упал вставай, согрешил кайся. Никогда не обещай, а исправляйся, делать г…"
+}
