@@ -46,17 +46,22 @@ export function BrowserPanel({ panel, onAction }) {
   const wheelLockRef = useRef(0);
   const view = panel?.view || null;
   const viewImageUrl = String(view?.imageUrl || panel?.screenshotUrl || '').trim();
+  const clientUrl = String(panel?.clientUrl || '').trim();
+  const isClientInline = String(panel?.browserPanelMode || '').trim() === 'client-inline';
   const hasView = Boolean(viewImageUrl);
+  const hasClientView = isClientInline && Boolean(clientUrl);
   const canInteract = panel?.status === 'ready' && hasView && typeof onAction === 'function';
+  const showClientLoading = panel?.status === 'loading';
+  const clientNavDisabled = !hasClientView || !onAction;
 
   const metaLabel = useMemo(() => {
     const title = String(panel?.title || '').trim();
-    const url = String(panel?.url || '').trim();
+    const url = String(panel?.url || panel?.clientUrl || '').trim();
     if (title && url) {
       return `${title} · ${url}`;
     }
     return title || url || '';
-  }, [panel?.title, panel?.url]);
+  }, [panel?.clientUrl, panel?.title, panel?.url]);
 
   const handleSurfaceClick = (event) => {
     if (!canInteract || !surfaceRef.current) {
@@ -86,6 +91,55 @@ export function BrowserPanel({ panel, onAction }) {
     wheelLockRef.current = now;
     onAction({ type: 'wheel', deltaY: event.deltaY });
   };
+
+  if (hasClientView && (panel?.status === 'loading' || panel?.status === 'ready')) {
+    return (
+      <section className="browser-panel browser-panel--client-inline">
+        <div className="browser-panel__toolbar">
+          <div className="browser-panel__toolbar-meta">
+            <strong>{panel.title || 'Сайт'}</strong>
+            {panel.url && <span>{panel.url}</span>}
+          </div>
+          <div className="browser-panel__toolbar-actions">
+            <ToolbarButton label="Главная" onClick={() => onAction?.({ type: 'home' })} disabled={clientNavDisabled}>
+              <HomeIcon />
+            </ToolbarButton>
+            <ToolbarButton label="Назад" onClick={() => onAction?.({ type: 'back' })} disabled={clientNavDisabled}>
+              <ArrowIcon direction="left" />
+            </ToolbarButton>
+            <ToolbarButton label="Вперед" onClick={() => onAction?.({ type: 'forward' })} disabled={clientNavDisabled}>
+              <ArrowIcon direction="right" />
+            </ToolbarButton>
+            <ToolbarButton label="Обновить" onClick={() => onAction?.({ type: 'reload' })} disabled={clientNavDisabled}>
+              <ReloadIcon />
+            </ToolbarButton>
+          </div>
+        </div>
+        <div className="browser-panel__surface browser-panel__surface--client-inline">
+          <iframe
+            key={`${clientUrl}|${panel?.clientReloadKey || 0}`}
+            className="browser-panel__iframe"
+            src={clientUrl}
+            title={panel?.title || 'Сайт'}
+            loading="eager"
+            allow="clipboard-read; clipboard-write"
+            onLoad={() => onAction?.({ type: 'client-frame-load', url: clientUrl })}
+            onError={() => onAction?.({ type: 'client-frame-error', url: clientUrl })}
+          />
+          {showClientLoading && (
+            <div className="browser-panel__state browser-panel__state--loading browser-panel__state--overlay" aria-live="polite">
+              <div className="browser-panel__spinner" />
+              <strong>{panel.sourceType === 'intent-pending' ? 'Ищу сайт...' : 'Открывается сайт...'}</strong>
+              {metaLabel && <span className="browser-panel__meta">{metaLabel}</span>}
+            </div>
+          )}
+        </div>
+        {panel.note && (
+          <div className="browser-panel__hint">{panel.note}</div>
+        )}
+      </section>
+    );
+  }
 
   if (panel?.status === 'loading') {
     return (

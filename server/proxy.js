@@ -52,6 +52,7 @@ import {
   getVoiceSessionStoreStats,
   issueVoiceSessionToken,
 } from './voiceSessionStore.js';
+import { attachYandexRealtimeBridgeConnection } from './yandexRealtimeBridge.js';
 
 const PROXY_SCHEME = (process.env.PROXY_SCHEME || 'socks5h').toLowerCase();
 const PROXY_HOST = process.env.PROXY_HOST || '45.145.57.227';
@@ -100,6 +101,7 @@ app.set('trust proxy', true);
 const server = createServer(app);
 const geminiProxyWss = new WebSocketServer({ noServer: true });
 const voiceGatewayWss = new WebSocketServer({ noServer: true });
+const yandexRealtimeGatewayWss = new WebSocketServer({ noServer: true });
 const sttWss = new WebSocketServer({ noServer: true });
 let shutdownInProgress = false;
 const INVALID_FORWARD_CLOSE_CODES = new Set([1004, 1005, 1006, 1015]);
@@ -667,6 +669,30 @@ app.post('/api/yandex/turn', async (req, res) => {
     });
   } catch (error) {
     return res.status(400).json({ error: error.message || '?? ??????? ????????? Yandex turn' });
+  }
+});
+
+app.post('/api/yandex/tts', async (req, res) => {
+  try {
+    const text = normalizeWhitespace(req.body?.text || '');
+    const voiceName = normalizeWhitespace(req.body?.voiceName || 'ermil') || 'ermil';
+    const sampleRateHertz = Math.max(8000, Number(req.body?.sampleRateHertz || 48000) || 48000);
+    if (!text) {
+      return res.status(400).json({ error: 'Не передан текст для Yandex TTS' });
+    }
+
+    const ttsResult = await requestYandexTts({
+      text,
+      voice: voiceName,
+      sampleRateHertz,
+    });
+
+    return res.json({
+      audioBase64: ttsResult.audioBase64,
+      sampleRateHertz: ttsResult.sampleRateHertz,
+    });
+  } catch (error) {
+    return res.status(400).json({ error: error.message || 'Не удалось синтезировать Yandex TTS' });
   }
 });
 
@@ -1484,6 +1510,13 @@ voiceGatewayWss.on('connection', (clientWs, _request, voiceSession) => {
   });
 });
 
+yandexRealtimeGatewayWss.on('connection', (clientWs, _request, voiceSession) => {
+  attachYandexRealtimeBridgeConnection(clientWs, {
+    route: 'yandex-realtime-proxy',
+    voiceSession,
+  });
+});
+
 server.on('upgrade', (request, socket, head) => {
   try {
     const parsed = new URL(request.url || '/', 'http://localhost');
@@ -1509,6 +1542,25 @@ server.on('upgrade', (request, socket, head) => {
 
       voiceGatewayWss.handleUpgrade(request, socket, head, (ws) => {
         voiceGatewayWss.emit('connection', ws, request, voiceSession);
+      });
+      return;
+    }
+
+    if (parsed.pathname === '/yandex-realtime-proxy') {
+      const sessionToken = normalizeWhitespace(parsed.searchParams.get('sessionToken') || '');
+      const voiceSession = consumeVoiceSessionToken(sessionToken);
+      if (!voiceSession) {
+        try {
+          socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
+        } catch {
+          // Ignore response write failures during rejected upgrade.
+        }
+        socket.destroy();
+        return;
+      }
+
+      yandexRealtimeGatewayWss.handleUpgrade(request, socket, head, (ws) => {
+        yandexRealtimeGatewayWss.emit('connection', ws, request, voiceSession);
       });
       return;
     }

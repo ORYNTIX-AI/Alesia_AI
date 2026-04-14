@@ -133,6 +133,65 @@ function simplifyToken(value) {
     .replace(/[^a-zа-яё0-9]+/gi, '');
 }
 
+const KNOWLEDGE_STOP_TOKENS = new Set([
+  'это',
+  'эта',
+  'этот',
+  'эти',
+  'года',
+  'году',
+  'или',
+  'для',
+  'что',
+  'как',
+  'при',
+  'под',
+  'над',
+  'без',
+  'его',
+  'ее',
+  'её',
+  'они',
+  'она',
+  'оно',
+  'где',
+  'кто',
+  'про',
+  'меня',
+  'мне',
+  'тебя',
+  'тебе',
+  'вас',
+  'вам',
+  'этого',
+  'этом',
+  'эту',
+  'тут',
+  'там',
+  'здесь',
+  'сейчас',
+  'потом',
+  'пожалуйста',
+  'просто',
+  'давай',
+  'ладно',
+  'хорошо',
+  'ну',
+  'да',
+  'нет',
+  'ок',
+  'ага',
+  'угу',
+  'есть',
+  'ли',
+  'сколько',
+  'какой',
+  'какая',
+  'какие',
+  'когда',
+  'почему',
+]);
+
 function tokenize(value) {
   return Array.from(new Set(
     normalizeWhitespace(String(value || ''))
@@ -141,7 +200,7 @@ function tokenize(value) {
       .map((token) => token.replace(/[^a-zа-яё0-9-]+/gi, ''))
       .map((token) => simplifyToken(token))
       .filter((token) => token.length >= 2)
-      .filter((token) => !['это', 'эта', 'этот', 'года', 'году', 'или', 'для', 'что', 'как', 'при', 'под', 'над', 'без', 'его', 'ее', 'её', 'они', 'она', 'оно', 'где', 'кто', 'про'].includes(token))
+      .filter((token) => !KNOWLEDGE_STOP_TOKENS.has(token))
   ));
 }
 
@@ -298,7 +357,7 @@ function scoreKnowledgeChunk(questionTokens, chunk, priorityTags = []) {
       continue;
     }
 
-    if ((chunk.text || '').toLowerCase().includes(token)) {
+    if (token.length >= 4 && (chunk.text || '').toLowerCase().includes(token)) {
       score += 1.2;
     }
   }
@@ -453,8 +512,16 @@ export async function searchKnowledge({ question, character = null, limit = MAX_
     }
   }
 
-  const hits = scored
-    .sort((left, right) => right.score - left.score)
+  const sorted = scored
+    .sort((left, right) => right.score - left.score);
+  const topScore = sorted[0]?.score || 0;
+  const minRelevanceScore = Math.max(1.8, Number((topScore * 0.45).toFixed(3)));
+  if (topScore < 1.8) {
+    return { hits: [], source: 'published' };
+  }
+
+  const hits = sorted
+    .filter((hit) => hit.score >= minRelevanceScore)
     .slice(0, Math.max(1, limit))
     .map((hit) => ({
       score: hit.score,

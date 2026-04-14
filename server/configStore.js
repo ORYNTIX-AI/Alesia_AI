@@ -9,6 +9,7 @@ import {
   DEFAULT_AVATAR_MODEL_URL,
   DEFAULT_KNOWLEDGE_REFRESH_POLICY,
   DEFAULT_KNOWLEDGE_SOURCES,
+  DEFAULT_RUNTIME_PROVIDER,
   DEFAULT_WEB_PROVIDERS,
   DEFAULT_VOICE_MODEL,
   DEFAULT_GREETING,
@@ -19,6 +20,8 @@ import {
   SUPPORTED_PRAYER_READ_MODES,
   SUPPORTED_SPEECH_STABILITY_PROFILES,
   SUPPORTED_VOICE_NAMES,
+  YANDEX_LEGACY_RUNTIME_PROVIDER,
+  YANDEX_REALTIME_RUNTIME_PROVIDER,
 } from './defaultAppConfig.js';
 import { DEFAULT_APP_CONFIG_PATH } from './runtimePaths.js';
 
@@ -43,12 +46,34 @@ const MAX_CONFIG_SNAPSHOTS = 40;
 const BATYUSHKA_CHARACTER_IDS = new Set(['alesya-puck', 'batyushka-2', 'batyushka-3']);
 let bootstrapSnapshotCreated = false;
 
+function normalizeWhitespace(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
 function normalizeVoiceModelId(value) {
   const normalized = String(value || '').trim();
   if (!normalized || LEGACY_VOICE_MODELS.has(normalized)) {
     return DEFAULT_VOICE_MODEL;
   }
   return normalized;
+}
+
+function normalizeRuntimeProvider(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (!normalized) {
+    return DEFAULT_RUNTIME_PROVIDER;
+  }
+  if (normalized === 'yandex-full') {
+    return YANDEX_LEGACY_RUNTIME_PROVIDER;
+  }
+  if (
+    normalized === DEFAULT_RUNTIME_PROVIDER
+    || normalized === YANDEX_LEGACY_RUNTIME_PROVIDER
+    || normalized === YANDEX_REALTIME_RUNTIME_PROVIDER
+  ) {
+    return normalized;
+  }
+  return DEFAULT_RUNTIME_PROVIDER;
 }
 
 function templateUsesPreferredDomain(urlTemplate) {
@@ -93,26 +118,33 @@ function normalizeSystemPrompt(characterId, value, fallbackValue = DEFAULT_SYSTE
     return prompt || fallbackPrompt || DEFAULT_SYSTEM_PROMPT;
   }
 
-  const normalized = prompt.toLowerCase();
-  if (!normalized) {
-    return BATYUSHKA_SYSTEM_PROMPT;
+  return BATYUSHKA_SYSTEM_PROMPT;
+}
+
+function normalizeGreetingText(characterId, value, fallbackValue = DEFAULT_GREETING) {
+  const greeting = String(value || '').trim();
+  const fallbackGreeting = String(fallbackValue || DEFAULT_GREETING).trim();
+  if (!BATYUSHKA_CHARACTER_IDS.has(characterId)) {
+    return greeting || fallbackGreeting || DEFAULT_GREETING;
   }
 
-  const hasModernChurchRole = /религиозн|церковн|прихожан|митрополит|богослужени/.test(normalized);
-  const hasLegacyTourBias = /алатантур|туроператор|визов|подобрат[ьа]\s+тур|выбором\s+тур|бюджет|состав\s+путешественников/.test(normalized);
-  if (!hasModernChurchRole || hasLegacyTourBias) {
-    return BATYUSHKA_SYSTEM_PROMPT;
-  }
-
-  return prompt;
+  return BATYUSHKA_GREETING;
 }
 
 function sanitizeCharacter(rawCharacter, fallbackId, fallbackCharacter = null) {
   const character = rawCharacter || {};
   const characterId = String(character.id || fallbackId).trim() || fallbackId;
   const fallbackRuntime = createCharacterRuntimeConfig(fallbackCharacter || {});
-  const runtimeProvider = String(character.runtimeProvider || fallbackRuntime.runtimeProvider || 'gemini-live').trim() || 'gemini-live';
-  const modelId = normalizeVoiceModelId(character.modelId || character.voiceModelId || fallbackRuntime.modelId || DEFAULT_VOICE_MODEL);
+  const rawRuntimeProvider = normalizeWhitespace(character.runtimeProvider || '');
+  const runtimeProvider = normalizeRuntimeProvider(
+    character.runtimeProvider
+    || fallbackRuntime.runtimeProvider
+    || DEFAULT_RUNTIME_PROVIDER,
+  );
+  const rawModelId = normalizeWhitespace(character.modelId || character.voiceModelId || '');
+  const modelId = normalizeVoiceModelId(
+    character.modelId || character.voiceModelId || fallbackRuntime.modelId || DEFAULT_VOICE_MODEL,
+  );
   const voiceName = String(character.voiceName || fallbackCharacter?.voiceName || 'Aoede').trim() || 'Aoede';
   const greetingFallback = BATYUSHKA_CHARACTER_IDS.has(characterId)
     ? BATYUSHKA_GREETING
@@ -142,6 +174,19 @@ function sanitizeCharacter(rawCharacter, fallbackId, fallbackCharacter = null) {
     outputAudioTranscription: character.outputAudioTranscription === undefined
       ? fallbackRuntime.outputAudioTranscription !== false
       : character.outputAudioTranscription !== false,
+    vectorStoreId: String(character.vectorStoreId || fallbackRuntime.vectorStoreId || '').trim(),
+    enabledTools: Array.isArray(character.enabledTools)
+      ? character.enabledTools
+      : fallbackRuntime.enabledTools,
+    webSearchEnabled: character.webSearchEnabled === undefined
+      ? fallbackRuntime.webSearchEnabled === true
+      : character.webSearchEnabled === true,
+    maxToolResults: Math.max(1, Number(character.maxToolResults || fallbackRuntime.maxToolResults || 4) || 4),
+    fallbackRuntimeProvider: normalizeRuntimeProvider(
+      character.fallbackRuntimeProvider
+      || fallbackRuntime.fallbackRuntimeProvider
+      || (runtimeProvider === YANDEX_REALTIME_RUNTIME_PROVIDER ? YANDEX_LEGACY_RUNTIME_PROVIDER : DEFAULT_RUNTIME_PROVIDER),
+    ),
   });
 
   return {
@@ -156,7 +201,7 @@ function sanitizeCharacter(rawCharacter, fallbackId, fallbackCharacter = null) {
     sttProfile: String(character.sttProfile || runtimeDefaults.sttProfile || 'general').trim() || 'general',
     outputAudioTranscription: runtimeDefaults.outputAudioTranscription !== false,
     backgroundPreset: String(character.backgroundPreset || fallbackCharacter?.backgroundPreset || 'aurora'),
-    greetingText: String(character.greetingText || fallbackCharacter?.greetingText || greetingFallback),
+    greetingText: normalizeGreetingText(characterId, character.greetingText, fallbackCharacter?.greetingText || greetingFallback),
     avatarModelUrl: normalizeAvatarModelUrl(
       character.avatarModelUrl,
       String(fallbackCharacter?.avatarModelUrl || DEFAULT_AVATAR_MODEL_URL),
@@ -165,6 +210,15 @@ function sanitizeCharacter(rawCharacter, fallbackId, fallbackCharacter = null) {
     knowledgePriorityTags: mergedPriorityTags,
     liveInputEnabled: runtimeDefaults.liveInputEnabled,
     voiceGatewayUrl: String(character.voiceGatewayUrl || runtimeDefaults.voiceGatewayUrl || '').trim(),
+    vectorStoreId: String(character.vectorStoreId || runtimeDefaults.vectorStoreId || '').trim(),
+    enabledTools: Array.isArray(runtimeDefaults.enabledTools) ? runtimeDefaults.enabledTools : [],
+    webSearchEnabled: runtimeDefaults.webSearchEnabled === true,
+    maxToolResults: Math.max(1, Number(runtimeDefaults.maxToolResults || 4) || 4),
+    fallbackRuntimeProvider: normalizeRuntimeProvider(
+      character.fallbackRuntimeProvider
+      || runtimeDefaults.fallbackRuntimeProvider
+      || (runtimeProvider === YANDEX_REALTIME_RUNTIME_PROVIDER ? YANDEX_LEGACY_RUNTIME_PROVIDER : DEFAULT_RUNTIME_PROVIDER),
+    ),
     browserPanelMode: String(character.browserPanelMode || fallbackCharacter?.browserPanelMode || 'remote').trim() === 'client-inline'
       ? 'client-inline'
       : 'remote',

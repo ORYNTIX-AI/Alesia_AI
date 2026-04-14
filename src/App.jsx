@@ -6,9 +6,12 @@ import { BrowserPanel } from './components/BrowserPanel';
 import { SettingsDrawer } from './components/SettingsDrawer';
 import { useAppConfig } from './hooks/useAppConfig';
 import { useGeminiLive } from './hooks/useGeminiLive';
+import { useYandexRealtimeSession } from './hooks/useYandexRealtimeSession';
 import { useYandexVoiceSession } from './hooks/useYandexVoiceSession';
 import { useServerStt } from './hooks/useServerStt';
 import { AudioStreamPlayer } from './utils/AudioStreamPlayer';
+import { base64ToFloat32Array } from './utils/audioConverter';
+import { TesterDrawer } from './components/TesterDrawer';
 
 const DEFAULT_PANEL_STATE = {
   status: 'idle',
@@ -61,9 +64,14 @@ const BROWSER_INTENT_RETRY_LIMIT = 1;
 const BROWSER_INTENT_RETRY_BACKOFF_MS = 180;
 const ASSISTANT_QUEUE_TURN_TIMEOUT_MS = 14000;
 const ASSISTANT_QUEUE_MAX_HARD_TIMEOUT_MS = 38000;
+const ASSISTANT_QUEUE_RETRY_DELAY_MS = 320;
 const MAX_RECENT_INTENT_TURNS = 10;
 const BARGE_IN_MIN_GAP_MS = 1200;
 const ASSISTANT_BARGE_IN_WARMUP_MS = 320;
+const SILENT_TURN_FALLBACK_SAMPLE_RATE = 48000;
+const SILENT_TURN_FALLBACK_FIRST_CHUNK_TIMEOUT_MS = 4500;
+const SILENT_TURN_FALLBACK_NEXT_CHUNK_TIMEOUT_MS = 6000;
+const SILENT_TURN_FALLBACK_CHUNK_MAX_CHARS = 160;
 const STOP_SPEECH_PATTERN = /(^|\s)(стоп|остановись|замолчи|хватит|тише|пауза|stop)(?=\s|$)/i;
 const USER_FINAL_DEDUP_WINDOW_MS = 4200;
 const SERVER_STT_FRAGMENT_HOLD_MS = 900;
@@ -74,6 +82,18 @@ const SERVER_STT_SITE_FRAGMENT_HOLD_MS = 520;
 const SERVER_STT_SHORT_FRAGMENT_HOLD_MS = 650;
 const LIVE_INPUT_COMMIT_EXTRA_MS = 120;
 const CLIENT_INLINE_LOAD_TIMEOUT_MS = 12000;
+const TESTER_SETTINGS_STORAGE_KEY = 'alesia-tester-settings-v1';
+const MAX_TESTER_EVENTS = 80;
+const DEFAULT_TESTER_SETTINGS = Object.freeze({
+  pauseMs: 420,
+  interruptHoldMs: 220,
+  echoGuard: 62,
+  firstReplySentences: 1,
+  memoryTurnCount: 6,
+  autoReconnect: true,
+  showPartialTranscript: true,
+  showDropReasons: true,
+});
 
 const BACKGROUND_PRESETS = {
   aurora: {
@@ -305,6 +325,9 @@ function buildSignature(character, globalRuntimeConfig = {}) {
     normalizeSpeechStabilityProfile(globalRuntimeConfig.speechStabilityProfile),
     String(globalRuntimeConfig.prayerReadMode || 'knowledge-only').trim().toLowerCase(),
     globalRuntimeConfig.safeSpeechFlowEnabled === false ? 'safe-off' : 'safe-on',
+    String(globalRuntimeConfig.pauseMs || '').trim(),
+    String(globalRuntimeConfig.firstReplySentences || '').trim(),
+    String(globalRuntimeConfig.memoryTurnCount || '').trim(),
   ].join('|');
 }
 
@@ -371,6 +394,146 @@ function normalizeSpeechText(transcript) {
   return String(transcript || '')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+function splitLongSpeechFragment(fragment, maxLength = SILENT_TURN_FALLBACK_CHUNK_MAX_CHARS) {
+  const words = normalizeSpeechText(fragment).split(/\s+/).filter(Boolean);
+  if (words.length === 0) {
+    return [];
+  }
+
+  const parts = [];
+  let current = '';
+
+  words.forEach((word) => {
+    if (!current) {
+      current = word;
+      return;
+    }
+
+    const combined = `${current} ${word}`;
+    if (combined.length <= maxLength) {
+      current = combined;
+      return;
+    }
+
+    parts.push(current);
+    current = word;
+  });
+
+  if (current) {
+    parts.push(current);
+  }
+
+  return parts;
+}
+
+function splitSpeechPlaybackChunks(text, maxLength = SILENT_TURN_FALLBACK_CHUNK_MAX_CHARS) {
+  const normalized = normalizeSpeechText(text);
+  if (!normalized) {
+    return [];
+  }
+
+  const sentenceParts = (normalized.match(/[^.!?…]+[.!?…]?/gu) || [normalized])
+    .map((part) => normalizeSpeechText(part))
+    .filter(Boolean);
+
+  const chunks = [];
+  let current = '';
+
+  sentenceParts.forEach((sentence) => {
+    if (sentence.length > maxLength) {
+      if (current) {
+        chunks.push(current);
+        current = '';
+      }
+      chunks.push(...splitLongSpeechFragment(sentence, maxLength));
+      return;
+    }
+
+    if (!current) {
+      current = sentence;
+      return;
+    }
+
+    const combined = `${current} ${sentence}`;
+    if (combined.length <= maxLength) {
+      current = combined;
+      return;
+    }
+
+    chunks.push(current);
+    current = sentence;
+  });
+
+  if (current) {
+    chunks.push(current);
+  }
+
+  return chunks.length > 0 ? chunks : splitLongSpeechFragment(normalized, maxLength);
+}
+
+function clampNumber(value, min, max, fallback) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return fallback;
+  }
+  return Math.min(max, Math.max(min, numeric));
+}
+
+function normalizeTesterSettings(rawValue = {}) {
+  const settings = rawValue && typeof rawValue === 'object' ? rawValue : {};
+  return {
+    pauseMs: clampNumber(settings.pauseMs, 260, 900, DEFAULT_TESTER_SETTINGS.pauseMs),
+    interruptHoldMs: clampNumber(settings.interruptHoldMs, 120, 640, DEFAULT_TESTER_SETTINGS.interruptHoldMs),
+    echoGuard: clampNumber(settings.echoGuard, 0, 100, DEFAULT_TESTER_SETTINGS.echoGuard),
+    firstReplySentences: clampNumber(settings.firstReplySentences, 1, 3, DEFAULT_TESTER_SETTINGS.firstReplySentences),
+    memoryTurnCount: clampNumber(settings.memoryTurnCount, 2, 12, DEFAULT_TESTER_SETTINGS.memoryTurnCount),
+    autoReconnect: settings.autoReconnect !== false,
+    showPartialTranscript: settings.showPartialTranscript !== false,
+    showDropReasons: settings.showDropReasons !== false,
+  };
+}
+
+function loadTesterSettings() {
+  if (typeof window === 'undefined') {
+    return { ...DEFAULT_TESTER_SETTINGS };
+  }
+
+  try {
+    const raw = window.localStorage.getItem(TESTER_SETTINGS_STORAGE_KEY);
+    if (!raw) {
+      return { ...DEFAULT_TESTER_SETTINGS };
+    }
+    return normalizeTesterSettings(JSON.parse(raw));
+  } catch {
+    return { ...DEFAULT_TESTER_SETTINGS };
+  }
+}
+
+function sanitizeTesterEventDetails(details = {}) {
+  if (!details || typeof details !== 'object' || Array.isArray(details)) {
+    return {};
+  }
+
+  const entries = Object.entries(details).slice(0, 8).map(([key, value]) => {
+    if (typeof value === 'string') {
+      return [key, truncatePromptValue(value, 180)];
+    }
+    if (typeof value === 'number' || typeof value === 'boolean') {
+      return [key, value];
+    }
+    if (value == null) {
+      return [key, ''];
+    }
+    try {
+      return [key, truncatePromptValue(JSON.stringify(value), 180)];
+    } catch {
+      return [key, truncatePromptValue(String(value), 180)];
+    }
+  });
+
+  return Object.fromEntries(entries);
 }
 
 function isPrayerRequest(transcript) {
@@ -482,7 +645,34 @@ function isGreetingOnlyTranscript(transcript) {
     return false;
   }
 
-  return /^(привет|здравствуйте|здравствуй|добрый день|доброе утро|добрый вечер|доброго дня|хай|hello|hi|hey)$/.test(cleaned);
+  return /^(?:(?:привет|здравствуйте|здравствуй|добрый день|доброе утро|добрый вечер|доброго дня|хай|hello|hi|hey)(?:\s+|$))+$/i
+    .test(cleaned);
+}
+
+function classifyShortHumanTurn(transcript) {
+  const normalized = normalizeSpeechText(transcript).toLowerCase();
+  if (!normalized) {
+    return 'none';
+  }
+
+  if (isGreetingOnlyTranscript(normalized)) {
+    return 'greeting';
+  }
+
+  if (/^(Р°РіР°|СѓРіСѓ|РґР°|РїРѕРЅСЏС‚РЅРѕ|СЏСЃРЅРѕ|Р»Р°РґРЅРѕ|С…РѕСЂРѕС€Рѕ|СЃРїР°СЃРёР±Рѕ|СЏ СЃР»СѓС€Р°СЋ|СЃР»СѓС€Р°СЋ)$/i.test(normalized)) {
+    return 'backchannel';
+  }
+
+  if (/^(Р° С‚С‹|Р° РІС‹|Рё С‚С‹|Рё РІС‹|РєС‚Рѕ С‚С‹|РєС‚Рѕ РІС‹|РєР°Рє С‚РµР±СЏ Р·РѕРІСѓС‚|РєР°Рє РІР°СЃ Р·РѕРІСѓС‚|С‡С‚Рѕ С‚С‹ СѓРјРµРµС€СЊ|С‡С‚Рѕ РІС‹ СѓРјРµРµС‚Рµ|С‡С‚Рѕ С‚С‹ РјРѕР¶РµС€СЊ|С‡С‚Рѕ РІС‹ РјРѕР¶РµС‚Рµ)\b/i.test(normalized)) {
+    return 'question';
+  }
+
+  const words = normalized.split(/\s+/).filter(Boolean);
+  if (words.length <= 4 && /^(РєС‚Рѕ|С‡С‚Рѕ|РєР°Рє|РіРґРµ|РєРѕРіРґР°|РїРѕС‡РµРјСѓ|Р·Р°С‡РµРј|Р° С‚С‹|Р° РІС‹)\b/i.test(normalized)) {
+    return 'question';
+  }
+
+  return 'none';
 }
 
 function extractBrowserTarget(transcript) {
@@ -649,11 +839,65 @@ function isLikelyBrowserIntent(transcript) {
   return isExplicitBrowserRequest(transcript);
 }
 
-function classifyTranscriptIntent(transcript) {
+function isBrowserMetaRequest(transcript) {
+  const normalized = normalizeSpeechText(transcript).toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+  return /^(кто ты|кто вы|как тебя зовут|как вас зовут|представься|представьтесь|стоп|повтори|ответь|заверши|замолчи|тише)\b/i.test(normalized);
+}
+
+function isPersonaDirectQuestion(transcript) {
+  const normalized = normalizeSpeechText(transcript).toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+  return /^(кто ты|кто вы|как тебя зовут|как вас зовут|представься|представьтесь|что ты умеешь|что вы умеете|что ты можешь|что вы можете|чем ты можешь помочь|чем вы можете помочь)\b/i
+    .test(normalized);
+}
+
+function isLikelyBrowserPageQuestion(transcript) {
+  const normalized = normalizeSpeechText(transcript).toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+  if (isLikelyBrowserIntent(normalized) || isBrowserActionFollowupRequest(normalized) || isBrowserMetaRequest(normalized)) {
+    return false;
+  }
+  if (isBrowserContextFollowupRequest(normalized)) {
+    return true;
+  }
+  return /^(кто|что|сколько|где|когда|какие|какой|какая|почему|как|есть ли|покажи|найди)\b/i.test(normalized);
+}
+
+function isLikelyUnclearStandaloneTranscript(transcript) {
+  const normalized = normalizeSpeechText(transcript).toLowerCase();
+  if (!normalized || STOP_SPEECH_PATTERN.test(normalized)) {
+    return false;
+  }
+  if (isLikelyBrowserIntent(normalized) || isBrowserActionFollowupRequest(normalized)) {
+    return false;
+  }
+  if (/[.!?]$/.test(normalized)) {
+    return false;
+  }
+  const words = normalized.split(/\s+/).filter(Boolean);
+  if (words.length > 4) {
+    return false;
+  }
+  return /^(ответит|ну|это|ага|угу|ясно|понятно|ладно|слушаю|я слушаю|спасибо|нет спасибо|не надо|не нужно)$/i
+    .test(normalized)
+    || (words.length === 1 && normalized.length <= 8);
+}
+
+function classifyTranscriptIntent(transcript, { hasActiveBrowserSession = false } = {}) {
   if (isBrowserActionFollowupRequest(transcript)) {
     return 'browser_action';
   }
   if (isBrowserContextFollowupRequest(transcript)) {
+    return 'page_query';
+  }
+  if (hasActiveBrowserSession && isLikelyBrowserPageQuestion(transcript)) {
     return 'page_query';
   }
   if (isLikelyBrowserIntent(transcript)) {
@@ -905,7 +1149,8 @@ URL: ${truncatePromptValue(panelState.url || panelState.clientUrl || 'n/a', 180)
 Недавняя веб-история:
 ${truncatePromptValue(historySummary, 420)}
 
-Ответь коротко и честно: подтверди открытие сайта внизу и предложи помочь короткой справкой, контактами или вакансиями по подтверждённым данным.`;
+Ответь коротко и честно: подтверди открытие сайта внизу и предложи помочь короткой справкой, контактами или навигацией по подтверждённым данным.
+Не говори, что ты не можешь помочь, если сайт уже открыт.`;
 }
 
 function buildWebClientPendingPrompt(transcript, panelState, historySummary) {
@@ -917,7 +1162,8 @@ URL: ${truncatePromptValue(panelState.url || panelState.clientUrl || 'n/a', 180)
 Недавняя веб-история:
 ${truncatePromptValue(historySummary, 420)}
 
-Ответь коротко и правдиво: скажи, что сайт уже открывается внизу, а текст страницы ещё дочитывается. Не говори, что страница уже разобрана полностью.`;
+Ответь коротко и правдиво: скажи, что сайт уже открывается внизу, а текст страницы ещё дочитывается. Не говори, что страница уже разобрана полностью.
+Не говори, что ты не можешь помочь: скажи, что сможешь коротко подсказать сразу после загрузки текста страницы.`;
 }
 
 function buildWebActivePrompt(question, contextResult, historySummary) {
@@ -1000,6 +1246,20 @@ function buildClientPanelState(intent, currentPanel = null, { status = 'ready', 
   };
 }
 
+function shouldPreferRemoteBrowserTransport(url, browserPanelMode = 'remote') {
+  if (!isClientInlinePanelMode(browserPanelMode)) {
+    return true;
+  }
+  const normalizedUrl = String(url || '').trim();
+  if (!normalizedUrl) {
+    return false;
+  }
+  if (/^http:\/\//i.test(normalizedUrl) && typeof window !== 'undefined' && window.location.protocol === 'https:') {
+    return true;
+  }
+  return false;
+}
+
 function buildWebActionPrompt(transcript, result, historySummary) {
   const pageSnippet = truncatePromptValue(result?.contextSnippet || result?.readerText || 'Текст страницы недоступен.', 700);
   return `WEB_ACTION_RESULT:
@@ -1057,6 +1317,27 @@ function buildSessionBootstrapText(restorePayload, knowledgeContext) {
   return parts.join('\n\n');
 }
 
+function buildRecentTurnsPromptBlock(recentTurns = [], currentQuestion = '', compactMode = false) {
+  const currentQuestionKey = normalizeTranscriptKey(currentQuestion);
+  const recentLines = (Array.isArray(recentTurns) ? recentTurns : [])
+    .slice(compactMode ? -3 : -6)
+    .filter((turn) => normalizeSpeechText(turn?.text || ''))
+    .filter((turn, index, turns) => !(
+      index === turns.length - 1
+      && turn?.role === 'user'
+      && normalizeTranscriptKey(turn?.text || '') === currentQuestionKey
+    ))
+    .map((turn) => `${turn?.role === 'assistant' ? 'Ассистент' : 'Пользователь'}: ${truncatePromptValue(turn?.text || '', compactMode ? 120 : 180)}`);
+
+  if (!recentLines.length) {
+    return compactMode ? 'Недавние реплики: пусто.' : 'Недавних реплик перед этим вопросом нет.';
+  }
+
+  return compactMode
+    ? `Недавние реплики:\n${recentLines.join('\n')}`
+    : `Краткая память последних реплик:\n${recentLines.join('\n')}`;
+}
+
 function buildRuntimeTurnPrompt(
   question,
   {
@@ -1064,10 +1345,11 @@ function buildRuntimeTurnPrompt(
     activePageContext = null,
     prayerReadMode = 'knowledge-only',
     compactMode = false,
+    recentTurns = [],
   } = {},
 ) {
   const normalizedQuestion = truncatePromptValue(question, 320);
-  const hits = Array.isArray(knowledgeHits) ? knowledgeHits.slice(0, compactMode ? 2 : 3) : [];
+  const hits = Array.isArray(knowledgeHits) ? knowledgeHits.slice(0, compactMode ? 1 : 3) : [];
   const prayerMode = String(prayerReadMode || 'knowledge-only').trim().toLowerCase();
   const prayerRequested = isPrayerRequest(normalizedQuestion);
   const prayerReading = prayerRequested && prayerMode === 'knowledge-only'
@@ -1082,8 +1364,9 @@ function buildRuntimeTurnPrompt(
   const pageUrl = activePageContext?.url ? truncatePromptValue(activePageContext.url, 160) : '';
   const pageContextSnippet = truncatePromptValue(
     activePageContext?.contextSnippet || activePageContext?.readerText || '',
-    compactMode ? 220 : 320,
+    compactMode ? 140 : 320,
   );
+  const recentTurnsBlock = buildRecentTurnsPromptBlock(recentTurns, normalizedQuestion, compactMode);
   const pageBlock = pageContextSnippet
     ? (
       compactMode
@@ -1107,17 +1390,16 @@ ${pageTitle}${pageUrl ? ` (${pageUrl})` : ''}
     if (compactMode) {
       return `Вопрос пользователя: "${normalizedQuestion}"
 ${pageBlock}
+${recentTurnsBlock}
 
 Подтвержденных знаний по этому вопросу сейчас нет.
-
-Ответь коротко и по делу.
-Если данных мало, скажи это прямо.
-Не обещай открытие сайта или действие без подтверждения.`;
+Ответь коротко и по делу, без лишних фраз.`;
     }
 
     return `RUNTIME_USER_TURN:
 Вопрос пользователя: "${normalizedQuestion}"
 ${pageBlock}
+${recentTurnsBlock}
 
 Утверждённых знаний по этому вопросу сейчас нет.
 
@@ -1132,7 +1414,7 @@ ${prayerRuleBlock ? `\n\n${prayerRuleBlock}` : ''}`;
   }
 
   const knowledgeBlock = orderedHits
-    .map((hit, index) => `${index + 1}. ${truncatePromptValue(hit.title || hit.canonicalUrl || 'Источник', 140)}${hit.canonicalUrl ? ` (${truncatePromptValue(hit.canonicalUrl, 140)})` : ''}\nФрагмент: ${truncatePromptValue(hit.confirmedExcerpt || hit.text || '', compactMode ? 180 : 260)}`)
+    .map((hit, index) => `${index + 1}. ${truncatePromptValue(hit.title || hit.canonicalUrl || 'Источник', 120)}${hit.canonicalUrl ? ` (${truncatePromptValue(hit.canonicalUrl, 120)})` : ''}\nФрагмент: ${truncatePromptValue(hit.confirmedExcerpt || hit.text || '', compactMode ? 120 : 260)}`)
     .join('\n\n');
   const prayerReadingBlock = prayerReadingExcerpt
     ? `Подтвержденный фрагмент для чтения молитвы:
@@ -1142,14 +1424,13 @@ ${truncatePromptValue(prayerReadingExcerpt, compactMode ? 520 : 900)}`
   if (compactMode) {
     return `Вопрос пользователя: "${normalizedQuestion}"
 ${pageBlock}
+${recentTurnsBlock}
 
 Подтвержденные знания:
 ${knowledgeBlock}
 ${prayerReadingBlock ? `\n\n${prayerReadingBlock}` : ''}
 
-Ответь коротко и естественно.
-Сначала опирайся на открытую страницу, если она подходит.
-Затем используй только подтвержденные знания.
+Ответь коротко, естественно и сразу по сути.
 Не выдумывай факты и не обещай действие браузера без подтверждения.
 ${prayerRequested && prayerMode === 'knowledge-only'
     ? (
@@ -1163,6 +1444,7 @@ ${prayerRequested && prayerMode === 'knowledge-only'
   return `RUNTIME_USER_TURN:
 Вопрос пользователя: "${normalizedQuestion}"
 ${pageBlock}
+${recentTurnsBlock}
 
 Утвержденные знания по этому вопросу:
 ${knowledgeBlock}
@@ -1258,7 +1540,33 @@ function buildGreetingAckPrompt(greetingText) {
 Пользователь в ответ просто поздоровался: "${truncatePromptValue(greetingText, 120)}"
 
 Не здоровайся заново, не представляйся и не повторяй приветствие.
-Ответь одной короткой естественной фразой и сразу перейди к помощи, например в стиле "Чем могу помочь?"`;
+Не вызывай никакие tools, не открывай сайты и не делай browser actions.
+Ответь одной короткой естественной фразой, без дословного повтора "Чем могу помочь?".`;
+}
+
+function buildPersonaDirectPrompt(transcript) {
+  return `RUNTIME_PERSONA_DIRECT_ANSWER:
+Пользователь спросил о тебе напрямую: "${truncatePromptValue(transcript, 180)}"
+
+Ответь по роли кратко и по существу.
+Не переводи ответ в пустую формулу "Чем могу помочь?".
+Не вызывай tools и не запускай browser actions.
+В конце можно добавить одну живую фразу о том, чем полезен прямо сейчас.`;
+}
+
+function buildBrowserOpeningAckPrompt(transcript) {
+  return `RUNTIME_BROWSER_OPENING_ACK:
+Пользователь попросил открыть сайт: "${truncatePromptValue(transcript, 180)}"
+
+Не вызывай tools, не уточняй и не повторяй запрос.
+Скажи одну короткую фразу ровно о том, что сайт уже открывается.`;
+}
+
+function buildRepeatRequestPrompt(transcript) {
+  return `RUNTIME_REPEAT_REQUEST:
+Пользователь сказал слишком короткую или неясную реплику: "${truncatePromptValue(transcript, 120)}"
+
+Ответь одной короткой фразой по-русски: попроси повторить или уточнить.`;
 }
 
 function parseBrowserActionRequest(transcript) {
@@ -1442,6 +1750,17 @@ function App() {
   const [initialized, setInitialized] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsDraft, setSettingsDraft] = useState(null);
+  const [testerOpen, setTesterOpen] = useState(false);
+  const [testerSettings, setTesterSettings] = useState(() => loadTesterSettings());
+  const [testerEvents, setTesterEvents] = useState([]);
+  const [lastRecognizedTurn, setLastRecognizedTurn] = useState('');
+  const [lastIssueText, setLastIssueText] = useState('');
+  const [assistantOutputState, setAssistantOutputState] = useState({
+    responseId: '',
+    state: 'idle',
+    lastText: '',
+    audioStarted: false,
+  });
   const [browserPanel, setBrowserPanel] = useState(DEFAULT_PANEL_STATE);
   const [browserFlowState, setBrowserFlowState] = useState('idle');
   const [activeBrowserSessionId, setActiveBrowserSessionId] = useState('');
@@ -1495,7 +1814,11 @@ function App() {
   const assistantInFlightRequestIdRef = useRef(0);
   const assistantAwaitingResponseRef = useRef(false);
   const assistantPromptTimerRef = useRef(null);
+  const assistantPromptRetryTimerRef = useRef(null);
   const assistantPromptSeqRef = useRef(0);
+  const assistantPromptMetaRef = useRef({ source: '', finalizeRequestOnCommit: true });
+  const testerEventsRef = useRef([]);
+  const silentAssistantFallbackRef = useRef(new Set());
   const recordConversationActionRef = useRef(null);
   const handleBrowserTranscriptRef = useRef(null);
   const handleOrchestratedTurnRef = useRef(null);
@@ -1517,11 +1840,18 @@ function App() {
     frameLoaded: false,
     contextReady: false,
   });
+  const activeVoiceStatusRef = useRef('disconnected');
+  const activeVoiceDisconnectRef = useRef(() => {});
+  const [runtimeProviderOverride, setRuntimeProviderOverride] = useState('');
 
   const selectedCharacter = config?.characters?.find((character) => character.id === config.activeCharacterId) || config?.characters?.[0] || null;
   const safeSpeechFlowEnabled = config?.safetySwitches?.safeSpeechFlowEnabled !== false;
   const runtimeProvider = String(selectedCharacter?.runtimeProvider || 'gemini-live').trim() || 'gemini-live';
-  const usesYandexRuntime = runtimeProvider === 'yandex-full';
+  const realtimeFallbackProvider = String(selectedCharacter?.fallbackRuntimeProvider || '').trim() || '';
+  const effectiveRuntimeProvider = runtimeProviderOverride || runtimeProvider;
+  const usesYandexRealtimeRuntime = effectiveRuntimeProvider === 'yandex-realtime';
+  const usesYandexLegacyRuntime = effectiveRuntimeProvider === 'yandex-full-legacy' || effectiveRuntimeProvider === 'yandex-full';
+  const usesYandexRuntime = usesYandexRealtimeRuntime || usesYandexLegacyRuntime;
   const baseSpeechStabilityProfile = normalizeSpeechStabilityProfile(config?.speechStabilityProfile);
   const speechStabilityProfile = baseSpeechStabilityProfile;
   const speechStabilityConfig = selectedCharacter?.id === 'batyushka-2'
@@ -1534,6 +1864,11 @@ function App() {
       immediateOnSpeechStart: false,
     }
     : resolveSpeechStabilityConfig(speechStabilityProfile, safeSpeechFlowEnabled);
+  const tunedSpeechStabilityConfig = {
+    ...speechStabilityConfig,
+    bargeInHoldMs: clampNumber(testerSettings.interruptHoldMs, 120, 640, speechStabilityConfig.bargeInHoldMs),
+    botVolumeGuard: clampNumber(0.035 + (testerSettings.echoGuard / 100) * 0.16, 0.035, 0.195, speechStabilityConfig.botVolumeGuard),
+  };
   const prayerReadMode = String(config?.prayerReadMode || 'knowledge-only').trim().toLowerCase();
   const usesLiveInput = Boolean(selectedCharacter?.liveInputEnabled || usesYandexRuntime);
   const usesClientInlinePanel = isClientInlinePanelMode(selectedCharacter?.browserPanelMode);
@@ -1555,10 +1890,12 @@ function App() {
   const avatarInstanceId = uiCharacter?.avatarInstanceId || `avatar-${uiCharacter?.id || 'default'}`;
   const avatarFrame = BATYUSHKA_CHARACTER_IDS.has(uiCharacter?.id || '')
     ? {
-      y: -0.9,
-      scale: 1.82,
-      camera: { position: [0, 0, 0.36], fov: 35 },
-      lights: { ambient: 1.18, directional: 0.96 },
+      // Nikolay should keep the face much higher than the square center.
+      y: 0.48,
+      scale: 1.14,
+      focusYRatio: 1.31,
+      camera: { position: [0, 0.48, 1.38], fov: 26 },
+      lights: { ambient: 1.26, directional: 1.08 },
       idleMotion: true,
       idleMotionProfile: {
         yawAmplitude: 0.024,
@@ -1588,6 +1925,7 @@ function App() {
     uiCharacter?.backgroundPreset || 'aurora',
     avatarFrame.y,
     avatarFrame.scale,
+    avatarFrame.focusYRatio,
     avatarFrame.camera.position[2],
     avatarFrame.camera.fov,
     avatarFrame.lights.ambient,
@@ -1603,7 +1941,7 @@ function App() {
   const themeMode = config?.themeMode === 'dark' ? 'dark' : 'light';
   const runtimeConfig = selectedCharacter
     ? {
-      runtimeProvider,
+      runtimeProvider: effectiveRuntimeProvider,
       modelId: selectedCharacter.modelId || selectedCharacter.voiceModelId,
       voiceModelId: selectedCharacter.voiceModelId || selectedCharacter.modelId,
       voiceName: selectedCharacter.voiceName,
@@ -1617,6 +1955,16 @@ function App() {
       conversationSessionId,
       characterId: selectedCharacter.id,
       outputAudioTranscription: selectedCharacter.outputAudioTranscription !== false,
+      vectorStoreId: selectedCharacter.vectorStoreId || '',
+      enabledTools: Array.isArray(selectedCharacter.enabledTools) ? selectedCharacter.enabledTools : [],
+      webSearchEnabled: selectedCharacter.webSearchEnabled === true,
+      maxToolResults: selectedCharacter.maxToolResults || 4,
+      voiceInteractionTuning: {
+        pauseMs: testerSettings.pauseMs,
+        firstReplySentences: testerSettings.firstReplySentences,
+        memoryTurnCount: testerSettings.memoryTurnCount,
+      },
+      fallbackRuntimeProvider: realtimeFallbackProvider,
       speechStabilityProfile,
       prayerReadMode,
       safeSpeechFlowEnabled,
@@ -1663,6 +2011,16 @@ function App() {
     }
   }, []);
 
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+    window.localStorage.setItem(
+      TESTER_SETTINGS_STORAGE_KEY,
+      JSON.stringify(normalizeTesterSettings(testerSettings)),
+    );
+  }, [testerSettings]);
+
   const sendBrowserClientEvent = React.useCallback((event, details = {}) => {
     void fetch('/api/browser/client-event', {
       method: 'POST',
@@ -1671,7 +2029,37 @@ function App() {
     }).catch(() => {});
   }, []);
 
+  const pushTesterEvent = React.useCallback((event, details = {}) => {
+    const entry = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      ts: new Date().toISOString(),
+      event: String(event || '').trim() || 'runtime.event',
+      details: sanitizeTesterEventDetails(details),
+    };
+
+    const nextEvents = [
+      ...testerEventsRef.current,
+      entry,
+    ].slice(-MAX_TESTER_EVENTS);
+    testerEventsRef.current = nextEvents;
+    setTesterEvents(nextEvents);
+
+    if (
+      testerSettings.showDropReasons
+      && (
+        entry.event.includes('drop')
+        || entry.event.includes('error')
+        || entry.event.includes('closed')
+        || entry.event.includes('silent')
+      )
+    ) {
+      const reason = String(entry.details.reason || entry.details.error || entry.event).trim();
+      setLastIssueText(reason || entry.event);
+    }
+  }, [testerSettings.showDropReasons]);
+
   const recordConversationAction = React.useCallback((event, details = {}) => {
+    pushTesterEvent(event, details);
     const sessionId = conversationSessionIdRef.current;
     if (!sessionId) {
       return;
@@ -1686,11 +2074,18 @@ function App() {
         characterId: selectedCharacter?.id || '',
       }),
     }).catch(() => {});
-  }, [selectedCharacter?.id]);
+  }, [pushTesterEvent, selectedCharacter?.id]);
 
   useEffect(() => {
     recordConversationActionRef.current = recordConversationAction;
   }, [recordConversationAction]);
+
+  const clearAssistantPromptRetryTimer = React.useCallback(() => {
+    if (assistantPromptRetryTimerRef.current) {
+      clearTimeout(assistantPromptRetryTimerRef.current);
+      assistantPromptRetryTimerRef.current = null;
+    }
+  }, []);
 
   const markDialogRequestState = React.useCallback((requestId, state, details = {}) => {
     const safeRequestId = Number(requestId);
@@ -1745,6 +2140,8 @@ function App() {
       return;
     }
 
+    clearAssistantPromptRetryTimer();
+
     let nextPrompt = null;
     while (assistantPromptQueueRef.current.length > 0) {
       const candidate = assistantPromptQueueRef.current.shift();
@@ -1775,17 +2172,34 @@ function App() {
     assistantPromptInFlightRef.current = true;
     assistantInFlightRequestIdRef.current = nextPrompt.requestId || activeDialogRequestRef.current;
     assistantAwaitingResponseRef.current = true;
+    assistantPromptMetaRef.current = {
+      source: nextPrompt.source || '',
+      finalizeRequestOnCommit: nextPrompt.finalizeRequestOnCommit !== false,
+    };
 
-    const sent = sendTextTurnRef.current?.(nextPrompt.text, { interrupt: nextPrompt.interrupt });
+    const sent = sendTextTurnRef.current?.(nextPrompt.text, {
+      interrupt: nextPrompt.interrupt,
+      origin: nextPrompt.origin || 'assistant_prompt',
+      allowForceHandlers: nextPrompt.allowForceHandlers === true,
+    });
     if (!sent) {
       assistantPromptInFlightRef.current = false;
       assistantInFlightRequestIdRef.current = 0;
       assistantAwaitingResponseRef.current = false;
-      recordConversationAction('assistant.queue.drop', {
+      assistantPromptMetaRef.current = { source: '', finalizeRequestOnCommit: true };
+      assistantPromptQueueRef.current.unshift(nextPrompt);
+      recordConversationAction('assistant.queue.defer', {
         reason: 'send-failed',
         source: nextPrompt.source || '',
         requestId: nextPrompt.requestId || 0,
       });
+      if (!assistantPromptRetryTimerRef.current && !manualStopRef.current && initialized) {
+        assistantPromptRetryTimerRef.current = setTimeout(() => {
+          assistantPromptRetryTimerRef.current = null;
+          recordConversationAction('assistant.queue.retry', { reason: 'send-failed' });
+          drainAssistantPromptQueue();
+        }, ASSISTANT_QUEUE_RETRY_DELAY_MS);
+      }
       return;
     }
 
@@ -1801,6 +2215,7 @@ function App() {
       assistantPromptInFlightRef.current = false;
       assistantInFlightRequestIdRef.current = 0;
       assistantAwaitingResponseRef.current = false;
+      assistantPromptMetaRef.current = { source: '', finalizeRequestOnCommit: true };
       assistantPromptTimerRef.current = null;
       recordConversationAction('assistant.queue.timeout-release', {
         source: nextPrompt.source || '',
@@ -1816,7 +2231,7 @@ function App() {
       queueSize: assistantPromptQueueRef.current.length,
       requestId: nextPrompt.requestId || 0,
     });
-  }, [clearAssistantPromptTimer, recordConversationAction]);
+  }, [clearAssistantPromptRetryTimer, clearAssistantPromptTimer, initialized, recordConversationAction]);
 
   const enqueueAssistantPrompt = React.useCallback((text, {
     interrupt = true,
@@ -1824,6 +2239,9 @@ function App() {
     source = 'runtime',
     dedupeKey = '',
     requestId = activeDialogRequestRef.current,
+    origin = 'assistant_prompt',
+    allowForceHandlers = false,
+    finalizeRequestOnCommit = true,
   } = {}) => {
     const normalizedText = normalizeSpeechText(text);
     if (!normalizedText) {
@@ -1847,6 +2265,9 @@ function App() {
       source,
       dedupeKey: normalizedDedupeKey,
       requestId: Number.isInteger(requestId) ? requestId : activeDialogRequestRef.current,
+      origin,
+      allowForceHandlers: allowForceHandlers === true,
+      finalizeRequestOnCommit: finalizeRequestOnCommit !== false,
     };
 
     if (priority === 'high') {
@@ -1871,19 +2292,23 @@ function App() {
     assistantPromptInFlightRef.current = false;
     assistantInFlightRequestIdRef.current = 0;
     assistantAwaitingResponseRef.current = false;
+    assistantPromptMetaRef.current = { source: '', finalizeRequestOnCommit: true };
+    clearAssistantPromptRetryTimer();
     clearAssistantPromptTimer();
     recordConversationAction('assistant.queue.release', { reason });
     drainAssistantPromptQueue();
-  }, [clearAssistantPromptTimer, drainAssistantPromptQueue, recordConversationAction]);
+  }, [clearAssistantPromptRetryTimer, clearAssistantPromptTimer, drainAssistantPromptQueue, recordConversationAction]);
 
   const clearAssistantPromptQueue = React.useCallback((reason = 'reset') => {
     assistantPromptQueueRef.current = [];
     assistantPromptInFlightRef.current = false;
     assistantInFlightRequestIdRef.current = 0;
     assistantAwaitingResponseRef.current = false;
+    assistantPromptMetaRef.current = { source: '', finalizeRequestOnCommit: true };
+    clearAssistantPromptRetryTimer();
     clearAssistantPromptTimer();
     recordConversationAction('assistant.queue.clear', { reason });
-  }, [clearAssistantPromptTimer, recordConversationAction]);
+  }, [clearAssistantPromptRetryTimer, clearAssistantPromptTimer, recordConversationAction]);
 
   const cancelPendingBrowserWork = React.useCallback((reason = 'new-user-request') => {
     browserIntentAbortRef.current?.abort?.();
@@ -2057,10 +2482,20 @@ function App() {
     assistantPromptQueueRef.current = [];
     assistantPromptInFlightRef.current = false;
     assistantInFlightRequestIdRef.current = 0;
+    silentAssistantFallbackRef.current = new Set();
     recentTurnsForIntentRef.current = [];
     dialogRequestStatesRef.current = new Map();
     bargeInCandidateRef.current = { startedAt: 0, textKey: '' };
     lastBargeInAtRef.current = 0;
+    setAssistantOutputState({
+      responseId: '',
+      state: 'idle',
+      lastText: '',
+      audioStarted: false,
+    });
+    setLastRecognizedTurn('');
+    setLastIssueText('');
+    clearAssistantPromptRetryTimer();
     clearAssistantPromptTimer();
     clearPendingServerFinal();
     clearPendingLiveFinal();
@@ -2088,7 +2523,7 @@ function App() {
       clearInterval(browserViewPollTimerRef.current);
       browserViewPollTimerRef.current = null;
     }
-  }, [clearAssistantPromptTimer, clearPendingLiveFinal, clearPendingServerFinal]);
+  }, [clearAssistantPromptRetryTimer, clearAssistantPromptTimer, clearPendingLiveFinal, clearPendingServerFinal]);
 
   const commitRecognizedUserTranscript = React.useCallback((transcript, {
     source = 'server-stt',
@@ -2103,11 +2538,27 @@ function App() {
     }
 
     const botVolume = audioPlayer?.getVolume?.() || 0;
-    if (isLikelyAssistantEchoFinal(normalized, lastAssistantTurnRef.current, botVolume, speechStabilityConfig)) {
+    const botBufferedMs = Number(audioPlayer?.getBufferedMs?.() || 0);
+    const lastAssistantTs = Number(lastAssistantTurnRef.current?.timestamp || 0);
+    const timeSinceAssistantMs = lastAssistantTs > 0 ? Date.now() - lastAssistantTs : Number.POSITIVE_INFINITY;
+    const shortTurnType = classifyShortHumanTurn(normalized);
+    const recentAssistantSpeech = usesYandexRuntime && (botBufferedMs > 0 || timeSinceAssistantMs < 2400);
+
+    if (recentAssistantSpeech && shortTurnType === 'backchannel') {
+      recordConversationAction('stt.stream.backchannel', {
+        conversationSessionId: conversationSessionIdRef.current || '',
+        source,
+        textLength: normalized.length,
+      });
+      return false;
+    }
+
+    if (isLikelyAssistantEchoFinal(normalized, lastAssistantTurnRef.current, botVolume, tunedSpeechStabilityConfig)) {
       recordConversationAction('stt.stream.echo-drop', {
         conversationSessionId: conversationSessionIdRef.current || '',
         source,
         textLength: normalized.length,
+        reason: recentAssistantSpeech ? 'assistant-overlap' : 'assistant-echo',
       });
       return false;
     }
@@ -2148,11 +2599,13 @@ function App() {
       });
       return false;
     }
-    if (botVolume > speechStabilityConfig.botVolumeGuard) {
+    if (botVolume > tunedSpeechStabilityConfig.botVolumeGuard && shortTurnType !== 'backchannel') {
       triggerBargeIn(`bargein-final-${source}`);
     }
 
     const requestId = beginUserRequest(requestSource);
+    setLastRecognizedTurn(normalized);
+    setLastIssueText('');
     lastLiveFinalRef.current = {
       key: transcriptKey,
       timestamp: now,
@@ -2177,7 +2630,9 @@ function App() {
     });
     recordConversationTurn('user', normalized, turnSource);
 
-    const intentType = classifyTranscriptIntent(normalized);
+    const hasActiveBrowserSession = Boolean(activeBrowserSessionIdRef.current)
+      || Boolean(usesClientInlinePanel && browserPanelRef.current?.clientUrl);
+    const intentType = classifyTranscriptIntent(normalized, { hasActiveBrowserSession });
     const implicitBrowserAction = Boolean(activeBrowserSessionIdRef.current)
       && Boolean(parseImplicitBrowserActionRequest(normalized));
     if (intentType === 'browser_action' || intentType === 'page_query' || intentType === 'site_open' || implicitBrowserAction) {
@@ -2192,9 +2647,11 @@ function App() {
     beginUserRequest,
     recordConversationAction,
     recordConversationTurn,
-    speechStabilityConfig,
+    tunedSpeechStabilityConfig,
     triggerBargeIn,
     updateConversationSessionState,
+    usesClientInlinePanel,
+    usesYandexRuntime,
   ]);
 
   const schedulePendingServerFinal = React.useCallback((delayMs = SERVER_STT_FRAGMENT_HOLD_MS) => {
@@ -2312,7 +2769,7 @@ function App() {
     }
 
     const botVolume = audioPlayer?.getVolume?.() || 0;
-    if (botVolume <= speechStabilityConfig.botVolumeGuard) {
+    if (botVolume <= tunedSpeechStabilityConfig.botVolumeGuard) {
       bargeInCandidateRef.current = { startedAt: 0, textKey: '' };
       return;
     }
@@ -2323,16 +2780,21 @@ function App() {
       return;
     }
 
+    if (classifyShortHumanTurn(normalized) === 'backchannel') {
+      bargeInCandidateRef.current = { startedAt: 0, textKey: '' };
+      return;
+    }
+
     if ((now - assistantTurnStartedAtRef.current) < ASSISTANT_BARGE_IN_WARMUP_MS) {
       return;
     }
 
-    if (speechStabilityConfig.profile === 'legacy') {
+    if (tunedSpeechStabilityConfig.profile === 'legacy') {
       triggerBargeIn('bargein-input');
       return;
     }
 
-    if (normalized.length < speechStabilityConfig.minTranscriptLength) {
+    if (normalized.length < tunedSpeechStabilityConfig.minTranscriptLength) {
       return;
     }
 
@@ -2342,11 +2804,11 @@ function App() {
       return;
     }
 
-    if ((now - bargeInCandidateRef.current.startedAt) >= speechStabilityConfig.bargeInHoldMs) {
+    if ((now - bargeInCandidateRef.current.startedAt) >= tunedSpeechStabilityConfig.bargeInHoldMs) {
       bargeInCandidateRef.current = { startedAt: 0, textKey: '' };
       triggerBargeIn('bargein-input-hold');
     }
-  }, [audioPlayer, clearPendingLiveFinal, speechStabilityConfig, triggerBargeIn]);
+  }, [audioPlayer, clearPendingLiveFinal, tunedSpeechStabilityConfig, triggerBargeIn]);
 
   const bootstrapConversationContext = React.useCallback(async (sessionId, { shouldSendGreeting = false } = {}) => {
     const restorePayload = await jsonRequest(
@@ -2732,14 +3194,302 @@ function App() {
     };
   }, [activeBrowserSessionId, browserFlowState, refreshBrowserView]);
 
+  const synthesizeSilentAssistantTurn = React.useCallback(async ({
+    text,
+    responseId = '',
+    requestId = 0,
+    source = '',
+  } = {}) => {
+    const normalizedText = normalizeSpeechText(text);
+    const fallbackKey = `${responseId || requestId}:${normalizeTranscriptKey(normalizedText)}`;
+    if (!normalizedText || !fallbackKey || silentAssistantFallbackRef.current.has(fallbackKey)) {
+      return false;
+    }
+
+    silentAssistantFallbackRef.current.add(fallbackKey);
+    setAssistantOutputState((current) => ({
+      ...current,
+      responseId: responseId || current.responseId || '',
+      state: 'восстанавливаю звук',
+      lastText: normalizedText,
+    }));
+    recordConversationAction('assistant.turn.silent', {
+      conversationSessionId: conversationSessionIdRef.current || '',
+      requestId,
+      responseId,
+      textLength: normalizedText.length,
+      source,
+    });
+
+    const isStaleFallback = () => (
+      manualStopRef.current
+      || !conversationSessionIdRef.current
+      || (requestId > 0 && requestId !== activeDialogRequestRef.current)
+    );
+
+    const requestTtsChunk = async (chunkText, timeoutMs) => jsonRequest('/api/yandex/tts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        text: chunkText,
+        voiceName: selectedCharacter?.ttsVoiceName || selectedCharacter?.voiceName || 'ermil',
+        sampleRateHertz: SILENT_TURN_FALLBACK_SAMPLE_RATE,
+      }),
+    }, timeoutMs);
+
+    try {
+      const chunks = splitSpeechPlaybackChunks(normalizedText);
+      let hasPlayableAudio = false;
+      let finalizedAnswered = false;
+
+      for (let index = 0; index < chunks.length; index += 1) {
+        if (isStaleFallback()) {
+          return false;
+        }
+
+        const chunkText = chunks[index];
+        const timeoutMs = index === 0
+          ? SILENT_TURN_FALLBACK_FIRST_CHUNK_TIMEOUT_MS
+          : SILENT_TURN_FALLBACK_NEXT_CHUNK_TIMEOUT_MS;
+        let payload = null;
+        let lastChunkError = null;
+        const maxAttempts = index === 0 ? 2 : 1;
+
+        for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+          try {
+            payload = await requestTtsChunk(chunkText, timeoutMs);
+            lastChunkError = null;
+            break;
+          } catch (error) {
+            lastChunkError = error;
+          }
+        }
+
+        if (!payload) {
+          if (hasPlayableAudio) {
+            recordConversationAction('assistant.turn.audio-fallback.partial', {
+              conversationSessionId: conversationSessionIdRef.current || '',
+              requestId,
+              responseId,
+              chunkIndex: index + 1,
+              chunkCount: chunks.length,
+              error: lastChunkError?.message || 'partial-fallback-failed',
+            });
+            return true;
+          }
+          throw lastChunkError || new Error('silent-turn-repair-failed');
+        }
+
+        if (isStaleFallback()) {
+          return false;
+        }
+
+        const pcm = base64ToFloat32Array(String(payload?.audioBase64 || ''));
+        const sampleRateHertz = Math.max(
+          8000,
+          Number(payload?.sampleRateHertz || SILENT_TURN_FALLBACK_SAMPLE_RATE) || SILENT_TURN_FALLBACK_SAMPLE_RATE,
+        );
+        if (!pcm.length) {
+          if (hasPlayableAudio) {
+            recordConversationAction('assistant.turn.audio-fallback.partial', {
+              conversationSessionId: conversationSessionIdRef.current || '',
+              requestId,
+              responseId,
+              chunkIndex: index + 1,
+              chunkCount: chunks.length,
+              error: 'empty-audio',
+            });
+            return true;
+          }
+          throw new Error('empty-audio');
+        }
+
+        audioPlayer.addChunk?.(pcm, sampleRateHertz);
+        if (hasPlayableAudio) {
+          continue;
+        }
+
+        hasPlayableAudio = true;
+        setAssistantOutputState({
+          responseId,
+          state: 'РіРѕРІРѕСЂРёС‚',
+          lastText: normalizedText,
+          audioStarted: true,
+        });
+        recordConversationAction('assistant.turn.audio-fallback.ok', {
+          conversationSessionId: conversationSessionIdRef.current || '',
+          requestId,
+          responseId,
+          sampleRateHertz,
+          chunkCount: chunks.length,
+        });
+        recordConversationAction('assistant.turn.audio-start', {
+          conversationSessionId: conversationSessionIdRef.current || '',
+          requestId,
+          responseId,
+          fallback: true,
+        });
+        recordConversationAction('assistant.turn.lips-started', {
+          conversationSessionId: conversationSessionIdRef.current || '',
+          requestId,
+          responseId,
+          fallback: true,
+        });
+
+        assistantTurnCountRef.current += 1;
+        lastAssistantTurnRef.current = {
+          text: normalizedText,
+          timestamp: Date.now(),
+        };
+        if (assistantTurnCountRef.current === 1 && sessionShouldSendGreeting) {
+          updateConversationSessionState({ greetingSent: true });
+          setSessionShouldSendGreeting(false);
+        }
+        recordConversationTurn(
+          'assistant',
+          normalizedText,
+          usesYandexRealtimeRuntime ? 'yandex-realtime-audio-fallback' : 'yandex-legacy-audio-fallback',
+        );
+        if (requestId > 0 && !finalizedAnswered) {
+          finalizedAnswered = true;
+          finalizeDialogRequest(requestId, 'answered', {
+            textLength: normalizedText.length,
+            repairedAudio: true,
+          });
+        }
+      }
+
+      return hasPlayableAudio;
+    } catch (error) {
+      const message = error?.message || 'silent-turn-repair-failed';
+      setAssistantOutputState((current) => ({
+        ...current,
+        responseId: responseId || current.responseId || '',
+        state: 'РѕС€РёР±РєР° Р·РІСѓРєР°',
+        lastText: normalizedText,
+      }));
+      setLastIssueText(message);
+      recordConversationAction('assistant.turn.audio-fallback.error', {
+        conversationSessionId: conversationSessionIdRef.current || '',
+        requestId,
+        responseId,
+        error: message,
+      });
+      if (requestId > 0) {
+        finalizeDialogRequest(requestId, 'answer-audio-missed', {
+          textLength: normalizedText.length,
+        });
+      }
+      return false;
+    }
+
+    try {
+      const payload = await jsonRequest('/api/yandex/tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text: normalizedText,
+          voiceName: selectedCharacter?.ttsVoiceName || selectedCharacter?.voiceName || 'ermil',
+          sampleRateHertz: 48000,
+        }),
+      }, 12000);
+
+      const pcm = base64ToFloat32Array(String(payload?.audioBase64 || ''));
+      const sampleRateHertz = Math.max(8000, Number(payload?.sampleRateHertz || 48000) || 48000);
+      if (!pcm.length) {
+        throw new Error('empty-audio');
+      }
+
+      audioPlayer.addChunk?.(pcm, sampleRateHertz);
+      setAssistantOutputState({
+        responseId,
+        state: 'говорит',
+        lastText: normalizedText,
+        audioStarted: true,
+      });
+      recordConversationAction('assistant.turn.audio-fallback.ok', {
+        conversationSessionId: conversationSessionIdRef.current || '',
+        requestId,
+        responseId,
+        sampleRateHertz,
+      });
+      recordConversationAction('assistant.turn.audio-start', {
+        conversationSessionId: conversationSessionIdRef.current || '',
+        requestId,
+        responseId,
+        fallback: true,
+      });
+      recordConversationAction('assistant.turn.lips-started', {
+        conversationSessionId: conversationSessionIdRef.current || '',
+        requestId,
+        responseId,
+        fallback: true,
+      });
+
+      assistantTurnCountRef.current += 1;
+      lastAssistantTurnRef.current = {
+        text: normalizedText,
+        timestamp: Date.now(),
+      };
+      if (assistantTurnCountRef.current === 1 && sessionShouldSendGreeting) {
+        updateConversationSessionState({ greetingSent: true });
+        setSessionShouldSendGreeting(false);
+      }
+      recordConversationTurn(
+        'assistant',
+        normalizedText,
+        usesYandexRealtimeRuntime ? 'yandex-realtime-audio-fallback' : 'yandex-legacy-audio-fallback',
+      );
+      if (requestId > 0) {
+        finalizeDialogRequest(requestId, 'answered', {
+          textLength: normalizedText.length,
+          repairedAudio: true,
+        });
+      }
+      return true;
+    } catch (error) {
+      const message = error?.message || 'silent-turn-repair-failed';
+      setAssistantOutputState((current) => ({
+        ...current,
+        responseId: responseId || current.responseId || '',
+        state: 'ошибка звука',
+        lastText: normalizedText,
+      }));
+      setLastIssueText(message);
+      recordConversationAction('assistant.turn.audio-fallback.error', {
+        conversationSessionId: conversationSessionIdRef.current || '',
+        requestId,
+        responseId,
+        error: message,
+      });
+      if (requestId > 0) {
+        finalizeDialogRequest(requestId, 'answer-audio-missed', {
+          textLength: normalizedText.length,
+        });
+      }
+      return false;
+    }
+  }, [
+    audioPlayer,
+    finalizeDialogRequest,
+    recordConversationAction,
+    recordConversationTurn,
+    selectedCharacter?.ttsVoiceName,
+    selectedCharacter?.voiceName,
+    sessionShouldSendGreeting,
+    updateConversationSessionState,
+    usesYandexRealtimeRuntime,
+  ]);
+
   const voiceSessionCallbacks = {
       onSessionReady: ({ resumed = false, shouldSendGreeting = false }) => {
+        const shouldAutoGreet = shouldSendGreeting && !(usesYandexRealtimeRuntime && selectedCharacter?.id === 'batyushka-3');
         recordConversationAction('model.session.ready', {
           conversationSessionId: conversationSessionIdRef.current || '',
           resumed,
           shouldSendGreeting,
         });
-        if (resumed || !shouldSendGreeting || sessionGreetingQueuedRef.current) {
+        if (resumed || !shouldAutoGreet || sessionGreetingQueuedRef.current) {
           return;
         }
         const greetingRequestId = beginAssistantInitiatedRequest('session-greeting');
@@ -2767,39 +3517,75 @@ function App() {
         }
         clearPendingLiveFinal();
         commitRecognizedUserTranscript(text, {
-          source: usesYandexRuntime ? 'yandex-input' : 'gemini-input',
-          requestSource: usesYandexRuntime ? 'yandex-input-final' : 'gemini-input-final',
-          sttSessionPrefix: usesYandexRuntime ? 'yandex-local-vad' : 'gemini-live-input',
-          turnSource: usesYandexRuntime ? 'yandex-input-transcription' : 'gemini-input-transcription',
+          source: usesYandexRealtimeRuntime
+            ? 'yandex-realtime-input'
+            : (usesYandexLegacyRuntime ? 'yandex-input' : 'gemini-input'),
+          requestSource: usesYandexRealtimeRuntime
+            ? 'yandex-realtime-input-final'
+            : (usesYandexLegacyRuntime ? 'yandex-input-final' : 'gemini-input-final'),
+          sttSessionPrefix: usesYandexRealtimeRuntime
+            ? 'yandex-realtime'
+            : (usesYandexLegacyRuntime ? 'yandex-local-vad' : 'gemini-live-input'),
+          turnSource: usesYandexRealtimeRuntime
+            ? 'yandex-realtime-transcription'
+            : (usesYandexLegacyRuntime ? 'yandex-input-transcription' : 'gemini-input-transcription'),
         });
       },
-      onAssistantTurnStart: () => {
+      onAssistantTurnStart: ({ responseId = '' } = {}) => {
+        const hasInFlightRequest = assistantPromptInFlightRef.current || assistantInFlightRequestIdRef.current > 0;
+        if (!assistantAwaitingResponseRef.current && hasInFlightRequest) {
+          assistantAwaitingResponseRef.current = true;
+          recordConversationAction('assistant.turn.recover', {
+            conversationSessionId: conversationSessionIdRef.current || '',
+            reason: 'late-start-after-state-race',
+            requestId: assistantInFlightRequestIdRef.current || activeDialogRequestRef.current || 0,
+            responseId,
+          });
+        }
         if (!assistantAwaitingResponseRef.current) {
           recordConversationAction('assistant.turn.drop', {
             conversationSessionId: conversationSessionIdRef.current || '',
             reason: 'unexpected-start',
             browserIntentInFlight: browserIntentInFlightRef.current,
             browserFlowState: browserFlowStateRef.current,
+            responseId,
           });
-          if (
-            browserIntentInFlightRef.current
-            || browserFlowStateRef.current === 'intent_pending'
-            || browserFlowStateRef.current === 'opening'
-          ) {
-            cancelAssistantOutputRef.current?.();
-          }
           return false;
         }
         assistantTurnStartedAtRef.current = Date.now();
         assistantPromptInFlightRef.current = true;
+        setAssistantOutputState({
+          responseId,
+          state: 'готовит ответ',
+          lastText: '',
+          audioStarted: false,
+        });
         recordConversationAction('assistant.turn.start', {
           conversationSessionId: conversationSessionIdRef.current || '',
+          responseId,
         });
         return true;
       },
-      onAssistantTurnCommit: ({ text, textChunks = 0, audioChunks = 0, durationMs = 0 }) => {
+      onAssistantAudioStart: ({ responseId = '' } = {}) => {
+        setAssistantOutputState((current) => ({
+          responseId: responseId || current.responseId || '',
+          state: 'говорит',
+          lastText: current.lastText || '',
+          audioStarted: true,
+        }));
+        recordConversationAction('assistant.turn.audio-start', {
+          conversationSessionId: conversationSessionIdRef.current || '',
+          responseId,
+        });
+        recordConversationAction('assistant.turn.lips-started', {
+          conversationSessionId: conversationSessionIdRef.current || '',
+          responseId,
+        });
+      },
+      onAssistantTurnCommit: ({ responseId = '', text, textChunks = 0, audioChunks = 0, durationMs = 0 }) => {
         const inFlightRequestId = assistantInFlightRequestIdRef.current;
         const awaitingResponse = assistantAwaitingResponseRef.current;
+        const promptMeta = assistantPromptMetaRef.current;
         assistantTurnStartedAtRef.current = 0;
         releaseAssistantPromptLock('commit');
         if (!awaitingResponse || inFlightRequestId <= 0) {
@@ -2807,6 +3593,7 @@ function App() {
             conversationSessionId: conversationSessionIdRef.current || '',
             reason: 'unexpected-commit',
             textLength: String(text || '').length,
+            responseId,
           });
           return;
         }
@@ -2816,10 +3603,30 @@ function App() {
             requestId: inFlightRequestId,
             activeRequestId: activeDialogRequestRef.current,
             textLength: String(text || '').length,
+            responseId,
           });
           return;
         }
         const normalizedAssistantText = normalizeSpeechText(text);
+        if (!normalizedAssistantText) {
+          recordConversationAction('assistant.turn.drop', {
+            conversationSessionId: conversationSessionIdRef.current || '',
+            reason: 'empty-commit',
+            textChunks,
+            audioChunks,
+            responseId,
+          });
+          return;
+        }
+        if (usesYandexRuntime && audioChunks <= 0) {
+          void synthesizeSilentAssistantTurn({
+            text: normalizedAssistantText,
+            responseId,
+            requestId: inFlightRequestId || activeDialogRequestRef.current,
+            source: promptMeta?.source || '',
+          });
+          return;
+        }
         if (normalizedAssistantText) {
           assistantTurnCountRef.current += 1;
           lastAssistantTurnRef.current = {
@@ -2831,19 +3638,33 @@ function App() {
             setSessionShouldSendGreeting(false);
           }
         }
+        setAssistantOutputState({
+          responseId,
+          state: 'ответ отправлен',
+          lastText: normalizedAssistantText,
+          audioStarted: audioChunks > 0,
+        });
         recordConversationAction('assistant.turn.commit', {
           conversationSessionId: conversationSessionIdRef.current || '',
           textLength: String(text || '').length,
           textChunks,
           audioChunks,
           durationMs,
+          responseId,
+          source: promptMeta?.source || '',
         });
-        finalizeDialogRequest(inFlightRequestId || activeDialogRequestRef.current, 'answered', {
-          textLength: normalizedAssistantText.length,
-        });
-        recordConversationTurn('assistant', text, usesYandexRuntime ? 'yandex-full' : 'gemini-live');
+        if (promptMeta?.finalizeRequestOnCommit !== false) {
+          finalizeDialogRequest(inFlightRequestId || activeDialogRequestRef.current, 'answered', {
+            textLength: normalizedAssistantText.length,
+          });
+        }
+        recordConversationTurn(
+          'assistant',
+          text,
+          usesYandexRealtimeRuntime ? 'yandex-realtime' : (usesYandexLegacyRuntime ? 'yandex-full-legacy' : 'gemini-live'),
+        );
       },
-      onAssistantTurnCancel: ({ text, interrupted = false }) => {
+      onAssistantTurnCancel: ({ responseId = '', text, interrupted = false }) => {
         const inFlightRequestId = assistantInFlightRequestIdRef.current;
         const awaitingResponse = assistantAwaitingResponseRef.current;
         assistantTurnStartedAtRef.current = 0;
@@ -2853,20 +3674,94 @@ function App() {
             conversationSessionId: conversationSessionIdRef.current || '',
             reason: 'unexpected-cancel',
             textLength: String(text || '').length,
+            responseId,
           });
           return;
         }
+        setAssistantOutputState((current) => ({
+          responseId: responseId || current.responseId || '',
+          state: interrupted ? 'прерван' : 'отменен',
+          lastText: normalizeSpeechText(text) || current.lastText || '',
+          audioStarted: false,
+        }));
         recordConversationAction('assistant.turn.cancel', {
           conversationSessionId: conversationSessionIdRef.current || '',
           textLength: String(text || '').length,
           requestId: inFlightRequestId || 0,
           interrupted,
+          responseId,
         });
       },
       onAssistantInterrupted: () => {
+        setAssistantOutputState((current) => ({
+          ...current,
+          state: 'прерван',
+          audioStarted: false,
+        }));
         recordConversationAction('assistant.turn.interrupted', {
           conversationSessionId: conversationSessionIdRef.current || '',
         });
+      },
+      onToolCall: (toolEvent) => {
+        recordConversationAction('runtime.tool.call', {
+          conversationSessionId: conversationSessionIdRef.current || '',
+          toolName: toolEvent?.name || '',
+          callId: toolEvent?.callId || '',
+        });
+        if (toolEvent?.name === 'open_site') {
+          setBrowserFlowPhase('opening');
+        setBrowserPanel((current) => ({
+          ...current,
+          status: 'loading',
+          browserPanelMode: 'remote',
+          title: current.title || 'Открываю сайт',
+          error: null,
+          sourceType: 'tool-open-site',
+          note: 'Сайт загружается.',
+        }));
+      }
+      },
+      onToolResult: (toolEvent) => {
+        const result = toolEvent?.result || {};
+        const browserSessionId = String(result?.browserSessionId || '').trim();
+        recordConversationAction('runtime.tool.result', {
+          conversationSessionId: conversationSessionIdRef.current || '',
+          toolName: toolEvent?.name || '',
+          callId: toolEvent?.callId || '',
+          ok: result?.ok !== false,
+          browserSessionId,
+        });
+        if (!browserSessionId) {
+          return;
+        }
+
+        setBrowserFlowPhase('ready');
+        setActiveBrowserSessionId(browserSessionId);
+        activeBrowserSessionIdRef.current = browserSessionId;
+        setBrowserPanel((current) => ({
+          ...current,
+          status: 'ready',
+          browserPanelMode: 'remote',
+          title: result?.title || current.title,
+          url: result?.url || current.url,
+          error: null,
+          screenshotUrl: result?.view?.imageUrl || current.screenshotUrl,
+          view: result?.view
+            ? {
+              imageUrl: result.view.imageUrl || '',
+              width: result.view.width || 0,
+              height: result.view.height || 0,
+              revision: result.view.revision || 0,
+              actionableElements: Array.isArray(result.view.actionableElements) ? result.view.actionableElements : [],
+            }
+            : current.view,
+          actionableElements: Array.isArray(result?.view?.actionableElements)
+            ? result.view.actionableElements
+            : current.actionableElements,
+        }));
+        setTimeout(() => {
+          void refreshBrowserView(true).catch(() => {});
+        }, 0);
       },
       onSessionGoAway: (goAway) => {
         const timeLeftRaw = goAway?.timeLeft ?? goAway?.time_left ?? '';
@@ -2884,7 +3779,7 @@ function App() {
           timeLeftMs: timeLeftMs ?? '',
           reconnectDelayMs,
         });
-        if (!initialized || manualStopRef.current || status !== 'connected' || !nextSignature) {
+        if (!initialized || manualStopRef.current || activeVoiceStatusRef.current !== 'connected' || !nextSignature) {
           return;
         }
         if (pendingReconnectSignatureRef.current) {
@@ -2901,7 +3796,7 @@ function App() {
             pendingReconnectSignatureRef.current = null;
             return;
           }
-          disconnect();
+          activeVoiceDisconnectRef.current?.();
         }, reconnectDelayMs);
       },
   };
@@ -2918,7 +3813,60 @@ function App() {
     voiceSessionCallbacks,
   );
 
-  const activeVoiceSession = usesYandexRuntime ? yandexSession : geminiSession;
+  const yandexRealtimeSession = useYandexRealtimeSession(
+    audioPlayer,
+    runtimeConfig,
+    voiceSessionCallbacks,
+  );
+
+  useEffect(() => {
+    setRuntimeProviderOverride('');
+  }, [runtimeProvider, selectedCharacter?.id]);
+
+  useEffect(() => {
+    if (
+      runtimeProvider !== 'yandex-realtime'
+      || !realtimeFallbackProvider
+      || runtimeProviderOverride
+      || selectedCharacter?.id === 'batyushka-3'
+    ) {
+      return;
+    }
+
+    const normalizedRealtimeError = String(yandexRealtimeSession.error || '').trim().toLowerCase();
+    const shouldFallback = yandexRealtimeSession.status === 'error'
+      && (
+        normalizedRealtimeError.includes('permission denied')
+        || normalizedRealtimeError.includes('view model')
+        || normalizedRealtimeError.includes('not configured')
+        || normalizedRealtimeError.includes('runtime error')
+      );
+
+    if (!shouldFallback) {
+      return;
+    }
+
+    recordConversationAction('voice.runtime.fallback', {
+      conversationSessionId: conversationSessionIdRef.current,
+      from: runtimeProvider,
+      to: realtimeFallbackProvider,
+      reason: String(yandexRealtimeSession.error || '').trim(),
+      characterId: selectedCharacter?.id || '',
+    });
+    setRuntimeProviderOverride(realtimeFallbackProvider);
+  }, [
+    realtimeFallbackProvider,
+    recordConversationAction,
+    runtimeProvider,
+    runtimeProviderOverride,
+    selectedCharacter?.id,
+    yandexRealtimeSession.error,
+    yandexRealtimeSession.status,
+  ]);
+
+  const activeVoiceSession = usesYandexRealtimeRuntime
+    ? yandexRealtimeSession
+    : (usesYandexLegacyRuntime ? yandexSession : geminiSession);
   const {
     status,
     connect,
@@ -2929,6 +3877,8 @@ function App() {
     cancelAssistantOutput,
     clearSessionResumption,
   } = activeVoiceSession;
+  activeVoiceStatusRef.current = status;
+  activeVoiceDisconnectRef.current = disconnect;
 
   useEffect(() => {
     sendTextTurnRef.current = sendTextTurn;
@@ -2940,13 +3890,39 @@ function App() {
   }, [cancelAssistantOutput]);
 
   useEffect(() => {
+    if (status !== 'connected' || assistantPromptInFlightRef.current || assistantPromptQueueRef.current.length === 0) {
+      return;
+    }
+
+    clearAssistantPromptRetryTimer();
+    drainAssistantPromptQueue();
+  }, [clearAssistantPromptRetryTimer, drainAssistantPromptQueue, status]);
+
+  useEffect(() => {
+    if (usesYandexRealtimeRuntime) {
+      geminiSession.disconnect?.();
+      yandexSession.disconnect?.();
+      return;
+    }
+
+    if (usesYandexLegacyRuntime) {
+      geminiSession.disconnect?.();
+      yandexRealtimeSession.disconnect?.();
+      return;
+    }
+
+    yandexSession.disconnect?.();
+    yandexRealtimeSession.disconnect?.();
+  }, [geminiSession, usesYandexLegacyRuntime, usesYandexRealtimeRuntime, yandexRealtimeSession, yandexSession]);
+
+  useEffect(() => {
     if (status === 'connected') {
       drainAssistantPromptQueue();
       return;
     }
 
-    if (status === 'disconnected' || status === 'error') {
-      clearAssistantPromptQueue('model-status-change');
+    if (status === 'error') {
+      clearAssistantPromptQueue('model-status-change:error');
     }
   }, [clearAssistantPromptQueue, drainAssistantPromptQueue, status]);
 
@@ -2960,10 +3936,10 @@ function App() {
     conversationSessionId,
     language: 'ru-RU',
     onSpeechStart: () => {
-      if (!speechStabilityConfig.immediateOnSpeechStart) {
+      if (!tunedSpeechStabilityConfig.immediateOnSpeechStart) {
         return;
       }
-      if ((audioPlayer?.getVolume?.() || 0) > speechStabilityConfig.botVolumeGuard) {
+      if ((audioPlayer?.getVolume?.() || 0) > tunedSpeechStabilityConfig.botVolumeGuard) {
         triggerBargeIn('bargein-stt');
       }
     },
@@ -3041,7 +4017,7 @@ function App() {
     });
 
     try {
-      if (assistantTurnCountRef.current > 0 && isGreetingOnlyTranscript(normalized)) {
+      if (!usesYandexRealtimeRuntime && assistantTurnCountRef.current > 0 && isGreetingOnlyTranscript(normalized)) {
         const sent = enqueueAssistantPrompt(buildGreetingAckPrompt(normalized), {
           source: 'runtime.greeting-ack',
           dedupeKey: `runtime-greeting-ack:${normalizeTranscriptKey(normalized)}`,
@@ -3052,6 +4028,40 @@ function App() {
             conversationSessionId: conversationSessionIdRef.current,
             error: 'live-session-unavailable',
             reason: 'greeting-ack',
+          });
+        }
+        return;
+      }
+
+      if (isPersonaDirectQuestion(normalized)) {
+        const sentPersonaPrompt = enqueueAssistantPrompt(buildPersonaDirectPrompt(normalized), {
+          source: 'runtime.persona-direct',
+          dedupeKey: `runtime-persona-direct:${normalizeTranscriptKey(normalized)}`,
+          requestId: effectiveRequestId,
+          priority: 'high',
+        });
+        if (!sentPersonaPrompt) {
+          recordConversationAction('runtime.turn.orchestrated.fail', {
+            conversationSessionId: conversationSessionIdRef.current,
+            error: 'live-session-unavailable',
+            reason: 'persona-direct',
+          });
+        }
+        return;
+      }
+
+      if (isLikelyUnclearStandaloneTranscript(normalized)) {
+        const sentClarifyPrompt = enqueueAssistantPrompt(buildRepeatRequestPrompt(normalized), {
+          source: 'runtime.repeat-request',
+          dedupeKey: `runtime-repeat-request:${normalizeTranscriptKey(normalized)}`,
+          requestId: effectiveRequestId,
+          priority: 'high',
+        });
+        if (!sentClarifyPrompt) {
+          recordConversationAction('runtime.turn.orchestrated.fail', {
+            conversationSessionId: conversationSessionIdRef.current,
+            error: 'live-session-unavailable',
+            reason: 'repeat-request',
           });
         }
         return;
@@ -3109,7 +4119,9 @@ function App() {
         knowledgeHits,
         activePageContext,
         prayerReadMode,
-        compactMode: isGemini31FlashLiveModel(selectedCharacter?.modelId || selectedCharacter?.voiceModelId),
+        recentTurns: recentTurnsForIntentRef.current,
+        compactMode: BATYUSHKA_CHARACTER_IDS.has(selectedCharacter?.id || '')
+          || isGemini31FlashLiveModel(selectedCharacter?.modelId || selectedCharacter?.voiceModelId),
       }), {
         source: 'runtime.turn',
         dedupeKey: `runtime-turn:${normalizeTranscriptKey(normalized)}`,
@@ -3139,9 +4151,12 @@ function App() {
     enqueueAssistantPrompt,
     getRuntimePageContextForTurn,
     markDialogRequestState,
+    selectedCharacter?.id,
+    selectedCharacter?.modelId,
     selectedCharacter?.voiceModelId,
     queryKnowledgeForTurn,
     prayerReadMode,
+    isPersonaDirectQuestion,
     recordConversationAction,
   ]);
 
@@ -3184,6 +4199,9 @@ function App() {
     speechStabilityProfile,
     prayerReadMode,
     safeSpeechFlowEnabled,
+    pauseMs: testerSettings.pauseMs,
+    firstReplySentences: testerSettings.firstReplySentences,
+    memoryTurnCount: testerSettings.memoryTurnCount,
   });
   const sessionNeedsReconnect = status === 'connected' && Boolean(appliedSessionSignature) && appliedSessionSignature !== currentSignature;
   const isRecoveringConnection = initialized && reconnectAttempt > 0 && status !== 'connected';
@@ -3233,7 +4251,7 @@ function App() {
     void bootstrapConversationContext(sessionId, { shouldSendGreeting: false })
       .then((bootstrapText) => {
         connect({
-          runtimeProvider,
+          runtimeProvider: effectiveRuntimeProvider,
           modelId: selectedCharacter?.modelId || selectedCharacter?.voiceModelId,
           voiceModelId: selectedCharacter?.voiceModelId || selectedCharacter?.modelId,
           voiceName: selectedCharacter?.voiceName,
@@ -3245,16 +4263,39 @@ function App() {
           captureUserAudio: usesLiveInput,
           voiceGatewayUrl: selectedCharacter?.voiceGatewayUrl || '',
           outputAudioTranscription: selectedCharacter?.outputAudioTranscription !== false,
+          voiceInteractionTuning: {
+            pauseMs: testerSettings.pauseMs,
+            firstReplySentences: testerSettings.firstReplySentences,
+            memoryTurnCount: testerSettings.memoryTurnCount,
+          },
           conversationSessionId: sessionId,
         });
       })
       .catch(() => {
         connect();
       });
-  }, [bootstrapConversationContext, connect, selectedCharacter?.greetingText, selectedCharacter?.systemPrompt, selectedCharacter?.voiceGatewayUrl, selectedCharacter?.voiceModelId, selectedCharacter?.voiceName, status, usesLiveInput]);
+  }, [
+    bootstrapConversationContext,
+    connect,
+    effectiveRuntimeProvider,
+    selectedCharacter?.greetingText,
+    selectedCharacter?.modelId,
+    selectedCharacter?.outputAudioTranscription,
+    selectedCharacter?.systemPrompt,
+    selectedCharacter?.ttsVoiceName,
+    selectedCharacter?.voiceGatewayUrl,
+    selectedCharacter?.voiceModelId,
+    selectedCharacter?.voiceName,
+    status,
+    testerSettings.firstReplySentences,
+    testerSettings.memoryTurnCount,
+    testerSettings.pauseMs,
+    usesLiveInput,
+    usesYandexRuntime,
+  ]);
 
   useEffect(() => {
-    if (!initialized || manualStopRef.current || pendingReconnectSignatureRef.current) {
+    if (!initialized || manualStopRef.current || pendingReconnectSignatureRef.current || !testerSettings.autoReconnect) {
       return;
     }
 
@@ -3289,7 +4330,7 @@ function App() {
             conversationSessionId: sessionId,
           });
           connect({
-            runtimeProvider,
+            runtimeProvider: effectiveRuntimeProvider,
             modelId: selectedCharacter?.modelId || selectedCharacter?.voiceModelId,
             voiceModelId: selectedCharacter?.voiceModelId || selectedCharacter?.modelId,
             voiceName: selectedCharacter?.voiceName,
@@ -3301,6 +4342,11 @@ function App() {
             captureUserAudio: usesLiveInput,
             voiceGatewayUrl: selectedCharacter?.voiceGatewayUrl || '',
             outputAudioTranscription: selectedCharacter?.outputAudioTranscription !== false,
+            voiceInteractionTuning: {
+              pauseMs: testerSettings.pauseMs,
+              firstReplySentences: testerSettings.firstReplySentences,
+              memoryTurnCount: testerSettings.memoryTurnCount,
+            },
             conversationSessionId: sessionId,
           });
         })
@@ -3311,10 +4357,36 @@ function App() {
 
     if (nextAttempt >= AUTO_RECONNECT_MAX_ATTEMPTS && !reloadWatchdogTimerRef.current) {
       reloadWatchdogTimerRef.current = setTimeout(() => {
-        window.location.reload();
+        reloadWatchdogTimerRef.current = null;
+        recordConversationAction('model.reconnect.watchdog', {
+          conversationSessionId: conversationSessionIdRef.current || '',
+          attempt: nextAttempt,
+          action: 'reload-suppressed',
+        });
       }, RELOAD_WATCHDOG_TIMEOUT_MS);
     }
-  }, [bootstrapConversationContext, connect, initialized, recordConversationAction, selectedCharacter?.greetingText, selectedCharacter?.systemPrompt, selectedCharacter?.voiceGatewayUrl, selectedCharacter?.voiceModelId, selectedCharacter?.voiceName, status, usesLiveInput]);
+  }, [
+    bootstrapConversationContext,
+    connect,
+    effectiveRuntimeProvider,
+    initialized,
+    recordConversationAction,
+    selectedCharacter?.greetingText,
+    selectedCharacter?.modelId,
+    selectedCharacter?.outputAudioTranscription,
+    selectedCharacter?.systemPrompt,
+    selectedCharacter?.ttsVoiceName,
+    selectedCharacter?.voiceGatewayUrl,
+    selectedCharacter?.voiceModelId,
+    selectedCharacter?.voiceName,
+    status,
+    testerSettings.autoReconnect,
+    testerSettings.firstReplySentences,
+    testerSettings.memoryTurnCount,
+    testerSettings.pauseMs,
+    usesLiveInput,
+    usesYandexRuntime,
+  ]);
 
   useEffect(() => {
     if (!initialized || manualStopRef.current || status !== 'connecting') {
@@ -3351,8 +4423,13 @@ function App() {
     manualStopRef.current = false;
     resetReconnectState();
     clearSessionResumption();
+    geminiSession.disconnect?.();
+    yandexSession.disconnect?.();
+    yandexRealtimeSession.disconnect?.();
     setInitialized(true);
     setLiveInputTranscript('');
+    testerEventsRef.current = [];
+    setTesterEvents([]);
     resetSessionRuntimeState();
     const nextConversationSessionId = buildConversationSessionId();
     await jsonRequest('/api/conversation/session', {
@@ -3365,21 +4442,28 @@ function App() {
     }, 10000);
     setConversationSessionId(nextConversationSessionId);
     conversationSessionIdRef.current = nextConversationSessionId;
-    const inputSessionId = usesLiveInput
-      ? `gemini-live-input:${nextConversationSessionId}`
-      : `server-stt:${nextConversationSessionId}`;
+    const inputSessionId = usesYandexRealtimeRuntime
+      ? `yandex-realtime:${nextConversationSessionId}`
+      : (usesYandexLegacyRuntime
+        ? `yandex-local-vad:${nextConversationSessionId}`
+        : (usesLiveInput
+          ? `gemini-live-input:${nextConversationSessionId}`
+          : `server-stt:${nextConversationSessionId}`));
     recordConversationAction('voice.input.start', {
       conversationSessionId: nextConversationSessionId,
       inputSessionId,
-      mode: usesYandexRuntime ? 'yandex-local-vad' : (usesLiveInput ? 'gemini-live-input' : 'server-stt'),
+      mode: usesYandexRealtimeRuntime
+        ? 'yandex-realtime'
+        : (usesYandexLegacyRuntime ? 'yandex-local-vad' : (usesLiveInput ? 'gemini-live-input' : 'server-stt')),
     });
     updateConversationSessionState({
       activeSttSessionId: inputSessionId,
     });
-    const bootstrapText = await bootstrapConversationContext(nextConversationSessionId, { shouldSendGreeting: true });
+    const shouldSendSessionGreeting = !(usesYandexRealtimeRuntime && selectedCharacter?.id === 'batyushka-3');
+    const bootstrapText = await bootstrapConversationContext(nextConversationSessionId, { shouldSendGreeting: shouldSendSessionGreeting });
     setAppliedSessionSignature(currentSignature);
     connect({
-      runtimeProvider,
+      runtimeProvider: effectiveRuntimeProvider,
       modelId: selectedCharacter?.modelId || selectedCharacter?.voiceModelId,
       voiceModelId: selectedCharacter?.voiceModelId || selectedCharacter?.modelId,
       voiceName: selectedCharacter?.voiceName,
@@ -3387,10 +4471,15 @@ function App() {
       systemPrompt: selectedCharacter?.systemPrompt,
       greetingText: selectedCharacter?.greetingText,
       sessionContextText: bootstrapText,
-      shouldSendGreeting: true,
+      shouldSendGreeting: shouldSendSessionGreeting,
       captureUserAudio: usesLiveInput,
       voiceGatewayUrl: selectedCharacter?.voiceGatewayUrl || '',
       outputAudioTranscription: selectedCharacter?.outputAudioTranscription !== false,
+      voiceInteractionTuning: {
+        pauseMs: testerSettings.pauseMs,
+        firstReplySentences: testerSettings.firstReplySentences,
+        memoryTurnCount: testerSettings.memoryTurnCount,
+      },
       conversationSessionId: nextConversationSessionId,
     });
   };
@@ -3406,9 +4495,13 @@ function App() {
     recordConversationAction('voice.input.closed', {
       conversationSessionId: currentConversationSessionId,
       inputSessionId: currentConversationSessionId
-        ? `${usesLiveInput ? 'gemini-live-input' : 'server-stt'}:${currentConversationSessionId}`
+        ? `${usesYandexRealtimeRuntime
+          ? 'yandex-realtime'
+          : (usesYandexLegacyRuntime ? 'yandex-local-vad' : (usesLiveInput ? 'gemini-live-input' : 'server-stt'))}:${currentConversationSessionId}`
         : '',
-      mode: usesLiveInput ? 'gemini-live-input' : 'server-stt',
+      mode: usesYandexRealtimeRuntime
+        ? 'yandex-realtime'
+        : (usesYandexLegacyRuntime ? 'yandex-local-vad' : (usesLiveInput ? 'gemini-live-input' : 'server-stt')),
     });
     manualStopRef.current = true;
     cancelPendingBrowserWork('manual-stop');
@@ -3427,6 +4520,9 @@ function App() {
       }).catch(() => {});
     }
     disconnectServerStt();
+    geminiSession.disconnect?.();
+    yandexSession.disconnect?.();
+    yandexRealtimeSession.disconnect?.();
     disconnect();
     setInitialized(false);
     setLiveInputTranscript('');
@@ -3496,6 +4592,9 @@ function App() {
       speechStabilityProfile: savedConfig?.speechStabilityProfile,
       prayerReadMode: savedConfig?.prayerReadMode,
       safeSpeechFlowEnabled: savedConfig?.safetySwitches?.safeSpeechFlowEnabled !== false,
+      pauseMs: testerSettings.pauseMs,
+      firstReplySentences: testerSettings.firstReplySentences,
+      memoryTurnCount: testerSettings.memoryTurnCount,
     });
 
     if (status === 'connected' && nextSignature && nextSignature !== appliedSessionSignature) {
@@ -3946,6 +5045,7 @@ function App() {
     recordConversationAction,
     requestActiveBrowserContext,
     requestClientInlineContext,
+    selectedCharacter?.browserPanelMode,
     selectedCharacter?.id,
     sendBrowserClientEvent,
     setBrowserFlowPhase,
@@ -3972,7 +5072,7 @@ function App() {
     const hasClientInlineSession = usesClientInlinePanel && Boolean(browserPanelRef.current?.clientUrl);
     const hasActiveBrowserSession = Boolean(activeBrowserSessionIdRef.current);
     const hasAnyBrowserSession = hasActiveBrowserSession || hasClientInlineSession;
-    let intentType = classifyTranscriptIntent(normalized);
+    let intentType = classifyTranscriptIntent(normalized, { hasActiveBrowserSession: hasAnyBrowserSession });
     if (hasAnyBrowserSession && parseImplicitBrowserActionRequest(normalized)) {
       intentType = 'browser_action';
     }
@@ -4335,26 +5435,35 @@ function App() {
       }
 
       const resolvedTraceId = intent.traceId || traceId;
+      const useClientInlineTransport = usesClientInlinePanel
+        && !shouldPreferRemoteBrowserTransport(intent.url || '', selectedCharacter?.browserPanelMode || 'remote');
       lastBrowserCommandRef.current = { key: dedupeKey, transcript: normalized, timestamp: now };
       browserSpeechGuardUntilRef.current = now + 6000;
       setBrowserFlowPhase('opening');
       setBrowserPanel((current) => ({
         ...buildClientPanelState(intent, current, {
           status: 'loading',
-          note: usesClientInlinePanel ? 'Открываю сайт внизу.' : 'Открываю сайт у пользователя.',
-          browserPanelMode: usesClientInlinePanel ? 'client-inline' : 'remote',
+          note: useClientInlineTransport ? 'Открываю сайт внизу.' : 'Открываю сайт у пользователя.',
+          browserPanelMode: useClientInlineTransport ? 'client-inline' : 'remote',
         }),
         error: null,
       }));
+      enqueueAssistantPrompt(buildBrowserOpeningAckPrompt(normalized), {
+        source: 'browser.open.ack',
+        dedupeKey: `browser-open-ack:${normalizeTranscriptKey(normalized)}:${normalizeTranscriptKey(intent.url || '')}`,
+        requestId: effectiveRequestId,
+        priority: 'high',
+        finalizeRequestOnCommit: false,
+      });
       sendBrowserClientEvent('browser.opening', {
         requestId,
         traceId: resolvedTraceId,
         url: intent.url || '',
         sourceType: intent.sourceType || intent.type || '',
-        browserPanelMode: usesClientInlinePanel ? 'client-inline' : 'remote',
+        browserPanelMode: useClientInlineTransport ? 'client-inline' : 'remote',
       });
 
-      if (usesClientInlinePanel) {
+      if (useClientInlineTransport) {
         setActiveBrowserSessionId('');
         activeBrowserSessionIdRef.current = '';
         armPendingClientPanelLoad({
@@ -4745,7 +5854,17 @@ function App() {
                 '--stage-border': activeBackground.border,
               }}
             >
-              <Canvas key={avatarRenderKey} camera={avatarFrame.camera} dpr={[1, 2]} gl={{ antialias: true, alpha: true, powerPreference: 'high-performance' }}>
+              <Canvas
+                key={avatarRenderKey}
+                camera={avatarFrame.camera}
+                dpr={[1, 2]}
+                gl={{ antialias: true, alpha: true, powerPreference: 'high-performance' }}
+                onCreated={({ scene, camera, gl }) => {
+                  if (typeof window !== 'undefined') {
+                    window.__ALESIA_AVATAR_DEBUG__ = { scene, camera, gl };
+                  }
+                }}
+              >
                 {activeBackground.canvasBackground && (
                   <color attach="background" args={[activeBackground.canvasBackground]} />
                 )}
@@ -4761,6 +5880,7 @@ function App() {
                         modelUrl={avatarModelUrl}
                         instanceId={avatarInstanceId}
                         scale={avatarFrame.scale}
+                        focusYRatio={avatarFrame.focusYRatio}
                         idleMotion={avatarFrame.idleMotion}
                         idleMotionProfile={avatarFrame.idleMotionProfile}
                       />
@@ -4819,6 +5939,32 @@ function App() {
         onClose={() => setSettingsOpen(false)}
         onSave={handleSaveSettings}
         saving={saving}
+      />
+      <TesterDrawer
+        isOpen={testerOpen}
+        onToggle={() => setTesterOpen((current) => !current)}
+        settings={testerSettings}
+        onSettingsChange={(nextPatch) => {
+          setTesterSettings((current) => normalizeTesterSettings({
+            ...current,
+            ...nextPatch,
+          }));
+        }}
+        status={{
+          connection: status,
+          assistantState: assistantOutputState.state,
+          bufferedAudioMs: Number(audioPlayer?.getBufferedMs?.() || 0),
+          partialTranscript: testerSettings.showPartialTranscript ? liveInputTranscript : '',
+          lastUserTurn: lastRecognizedTurn,
+          lastAssistantTurn: assistantOutputState.lastText || lastAssistantTurnRef.current?.text || '',
+          lastIssue: testerSettings.showDropReasons ? lastIssueText : '',
+        }}
+        events={testerEvents}
+        onClearEvents={() => {
+          testerEventsRef.current = [];
+          setTesterEvents([]);
+          setLastIssueText('');
+        }}
       />
     </div>
   );

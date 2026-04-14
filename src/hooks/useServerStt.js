@@ -3,15 +3,17 @@ import { downsampleBuffer, float32ToBase64 } from '../utils/audioConverter';
 
 const LOCAL_STT_VOICE_RMS_THRESHOLD = 0.015;
 const LOCAL_STT_FINAL_DEDUP_MS = 3200;
+const DEFAULT_BACKEND_WS_BASE =
+  String(import.meta.env?.VITE_BACKEND_WS_BASE || '').trim().replace(/\/+$/, '');
 
 function defaultBackendUrl(conversationSessionId = '') {
-  if (typeof window === 'undefined') return `ws://localhost:3001/api/stt/session/${conversationSessionId}/stream`;
+  if (DEFAULT_BACKEND_WS_BASE) {
+    return `${DEFAULT_BACKEND_WS_BASE}/api/stt/session/${conversationSessionId}/stream`;
+  }
 
-  const isLocal =
-    window.location.hostname === 'localhost' ||
-    window.location.hostname === '127.0.0.1';
-
-  if (isLocal) return `ws://localhost:3001/api/stt/session/${conversationSessionId}/stream`;
+  if (typeof window === 'undefined') {
+    return `ws://127.0.0.1:8200/api/stt/session/${conversationSessionId}/stream`;
+  }
 
   const wsProtocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
   return `${wsProtocol}://${window.location.host}/api/stt/session/${conversationSessionId}/stream`;
@@ -32,10 +34,12 @@ export function useServerStt({
   const streamRef = useRef(null);
   const audioContextRef = useRef(null);
   const processorRef = useRef(null);
+  const sourceRef = useRef(null);
   const userVolumeRef = useRef(0);
   const partialRef = useRef('');
   const speakingRef = useRef(false);
   const lastFinalEmitRef = useRef({ key: '', timestamp: 0 });
+  const lifecycleTokenRef = useRef(0);
   const onPartialRef = useRef(onPartialTranscript);
   const onFinalRef = useRef(onFinalTranscript);
   const onSpeechStartRef = useRef(onSpeechStart);
@@ -52,22 +56,16 @@ export function useServerStt({
     onPartialRef.current?.('');
   }, []);
 
-  const disconnect = useCallback(() => {
-    speakingRef.current = false;
-    clearPartial();
-
-    if (wsRef.current) {
-      try {
-        wsRef.current.close();
-      } catch {
-        // Ignore close failures during teardown.
-      }
-      wsRef.current = null;
-    }
-
+  const releaseAudioResources = useCallback(() => {
     if (processorRef.current) {
+      processorRef.current.port?.onmessage && (processorRef.current.port.onmessage = null);
       processorRef.current.disconnect?.();
       processorRef.current = null;
+    }
+
+    if (sourceRef.current) {
+      sourceRef.current.disconnect?.();
+      sourceRef.current = null;
     }
 
     if (audioContextRef.current) {
@@ -76,13 +74,43 @@ export function useServerStt({
     }
 
     if (streamRef.current) {
-      streamRef.current.getTracks().forEach((track) => track.stop());
+      streamRef.current.getTracks().forEach((track) => {
+        try {
+          track.enabled = false;
+          track.stop();
+        } catch {
+          // Ignore per-track teardown failures.
+        }
+      });
       streamRef.current = null;
     }
+  }, []);
 
+  const disconnect = useCallback(() => {
+    lifecycleTokenRef.current += 1;
+    speakingRef.current = false;
+    clearPartial();
+
+    if (wsRef.current) {
+      try {
+        if (wsRef.current.readyState === WebSocket.OPEN) {
+          wsRef.current.send(JSON.stringify({ type: 'stop' }));
+        }
+      } catch {
+        // Ignore stop-send failures during teardown.
+      }
+      try {
+        wsRef.current.close();
+      } catch {
+        // Ignore close failures during teardown.
+      }
+      wsRef.current = null;
+    }
+
+    releaseAudioResources();
     userVolumeRef.current = 0;
     setStatus('idle');
-  }, [clearPartial]);
+  }, [clearPartial, releaseAudioResources]);
 
   useEffect(() => {
     if (!enabled || !conversationSessionId) {
@@ -93,9 +121,13 @@ export function useServerStt({
     let workletNode = null;
 
     const connect = async () => {
+      const lifecycleToken = lifecycleTokenRef.current + 1;
+      lifecycleTokenRef.current = lifecycleToken;
       setStatus('connecting');
       setError(null);
       lastFinalEmitRef.current = { key: '', timestamp: 0 };
+
+      const isStale = () => cancelled || lifecycleTokenRef.current !== lifecycleToken;
 
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
@@ -106,17 +138,32 @@ export function useServerStt({
             noiseSuppression: true,
           },
         });
-        if (cancelled) {
+        if (isStale()) {
           stream.getTracks().forEach((track) => track.stop());
           return;
         }
         streamRef.current = stream;
 
         const audioContext = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 'interactive' });
+        if (isStale()) {
+          stream.getTracks().forEach((track) => track.stop());
+          audioContext.close().catch(() => {});
+          return;
+        }
         audioContextRef.current = audioContext;
 
         const source = audioContext.createMediaStreamSource(stream);
+        sourceRef.current = source;
         const ws = new WebSocket(defaultBackendUrl(encodeURIComponent(conversationSessionId)));
+        if (isStale()) {
+          try {
+            ws.close();
+          } catch {
+            // Ignore stale websocket close failures.
+          }
+          releaseAudioResources();
+          return;
+        }
         wsRef.current = ws;
 
         const handleAudioBuffer = (buffer) => {
@@ -144,6 +191,10 @@ export function useServerStt({
 
         try {
           await audioContext.audioWorklet.addModule('/mic-processor.js');
+          if (isStale()) {
+            releaseAudioResources();
+            return;
+          }
           workletNode = new AudioWorkletNode(audioContext, 'mic-processor');
           processorRef.current = workletNode;
           workletNode.port.onmessage = (event) => {
@@ -164,9 +215,16 @@ export function useServerStt({
 
         if (audioContext.state === 'suspended') {
           await audioContext.resume();
+          if (isStale()) {
+            releaseAudioResources();
+            return;
+          }
         }
 
         ws.onopen = () => {
+          if (isStale()) {
+            return;
+          }
           ws.send(JSON.stringify({
             type: 'start',
             language,
@@ -180,6 +238,9 @@ export function useServerStt({
               : JSON.parse(event.data);
 
             if (payload.type === 'ready') {
+              if (isStale()) {
+                return;
+              }
               setStatus('connected');
               return;
             }
@@ -226,6 +287,10 @@ export function useServerStt({
         };
 
         ws.onerror = () => {
+          if (isStale()) {
+            return;
+          }
+          releaseAudioResources();
           setStatus('error');
           setError('Ошибка подключения к STT');
         };
@@ -233,14 +298,18 @@ export function useServerStt({
         ws.onclose = () => {
           speakingRef.current = false;
           clearPartial();
-          if (!cancelled) {
+          releaseAudioResources();
+          if (!isStale()) {
             setStatus('idle');
           }
         };
       } catch (connectError) {
-        console.error('STT connect failed', connectError);
-        setStatus('error');
-        setError(connectError?.message || 'Не удалось подключить STT');
+        if (!isStale()) {
+          console.error('STT connect failed', connectError);
+          releaseAudioResources();
+          setStatus('error');
+          setError(connectError?.message || 'Не удалось подключить STT');
+        }
       }
     };
 

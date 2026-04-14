@@ -2,7 +2,7 @@
 import { base64ToFloat32Array, downsampleBuffer, float32ToBase64 } from '../utils/audioConverter';
 
 const DEFAULT_RUNTIME_CONFIG = {
-  runtimeProvider: 'yandex-full',
+  runtimeProvider: 'yandex-full-legacy',
   modelId: 'yandexgpt-lite/latest',
   ttsVoiceName: 'ermil',
   systemPrompt: '',
@@ -19,6 +19,7 @@ const DEFAULT_CALLBACKS = {
   onInputTranscription: null,
   onInputTranscriptionCommit: null,
   onAssistantTurnStart: null,
+  onAssistantAudioStart: null,
   onAssistantTurnCommit: null,
   onAssistantTurnCancel: null,
   onAssistantInterrupted: null,
@@ -27,13 +28,17 @@ const DEFAULT_CALLBACKS = {
 
 const DEFAULT_BACKEND_HTTP_BASE =
   String(import.meta.env?.VITE_BACKEND_HTTP_BASE || '').trim().replace(/\/+$/, '');
-const LOCAL_VAD_START_THRESHOLD = 0.02;
-const LOCAL_VAD_CONTINUE_THRESHOLD = 0.012;
-const LOCAL_VAD_END_SILENCE_MS = 880;
-const LOCAL_VAD_MIN_UTTERANCE_MS = 320;
-const LOCAL_VAD_MAX_UTTERANCE_MS = 12000;
+const LOCAL_VAD_START_THRESHOLD = 0.028;
+const LOCAL_VAD_CONTINUE_THRESHOLD = 0.018;
+const LOCAL_VAD_END_SILENCE_MS = 620;
+const LOCAL_VAD_MIN_UTTERANCE_MS = 220;
+const LOCAL_VAD_MAX_UTTERANCE_MS = 9000;
 const PCM_TARGET_RATE = 16000;
 const YANDEX_TTS_RATE = 48000;
+const BOT_SPEECH_GUARD_MIN_MS = 2200;
+const BOT_SPEECH_GUARD_MAX_MS = 12000;
+const BOT_SPEECH_BUFFER_GUARD_MS = 260;
+const BOT_SPEECH_VOLUME_GUARD = 0.02;
 
 function defaultBackendHttpUrl(pathname) {
   if (DEFAULT_BACKEND_HTTP_BASE) {
@@ -82,6 +87,7 @@ export function useYandexVoiceSession(audioPlayer, runtimeConfig = DEFAULT_RUNTI
   });
   const lifecycleTokenRef = useRef(0);
   const currentTurnAbortRef = useRef(null);
+  const botSpeechGuardUntilRef = useRef(0);
 
   useEffect(() => {
     runtimeConfigRef.current = { ...DEFAULT_RUNTIME_CONFIG, ...runtimeConfig };
@@ -128,12 +134,21 @@ export function useYandexVoiceSession(audioPlayer, runtimeConfig = DEFAULT_RUNTI
     };
   }, []);
 
+  const extendBotSpeechGuard = useCallback((durationMs = 0) => {
+    const normalizedDuration = Number.isFinite(durationMs) ? Math.max(0, durationMs) : 0;
+    const nextGuardMs = Math.min(
+      BOT_SPEECH_GUARD_MAX_MS,
+      Math.max(BOT_SPEECH_GUARD_MIN_MS, Math.round(normalizedDuration + 900)),
+    );
+    botSpeechGuardUntilRef.current = Date.now() + nextGuardMs;
+  }, []);
+
   const cancelAssistantOutput = useCallback(() => {
     currentTurnAbortRef.current?.abort?.();
     audioPlayer.stop?.();
     callbacksRef.current.onAssistantInterrupted?.();
     callbacksRef.current.onAssistantTurnCancel?.({ text: '', interrupted: true });
-  }, [audioPlayer]);
+  }, [audioPlayer, extendBotSpeechGuard]);
 
   const finalizeSpeechCapture = useCallback(async (sampleRate) => {
     const speechState = speechStateRef.current;
@@ -213,6 +228,20 @@ export function useYandexVoiceSession(audioPlayer, runtimeConfig = DEFAULT_RUNTI
 
         const handleAudioBuffer = (buffer) => {
           const now = Date.now();
+          const botBufferedMs = Number(audioPlayer?.getBufferedMs?.() || 0);
+          const botVolume = Number(audioPlayer?.getVolume?.() || 0);
+          const botSpeechActive = now < botSpeechGuardUntilRef.current
+            || botBufferedMs > BOT_SPEECH_BUFFER_GUARD_MS
+            || botVolume > BOT_SPEECH_VOLUME_GUARD;
+
+          if (botSpeechActive) {
+            userVolumeRef.current = 0;
+            if (speechStateRef.current.active || speechStateRef.current.chunks.length) {
+              resetSpeechState();
+            }
+            return;
+          }
+
           let sum = 0;
           for (let index = 0; index < buffer.length; index += 1) {
             sum += buffer[index] * buffer[index];
@@ -261,12 +290,15 @@ export function useYandexVoiceSession(audioPlayer, runtimeConfig = DEFAULT_RUNTI
           source.connect(workletNode);
         } catch {
           const fallbackNode = audioContext.createScriptProcessor(1024, 1, 1);
+          const silentGain = audioContext.createGain();
+          silentGain.gain.value = 0;
           fallbackNode.onaudioprocess = (event) => {
             handleAudioBuffer(event.inputBuffer.getChannelData(0));
           };
           processorRef.current = fallbackNode;
           source.connect(fallbackNode);
-          fallbackNode.connect(audioContext.destination);
+          fallbackNode.connect(silentGain);
+          silentGain.connect(audioContext.destination);
         }
 
         if (audioContext.state === 'suspended') {
@@ -289,6 +321,7 @@ export function useYandexVoiceSession(audioPlayer, runtimeConfig = DEFAULT_RUNTI
   const disconnect = useCallback(() => {
     lifecycleTokenRef.current += 1;
     currentTurnAbortRef.current?.abort?.();
+    botSpeechGuardUntilRef.current = 0;
     resetSpeechState();
     releaseAudioResources();
     audioPlayer.stop?.();
@@ -338,7 +371,13 @@ export function useYandexVoiceSession(audioPlayer, runtimeConfig = DEFAULT_RUNTI
       const assistantText = normalizeText(payload?.text || '');
       if (payload?.audioBase64) {
         const pcm = base64ToFloat32Array(payload.audioBase64);
-        audioPlayer.addChunk?.(pcm, Number(payload.sampleRateHertz || YANDEX_TTS_RATE));
+        const sampleRateHertz = Number(payload.sampleRateHertz || YANDEX_TTS_RATE);
+        const playbackDurationMs = sampleRateHertz > 0
+          ? Math.round((pcm.length / sampleRateHertz) * 1000)
+          : 0;
+        extendBotSpeechGuard(playbackDurationMs);
+        callbacksRef.current.onAssistantAudioStart?.({ responseId: '' });
+        audioPlayer.addChunk?.(pcm, sampleRateHertz);
       }
       callbacksRef.current.onAssistantTurnCommit?.({
         text: assistantText,

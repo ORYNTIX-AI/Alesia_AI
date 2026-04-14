@@ -33,10 +33,12 @@ export const SUPPORTED_VOICES = [
   { name: 'Zubenelgenubi', gender: 'male' },
 ];
 export const SUPPORTED_VOICE_NAMES = SUPPORTED_VOICES.map((voice) => voice.name);
-export const DEFAULT_AVATAR_MODEL_URL = 'avatars/alesya.glb';
-export const BATYUSHKA_AVATAR_MODEL_URL = 'avatars/nikolay.glb';
+export const DEFAULT_AVATAR_MODEL_URL = 'avatars/alesya.webp.glb';
+export const BATYUSHKA_AVATAR_MODEL_URL = 'avatars/nikolay.webp.glb';
 export const DEFAULT_RUNTIME_PROVIDER = 'gemini-live';
-export const YANDEX_RUNTIME_PROVIDER = 'yandex-full';
+export const YANDEX_REALTIME_RUNTIME_PROVIDER = 'yandex-realtime';
+export const YANDEX_LEGACY_RUNTIME_PROVIDER = 'yandex-full-legacy';
+export const YANDEX_RUNTIME_PROVIDER = YANDEX_LEGACY_RUNTIME_PROVIDER;
 export const SUPPORTED_SPEECH_STABILITY_PROFILES = ['legacy', 'balanced', 'presentation', 'strict'];
 export const DEFAULT_SPEECH_STABILITY_PROFILE = 'balanced';
 export const SUPPORTED_PRAYER_READ_MODES = ['knowledge-only', 'hybrid', 'free'];
@@ -44,6 +46,13 @@ export const DEFAULT_PRAYER_READ_MODE = 'knowledge-only';
 export const DEFAULT_SAFETY_SWITCHES = {
   safeSpeechFlowEnabled: true,
 };
+export const DEFAULT_YANDEX_ENABLED_TOOLS = [
+  'file_search',
+  'open_site',
+  'view_page',
+  'extract_page_context',
+  'summarize_visible_page',
+];
 
 export const DEFAULT_SYSTEM_PROMPT = `Ты Алеся, голосовой консультант туроператора "АлатанТур" (Беларусь). Говори только на русском языке.
 
@@ -61,23 +70,31 @@ export const DEFAULT_SYSTEM_PROMPT = `Ты Алеся, голосовой кон
 - Помогать с выбором туров, визовыми вопросами, направлениями и следующими шагами.
 - Уточнять детали клиента короткими вопросами (даты, бюджет, состав путешественников).
 - В сомнительных случаях прямо говорить о лимитах и предлагать безопасную альтернативу.`;
-export const BATYUSHKA_SYSTEM_PROMPT = `Ты Николай, голосовой помощник AR-Fox для прихожан и церковного туризма по Беларуси. Говори только на русском языке.
+export const BATYUSHKA_SYSTEM_PROMPT = `Ты Николай, голосовой помощник для прихожан и церковных вопросов в Беларуси. Всегда отвечай только на русском языке.
 
-Главные правила:
-1. Отвечай коротко: 1-3 предложения.
-2. Тон спокойный, уважительный, без сленга.
-3. Не обсуждай политику.
-4. Не выдумывай факты.
-5. Не утверждай, что выполнил внешнее действие, если нет подтвержденного системного события.
-6. Если просят действие вне чата, честно объясни ограничение и предложи следующий шаг.
+Core persona:
+1. Говори тепло, спокойно, уважительно и уверенно.
+2. Отвечай по-человечески и коротко. Обычно 1-2 короткие фразы, если пользователь не просит длинный текст.
+3. Не повторяй вопрос пользователя и не начинай ответ с пустых вводных фраз.
+4. Если данных мало, скажи это прямо одной короткой фразой.
+5. Не утверждай, что внешнее действие уже выполнено, если нет подтвержденного системного результата.
 
-Религиозные темы:
-- Религиозные и церковные вопросы разрешены.
-- Можно объяснять кратко про храмы, приходы, богослужения, митрополита Вениамина и церковные маршруты по Беларуси.
+Church scope:
+1. Можно и нужно помогать по храмам, приходам, службам, молитвам, церковным маршрутам и митрополиту Вениамину.
+2. На обычные церковные вопросы отвечай прямо, без лишних отказов и общих ограничений.
+3. Если пользователь просит прочитать молитву по подтвержденному источнику, читай цельно и естественно, не разрывая текст неуместными комментариями.
 
-Манера речи:
-- Говори чуть медленнее обычного, уверенно и ровно.
-- Делай естественные короткие паузы между фразами.`;
+Tool policy:
+1. Используй знания и инструменты только когда это реально помогает ответить точнее.
+2. Browser tools вызывай только если пользователь явно просит открыть сайт, посмотреть страницу или перейти по церковному ресурсу.
+3. Если уже есть подтвержденный контекст страницы или знания, сначала отвечай по нему, а не открывай сайт заново.
+
+Voice behavior:
+1. Держи одну мысль за раз.
+2. Не перечисляй длинные списки устно без явной просьбы.
+3. При неполном распознавании коротко попроси повторить.
+4. Если вопрос по-настоящему политический, откажись один раз коротко и верни разговор к практической помощи.`;
+
 export const ALESYA_NEO_SYSTEM_PROMPT = `Ты Алеся Neo, цифровой консультант ОАО «Пинский мясокомбинат», созданный командой АЭРФОКС для презентаций на проходной, в магазине и на выставках. Говори только на русском языке.
 
 Главные правила:
@@ -113,13 +130,24 @@ export function createCharacterRuntimeConfig(overrides = {}) {
     runtimeProvider,
     modelId,
     voiceModelId: modelId,
-    liveInputEnabled: runtimeProvider === DEFAULT_RUNTIME_PROVIDER
+    liveInputEnabled: runtimeProvider === DEFAULT_RUNTIME_PROVIDER || runtimeProvider === YANDEX_REALTIME_RUNTIME_PROVIDER
       ? Boolean(overrides.liveInputEnabled)
       : false,
     voiceGatewayUrl: overrides.voiceGatewayUrl || '',
     ttsVoiceName: overrides.ttsVoiceName || overrides.voiceName || '',
     sttProfile: overrides.sttProfile || 'general',
     outputAudioTranscription: overrides.outputAudioTranscription !== false,
+    vectorStoreId: String(overrides.vectorStoreId || '').trim(),
+    enabledTools: Array.isArray(overrides.enabledTools)
+      ? overrides.enabledTools.map((tool) => String(tool).trim()).filter(Boolean)
+      : [],
+    webSearchEnabled: overrides.webSearchEnabled === true,
+    maxToolResults: Math.max(1, Number(overrides.maxToolResults || 4) || 4),
+    fallbackRuntimeProvider: String(
+      overrides.fallbackRuntimeProvider
+      || (runtimeProvider === YANDEX_REALTIME_RUNTIME_PROVIDER ? YANDEX_LEGACY_RUNTIME_PROVIDER : '')
+      || '',
+    ).trim(),
   };
 }
 
@@ -137,13 +165,18 @@ const defaultBatyushka2Runtime = createCharacterRuntimeConfig({
 });
 
 const defaultBatyushka3Runtime = createCharacterRuntimeConfig({
-  runtimeProvider: YANDEX_RUNTIME_PROVIDER,
-  modelId: 'yandexgpt-lite/latest',
-  liveInputEnabled: false,
+  runtimeProvider: YANDEX_REALTIME_RUNTIME_PROVIDER,
+  modelId: 'speech-realtime-250923',
+  liveInputEnabled: true,
   voiceName: 'ermil',
   ttsVoiceName: 'ermil',
   sttProfile: 'general',
   outputAudioTranscription: false,
+  vectorStoreId: process.env.YANDEX_BATYUSHKA_VECTOR_STORE_ID || '',
+  enabledTools: DEFAULT_YANDEX_ENABLED_TOOLS,
+  webSearchEnabled: false,
+  maxToolResults: 4,
+  fallbackRuntimeProvider: YANDEX_LEGACY_RUNTIME_PROVIDER,
 });
 
 export const DEFAULT_KNOWLEDGE_REFRESH_POLICY = {

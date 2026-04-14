@@ -2,11 +2,13 @@ import dns from 'dns/promises';
 import https from 'https';
 import net from 'net';
 import { chromium } from 'playwright';
+import { SocksClient } from 'socks';
 import { logRuntime } from './runtimeLogger.js';
 
 const MAX_READER_TEXT_LENGTH = 4000;
 const DEFAULT_TIMEOUT_MS = 15000;
 const GEMINI_REQUEST_TIMEOUT_MS = 6000;
+const DIRECT_PAGE_CONTEXT_TIMEOUT_MS = 8000;
 const parsedSiteResolutionTimeoutMs = Number.parseInt(process.env.SITE_RESOLUTION_TIMEOUT_MS || '', 10);
 const SITE_RESOLUTION_TIMEOUT_MS = Number.isFinite(parsedSiteResolutionTimeoutMs) && parsedSiteResolutionTimeoutMs >= 4000
   ? parsedSiteResolutionTimeoutMs
@@ -26,6 +28,11 @@ const VIEWPORT_HEIGHT = 900;
 const BROWSER_VIEW_REFRESH_MS = 9000;
 const MAX_ACTIONABLE_ELEMENTS = 40;
 const MAX_ACTION_LABEL_LENGTH = 120;
+const BROWSER_PROXY_MODE = normalizeWhitespace(process.env.BROWSER_PROXY_MODE || 'direct').toLowerCase();
+const parsedBrowserOriginProbeTimeoutMs = Number.parseInt(process.env.BROWSER_ORIGIN_PROBE_TIMEOUT_MS || '', 10);
+const BROWSER_ORIGIN_PROBE_TIMEOUT_MS = Number.isFinite(parsedBrowserOriginProbeTimeoutMs) && parsedBrowserOriginProbeTimeoutMs >= 500
+  ? parsedBrowserOriginProbeTimeoutMs
+  : 2500;
 const parsedBrowserIdleTimeoutMs = Number.parseInt(process.env.BROWSER_IDLE_TIMEOUT_MS || '', 10);
 const BROWSER_IDLE_TIMEOUT_MS = Number.isFinite(parsedBrowserIdleTimeoutMs) && parsedBrowserIdleTimeoutMs >= 0
   ? parsedBrowserIdleTimeoutMs
@@ -61,6 +68,7 @@ let geminiApiKey = '';
 let geminiAgent = null;
 let geminiModel = process.env.BROWSER_RESOLVER_MODEL || 'gemini-3-flash-preview';
 const siteResolutionCache = new Map();
+let browserProxyBridgePromise = null;
 
 export function configureBrowserController({ apiKey, agent, model } = {}) {
   geminiApiKey = String(apiKey || '');
@@ -504,6 +512,23 @@ function isTriviallyGenericSiteQuery(siteQuery) {
     'посмотри',
     'найди',
     'найти',
+    'какой',
+    'какая',
+    'какое',
+    'какие',
+    'какойнибудь',
+    'какой-нибудь',
+    'нибудь',
+    'любой',
+    'любая',
+    'любое',
+    'любые',
+    'любую',
+    'чтонибудь',
+    'что-нибудь',
+    'что-то',
+    'какой-то',
+    'какойто',
   ]);
 
   const meaningfulTokens = normalizeWhitespace(siteQuery)
@@ -564,9 +589,10 @@ async function resolveSiteByDomainGuess(siteQuery) {
 
 function decodeHtmlEntities(input) {
   return String(input || '')
+    .replace(/&nbsp;/gi, ' ')
     .replace(/&amp;/g, '&')
     .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, '\'')
+    .replace(/&#39;|&apos;/gi, '\'')
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>');
 }
@@ -661,6 +687,7 @@ function scoreSearchCandidates(siteQuery, transcript, candidates = []) {
       const baseScore = scoreResolvedCandidate(siteQuery, transcript, candidate.title, candidate.url);
       const hostScore = scoreResolvedCandidate(siteQuery, transcript, '', candidate.url);
       let penalty = 0;
+      const candidateText = `${candidate.title || ''} ${candidate.url || ''}`.toLowerCase();
 
       try {
         const parsed = new URL(candidate.url);
@@ -676,6 +703,10 @@ function scoreSearchCandidates(siteQuery, transcript, candidates = []) {
         }
       } catch {
         penalty += 0.2;
+      }
+
+      if (/(как правильно|правописан|пишется|орфограф|ударени|склонени)/i.test(candidateText)) {
+        penalty += 0.34;
       }
 
       const score = Number(Math.max(0, Math.min(1, (hostScore * 0.72) + (baseScore * 0.28) - penalty)).toFixed(3));
@@ -1202,6 +1233,58 @@ function extractSpokenDomain(transcript) {
   return candidates.at(-1);
 }
 
+function resolveKnownChurchSiteFallback(transcript) {
+  const normalized = normalizeWhitespace(transcript).toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+  if (
+    normalized.includes('church.by')
+    || normalized.includes('сайт церкви')
+    || normalized.includes('церкви беларуси')
+    || normalized.includes('церковь беларуси')
+    || normalized.includes('белорусская православная церковь')
+    || normalized.includes('православная церковь беларуси')
+    || normalized.includes('сайт белорусской православной церкви')
+    || normalized.includes('бпц')
+    || normalized.includes('белорусск') && normalized.includes('православ')
+    || normalized.includes('минск') && normalized.includes('епарх')
+    || normalized.includes('церковный сайт')
+    || normalized.includes('православный сайт')
+    || normalized.includes('церковный ресурс')
+  ) {
+    return 'http://church.by/';
+  }
+  if (
+    normalized.includes('московск') && normalized.includes('патриархат')
+    || normalized.includes('патриархия')
+  ) {
+    return 'https://patriarchia.ru/';
+  }
+  if (normalized.includes('азбук') || normalized.includes('azbyka')) {
+    return 'https://azbyka.ru/';
+  }
+  if (normalized.includes('правмир') || normalized.includes('pravmir')) {
+    return 'https://www.pravmir.ru/';
+  }
+  return null;
+}
+
+function shouldUseChurchByDefaultForContext(contextHint = '') {
+  const normalized = normalizeWhitespace(contextHint).toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+  return (
+    normalized.includes('батюшк')
+    || normalized.includes('николай')
+    || normalized.includes('православ')
+    || normalized.includes('церков')
+    || normalized.includes('прихожан')
+  );
+}
+
+
 function extractUrlOrDomain(transcript) {
   const urlMatch = transcript.match(DIRECT_URL_REGEX);
   if (urlMatch) {
@@ -1654,11 +1737,16 @@ async function classifyTranscript(
   knowledgeSources = [],
   recentTurns = [],
 ) {
+  const rawTranscript = normalizeWhitespace(transcript);
+  if (/^RUNTIME_[A-Z_]+:/i.test(rawTranscript)) {
+    return { type: 'none', reason: 'runtime-system-prompt' };
+  }
+
   const normalizedSessionHistory = sanitizeSessionHistory(sessionHistory);
-  const normalizedInput = normalizeTranscriptForSiteLookup(transcript, knowledgeSources, normalizedSessionHistory);
+  const normalizedInput = normalizeTranscriptForSiteLookup(rawTranscript, knowledgeSources, normalizedSessionHistory);
   const normalized = normalizeWhitespace(normalizedInput.transcript);
   const lower = normalized.toLowerCase();
-  const directUrl = extractUrlOrDomain(normalized);
+  const directUrl = extractUrlOrDomain(normalized) || resolveKnownChurchSiteFallback(normalized);
   const searchQuery = stripCommandWords(normalized) || normalized;
   let siteLookupQuery = extractSiteLookupQuery(normalized) || searchQuery;
   if (normalizedInput.siteHint) {
@@ -1785,6 +1873,23 @@ async function classifyTranscript(
     const hasResolutionBudget = (reserveMs = 0) => getResolutionBudget() > reserveMs;
 
     if (isTriviallyGenericSiteQuery(siteLookupQuery)) {
+      if (shouldUseChurchByDefaultForContext(contextHint)) {
+        return {
+          type: 'direct-site',
+          query: 'church.by',
+          url: 'http://church.by/',
+          sourceType: 'character-default',
+          titleHint: 'church.by',
+          resolutionSource: 'character-default',
+          confidence: 0.62,
+          confidenceMargin: 0.62,
+          candidates: [{
+            title: 'Белорусская Православная Церковь',
+            url: 'http://church.by/',
+            score: 0.62,
+          }],
+        };
+      }
       return {
         type: 'unresolved-site',
         query: siteLookupQuery,
@@ -2152,6 +2257,16 @@ export async function closeBrowser() {
   }
 }
 
+export function cancelPendingBrowserOperations(reason = 'manual-cancel') {
+  activeRequestId += 1;
+  logRuntime('browser.request.cancelled', {
+    reason,
+    activeRequestId,
+    browserSessionId: activeBrowserSession?.id || '',
+    url: activeBrowserSession?.url || '',
+  });
+}
+
 function scheduleBrowserShutdown() {
   clearBrowserIdleTimer();
   if (!browserPromise || hasActiveSession()) {
@@ -2208,13 +2323,379 @@ function touchBrowserSession(session) {
   scheduleSessionCleanup();
 }
 
+function shouldUseBrowserProxy() {
+  return ['shared', 'proxy', 'always', 'browser'].includes(BROWSER_PROXY_MODE);
+}
+
+function getConfiguredProxy() {
+  if (!shouldUseBrowserProxy()) {
+    return null;
+  }
+
+  const host = normalizeWhitespace(process.env.PROXY_HOST || '');
+  const port = Number.parseInt(process.env.PROXY_PORT || '', 10);
+  if (!host || !Number.isFinite(port) || port <= 0) {
+    return null;
+  }
+
+  return {
+    scheme: normalizeWhitespace(process.env.PROXY_SCHEME || 'socks5h').toLowerCase(),
+    host,
+    port,
+    username: normalizeWhitespace(process.env.PROXY_USER || ''),
+    password: normalizeWhitespace(process.env.PROXY_PASS || ''),
+  };
+}
+
+async function probeOriginReachability(targetUrl, timeoutMs = BROWSER_ORIGIN_PROBE_TIMEOUT_MS) {
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(targetUrl);
+  } catch {
+    return { ok: false, reason: 'invalid_url' };
+  }
+
+  const port = Number(parsedUrl.port || (parsedUrl.protocol === 'http:' ? 80 : 443));
+  const hostname = parsedUrl.hostname;
+  if (!hostname || !Number.isFinite(port) || port <= 0) {
+    return { ok: false, reason: 'invalid_url' };
+  }
+
+  return await new Promise((resolve) => {
+    let settled = false;
+    const socket = net.createConnection({
+      host: hostname,
+      port,
+      timeout: Math.max(500, timeoutMs),
+    });
+
+    const finish = (result) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      socket.destroy();
+      resolve(result);
+    };
+
+    socket.once('connect', () => finish({ ok: true }));
+    socket.once('timeout', () => finish({ ok: false, reason: 'connect_timeout' }));
+    socket.once('error', (error) => finish({
+      ok: false,
+      reason: normalizeWhitespace(error?.code || error?.message || 'connect_error').toLowerCase(),
+    }));
+  });
+}
+
+function buildSocksReply(status, host = '0.0.0.0', port = 0) {
+  const normalizedPort = Number.isFinite(Number(port)) ? Number(port) : 0;
+  if (net.isIPv6(host)) {
+    const payload = Buffer.alloc(4 + 16 + 2);
+    payload[0] = 0x05;
+    payload[1] = status;
+    payload[2] = 0x00;
+    payload[3] = 0x04;
+    const parts = host.split(':');
+    const expanded = [];
+    for (const part of parts) {
+      if (!part) {
+        const missing = 8 - parts.filter(Boolean).length;
+        for (let index = 0; index <= missing; index += 1) {
+          expanded.push('0000');
+        }
+      } else {
+        expanded.push(part.padStart(4, '0'));
+      }
+    }
+    expanded.slice(0, 8).forEach((part, index) => {
+      payload.writeUInt16BE(Number.parseInt(part, 16) || 0, 4 + (index * 2));
+    });
+    payload.writeUInt16BE(Math.max(0, Math.min(65535, normalizedPort)), 20);
+    return payload;
+  }
+
+  if (net.isIPv4(host)) {
+    const payload = Buffer.alloc(10);
+    payload[0] = 0x05;
+    payload[1] = status;
+    payload[2] = 0x00;
+    payload[3] = 0x01;
+    host.split('.').slice(0, 4).forEach((part, index) => {
+      payload[4 + index] = Number.parseInt(part, 10) || 0;
+    });
+    payload.writeUInt16BE(Math.max(0, Math.min(65535, normalizedPort)), 8);
+    return payload;
+  }
+
+  const hostBuffer = Buffer.from(String(host || ''));
+  const payload = Buffer.alloc(5 + hostBuffer.length + 2);
+  payload[0] = 0x05;
+  payload[1] = status;
+  payload[2] = 0x00;
+  payload[3] = 0x03;
+  payload[4] = Math.min(255, hostBuffer.length);
+  hostBuffer.copy(payload, 5, 0, Math.min(255, hostBuffer.length));
+  payload.writeUInt16BE(Math.max(0, Math.min(65535, normalizedPort)), 5 + Math.min(255, hostBuffer.length));
+  return payload;
+}
+
+function parseSocksRequest(buffer) {
+  if (!Buffer.isBuffer(buffer) || buffer.length < 4) {
+    return null;
+  }
+
+  const atyp = buffer[3];
+  if (atyp === 0x01) {
+    if (buffer.length < 10) {
+      return null;
+    }
+    return {
+      host: `${buffer[4]}.${buffer[5]}.${buffer[6]}.${buffer[7]}`,
+      port: buffer.readUInt16BE(8),
+      bytesUsed: 10,
+    };
+  }
+
+  if (atyp === 0x03) {
+    if (buffer.length < 5) {
+      return null;
+    }
+    const hostLength = buffer[4];
+    const totalLength = 5 + hostLength + 2;
+    if (buffer.length < totalLength) {
+      return null;
+    }
+    return {
+      host: buffer.subarray(5, 5 + hostLength).toString('utf8'),
+      port: buffer.readUInt16BE(5 + hostLength),
+      bytesUsed: totalLength,
+    };
+  }
+
+  if (atyp === 0x04) {
+    if (buffer.length < 22) {
+      return null;
+    }
+    const segments = [];
+    for (let index = 0; index < 8; index += 1) {
+      segments.push(buffer.readUInt16BE(4 + (index * 2)).toString(16));
+    }
+    return {
+      host: segments.join(':'),
+      port: buffer.readUInt16BE(20),
+      bytesUsed: 22,
+    };
+  }
+
+  return { unsupported: true, bytesUsed: buffer.length };
+}
+
+function createBrowserProxyBridgeServer(proxyConfig) {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer((clientSocket) => {
+      let stage = 'greeting';
+      let buffer = Buffer.alloc(0);
+      let upstreamSocket = null;
+      let settled = false;
+
+      const cleanup = () => {
+        clientSocket.removeAllListeners('data');
+        clientSocket.removeAllListeners('error');
+        clientSocket.removeAllListeners('close');
+      };
+
+      const fail = (status = 0x01, error = null) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        if (error) {
+          logRuntime('browser.proxy.bridge.error', {
+            message: normalizeWhitespace(error?.message || String(error || '')),
+          }, 'error');
+        }
+        try {
+          clientSocket.write(buildSocksReply(status));
+        } catch {}
+        cleanup();
+        clientSocket.destroy();
+        upstreamSocket?.destroy();
+      };
+
+      const complete = async (host, port, remainingBuffer) => {
+        try {
+          const connection = await SocksClient.createConnection({
+            proxy: {
+              host: proxyConfig.host,
+              port: proxyConfig.port,
+              type: 5,
+              userId: proxyConfig.username || undefined,
+              password: proxyConfig.password || undefined,
+            },
+            command: 'connect',
+            destination: {
+              host,
+              port,
+            },
+            timeout: DEFAULT_TIMEOUT_MS,
+          });
+
+          if (settled) {
+            connection.socket.destroy();
+            return;
+          }
+
+          settled = true;
+          upstreamSocket = connection.socket;
+          clientSocket.write(buildSocksReply(0x00));
+          if (remainingBuffer?.length) {
+            upstreamSocket.write(remainingBuffer);
+          }
+          cleanup();
+          upstreamSocket.on('error', () => clientSocket.destroy());
+          upstreamSocket.on('close', () => clientSocket.destroy());
+          clientSocket.on('error', () => upstreamSocket.destroy());
+          clientSocket.on('close', () => upstreamSocket.destroy());
+          clientSocket.pipe(upstreamSocket);
+          upstreamSocket.pipe(clientSocket);
+        } catch (error) {
+          fail(0x05, error);
+        }
+      };
+
+      clientSocket.on('data', (chunk) => {
+        if (settled) {
+          return;
+        }
+
+        buffer = Buffer.concat([buffer, chunk]);
+
+        if (stage === 'greeting') {
+          if (buffer.length < 2) {
+            return;
+          }
+
+          const methodsLength = buffer[1];
+          if (buffer.length < 2 + methodsLength) {
+            return;
+          }
+
+          clientSocket.write(Buffer.from([0x05, 0x00]));
+          buffer = buffer.subarray(2 + methodsLength);
+          stage = 'request';
+        }
+
+        if (stage === 'request') {
+          if (buffer.length < 4) {
+            return;
+          }
+
+          if (buffer[0] !== 0x05 || buffer[1] !== 0x01) {
+            fail(0x07, new Error('Unsupported SOCKS command'));
+            return;
+          }
+
+          const request = parseSocksRequest(buffer);
+          if (!request) {
+            return;
+          }
+          if (request.unsupported) {
+            fail(0x08, new Error('Unsupported SOCKS address type'));
+            return;
+          }
+
+          const remainingBuffer = buffer.subarray(request.bytesUsed);
+          buffer = Buffer.alloc(0);
+          stage = 'connecting';
+          void complete(request.host, request.port, remainingBuffer);
+        }
+      });
+
+      clientSocket.on('error', () => {
+        upstreamSocket?.destroy();
+      });
+      clientSocket.on('close', () => {
+        upstreamSocket?.destroy();
+      });
+    });
+
+    server.once('error', (error) => {
+      browserProxyBridgePromise = null;
+      reject(error);
+    });
+
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address();
+      if (!address || typeof address === 'string') {
+        browserProxyBridgePromise = null;
+        reject(new Error('Failed to bind browser proxy bridge'));
+        return;
+      }
+
+      logRuntime('browser.proxy.bridge.ready', {
+        host: '127.0.0.1',
+        port: address.port,
+        upstreamHost: proxyConfig.host,
+        upstreamPort: proxyConfig.port,
+      });
+
+      resolve({
+        server,
+        endpoint: `socks5://127.0.0.1:${address.port}`,
+      });
+    });
+  });
+}
+
+async function getBrowserLaunchProxy() {
+  const proxyConfig = getConfiguredProxy();
+  if (!proxyConfig) {
+    return null;
+  }
+
+  if (!proxyConfig.scheme.startsWith('socks')) {
+    const launchScheme = proxyConfig.scheme.replace(/h$/, '') || 'http';
+    const proxy = {
+      server: `${launchScheme}://${proxyConfig.host}:${proxyConfig.port}`,
+    };
+    if (proxyConfig.username) {
+      proxy.username = proxyConfig.username;
+    }
+    if (proxyConfig.password) {
+      proxy.password = proxyConfig.password;
+    }
+    return proxy;
+  }
+
+  if (!proxyConfig.username && !proxyConfig.password) {
+    return {
+      server: `socks5://${proxyConfig.host}:${proxyConfig.port}`,
+    };
+  }
+
+  if (!browserProxyBridgePromise) {
+    browserProxyBridgePromise = createBrowserProxyBridgeServer(proxyConfig);
+  }
+
+  const bridge = await browserProxyBridgePromise;
+  return {
+    server: bridge.endpoint,
+  };
+}
+
 async function getBrowser() {
   clearBrowserIdleTimer();
   if (!browserPromise) {
-    browserPromise = chromium.launch({
+    const launchOptions = {
       headless: true,
       args: ['--disable-dev-shm-usage', '--no-sandbox', '--disable-gpu', '--mute-audio'],
-    }).then((browser) => {
+    };
+    const browserProxy = await getBrowserLaunchProxy();
+    if (browserProxy) {
+      launchOptions.proxy = browserProxy;
+    }
+
+    browserPromise = chromium.launch(launchOptions).then((browser) => {
       browserInstance = browser;
       browser.on('disconnected', () => resetBrowserState('playwright-browser-disconnected'));
       return browser;
@@ -2258,9 +2739,7 @@ function shouldRetryWithHttpFallback(url, error) {
     return false;
   }
 
-  return message.includes('err_connection_refused')
-    || message.includes('err_connection_reset')
-    || message.includes('err_ssl')
+  return message.includes('err_ssl')
     || message.includes('ssl')
     || message.includes('certificate');
 }
@@ -2563,6 +3042,81 @@ function buildSessionQueryAnswer(question, session) {
   };
 }
 
+function htmlToPlainText(html) {
+  return normalizeWhitespace(
+    decodeHtmlEntities(
+      String(html || '')
+        .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ')
+        .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ')
+        .replace(/<noscript\b[^>]*>[\s\S]*?<\/noscript>/gi, ' ')
+        .replace(/<svg\b[^>]*>[\s\S]*?<\/svg>/gi, ' ')
+        .replace(/<!--[\s\S]*?-->/g, ' ')
+        .replace(/<(br|\/p|\/div|\/li|\/section|\/article|\/h[1-6])\b[^>]*>/gi, '\n')
+        .replace(/<[^>]+>/g, ' ')
+    ),
+  );
+}
+
+export async function fetchBrowserUrlContext({ url, question = '' }) {
+  const safeUrl = await assertPublicUrl(String(url || '').trim());
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), DIRECT_PAGE_CONTEXT_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(safeUrl, {
+      method: 'GET',
+      redirect: 'follow',
+      signal: controller.signal,
+      headers: {
+        'accept': 'text/html,application/xhtml+xml',
+        'user-agent': 'AlesiaAI/1.0 (+https://arfox.by/)',
+      },
+    });
+
+    if (!response.ok) {
+      throw new Error(`Страница ответила ошибкой ${response.status}`);
+    }
+
+    const contentType = String(response.headers.get('content-type') || '').toLowerCase();
+    if (contentType && !contentType.includes('text/html') && !contentType.includes('application/xhtml+xml')) {
+      throw new Error('Страница не вернула HTML-контент');
+    }
+
+    const html = await response.text();
+    const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+    const title = normalizeWhitespace(decodeHtmlEntities(titleMatch?.[1] || '')) || 'Сайт';
+    const readerText = truncateText(htmlToPlainText(html), MAX_READER_TEXT_LENGTH);
+    const normalizedUrl = String(response.url || safeUrl).trim();
+    const answer = buildSessionQueryAnswer(question || 'что сейчас на этой странице', {
+      title,
+      url: normalizedUrl,
+      readerText,
+      queryText: readerText,
+    });
+
+    return {
+      status: 'ready',
+      title,
+      url: normalizedUrl,
+      embeddable: isEmbeddable({
+        'x-frame-options': String(response.headers.get('x-frame-options') || ''),
+        'content-security-policy': String(response.headers.get('content-security-policy') || ''),
+      }),
+      readerText,
+      lastUpdated: Date.now(),
+      answer: answer.answer,
+      contextSnippet: answer.contextSnippet,
+    };
+  } catch (error) {
+    if (error?.name === 'AbortError') {
+      throw new Error('Не удалось быстро прочитать страницу');
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 function serializeSession(session) {
   const view = {
     imageUrl: session.screenshotUrl || null,
@@ -2722,20 +3276,41 @@ export async function openBrowserIntent(intent) {
   const traceId = String(intent?.traceId || '');
   const startedAt = Date.now();
   const safeUrl = await assertPublicUrl(intent.url);
+  activeRequestId += 1;
+  const requestId = activeRequestId;
   logRuntime('browser.open.phase', {
     traceId,
     phase: 'validated-url',
     url: safeUrl,
+    requestId,
     ms: Date.now() - startedAt,
   });
+
+  if (!getConfiguredProxy()) {
+    const reachability = await probeOriginReachability(safeUrl);
+    if (!reachability.ok) {
+      logRuntime('browser.open.phase', {
+        traceId,
+        phase: 'origin-unreachable',
+        url: safeUrl,
+        reason: reachability.reason,
+        requestId,
+        ms: Date.now() - startedAt,
+      }, 'error');
+      const reachabilityError = new Error('Сервер сейчас не может показать этот сайт внутри панели.');
+      reachabilityError.code = 'origin_unreachable';
+      reachabilityError.details = reachability;
+      throw reachabilityError;
+    }
+  }
+
   const browser = await getBrowser();
   logRuntime('browser.open.phase', {
     traceId,
     phase: 'browser-ready',
+    requestId,
     ms: Date.now() - startedAt,
   });
-
-  await closeActivePage('open-replace');
 
   const context = await browser.newContext({
     viewport: { width: VIEWPORT_WIDTH, height: VIEWPORT_HEIGHT },
@@ -2764,8 +3339,6 @@ export async function openBrowserIntent(intent) {
     lastAccessAt: Date.now(),
     lastUpdatedAt: Date.now(),
   };
-  activeBrowserSession = browserSession;
-  clearBrowserIdleTimer();
   browserSession.page.on('close', () => {
     if (activeBrowserSession?.id !== browserSession.id) {
       return;
@@ -2799,12 +3372,11 @@ export async function openBrowserIntent(intent) {
     activeBrowserSession = null;
     scheduleBrowserShutdown();
   });
-  activeRequestId += 1;
-  const requestId = activeRequestId;
   logRuntime('browser.open.phase', {
     traceId,
     phase: 'page-created',
     browserSessionId: browserSession.id,
+    requestId,
     ms: Date.now() - startedAt,
   });
 
@@ -2826,6 +3398,7 @@ export async function openBrowserIntent(intent) {
             phase: 'goto-http-fallback',
             from: targetUrl,
             to: validatedFallbackUrl,
+            requestId,
             ms: Date.now() - startedAt,
           });
           targetUrl = validatedFallbackUrl;
@@ -2876,6 +3449,7 @@ export async function openBrowserIntent(intent) {
       phase: 'goto-commit',
       browserSessionId: browserSession.id,
       currentUrl: page.url(),
+      requestId,
       ms: Date.now() - startedAt,
     });
 
@@ -2897,6 +3471,7 @@ export async function openBrowserIntent(intent) {
       embeddable: browserSession.embeddable,
       title: browserSession.title,
       currentUrl: page.url(),
+      requestId,
       ms: Date.now() - startedAt,
     });
     await refreshBrowserSessionSnapshot(browserSession, {
@@ -2904,7 +3479,6 @@ export async function openBrowserIntent(intent) {
       readerTextLimit: MAX_READER_TEXT_LENGTH,
       queryTextLimit: SESSION_QUERY_TEXT_LENGTH,
     });
-    touchBrowserSession(browserSession);
 
     logRuntime('browser.open.phase', {
       traceId,
@@ -2912,12 +3486,23 @@ export async function openBrowserIntent(intent) {
       browserSessionId: browserSession.id,
       readerTextLength: browserSession.readerText.length,
       screenshot: Boolean(browserSession.screenshotUrl),
+      requestId,
       ms: Date.now() - startedAt,
     });
 
-    if (activeRequestId !== requestId || activeBrowserSession?.id !== browserSession.id) {
+    if (activeRequestId !== requestId) {
       throw new Error('Открытие было прервано более новым запросом');
     }
+
+    await closeActivePage('open-replace');
+
+    if (activeRequestId !== requestId) {
+      throw new Error('Открытие было прервано более новым запросом');
+    }
+
+    activeBrowserSession = browserSession;
+    clearBrowserIdleTimer();
+    touchBrowserSession(browserSession);
 
     return serializeSession(browserSession);
   } catch (error) {
