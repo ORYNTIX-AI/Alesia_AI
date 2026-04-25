@@ -13,6 +13,13 @@ dist-ssr
 *.local
 .runtime-data/
 runtime-data/
+.codex_remote_snapshot/
+.remote_fix/
+.remote_live/
+.playwright/
+.playwright-cli/
+test-results/
+playwright-report/
 .env.production.local.backup.*
 server/*.backup.*
 

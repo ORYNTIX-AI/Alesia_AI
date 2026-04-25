@@ -1,0 +1,201 @@
+﻿.browser-panel {
+  width: min(1140px, 100%);
+  height: 100%;
+  min-height: 0;
+  margin: 0 auto;
+  border-radius: 18px;
+  background:
+    linear-gradient(180deg, var(--panel-tint, transparent), transparent 34%),
+    var(--panel-bg);
+  overflow: hidden;
+}
+
+.browser-panel--remote {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+:root[data-theme='dark'] .browser-panel {
+  background: rgba(9, 13, 19, 0.88);
+}
+
+.browser-panel--loading-visual {
+  position: relative;
+}
+
+.browser-panel--idle {
+  background: rgba(255, 255, 255, 0.22);
+}
+
+:root[data-theme='dark'] .browser-panel--idle {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.browser-panel__blank {
+  height: 100%;
+}
+
+.browser-panel--visual {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #070b11;
+}
+
+.browser-panel__toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-muted);
+}
+
+.browser-panel__toolbar-meta {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.browser-panel__toolbar-meta strong,
+.browser-panel__toolbar-meta span {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.browser-panel__toolbar-meta strong {
+  font-size: 0.94rem;
+}
+
+.browser-panel__toolbar-meta span {
+  color: var(--text-muted);
+  font-size: 0.82rem;
+}
+
+.browser-panel__toolbar-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.browser-panel__icon-button {
+  width: 38px;
+  height: 38px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.browser-panel__icon-button:disabled {
+  opacity: 0.44;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.browser-panel__surface {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  background: #ffffff;
+  cursor: pointer;
+}
+
+.browser-panel__surface--client-inline {
+  position: relative;
+  cursor: default;
+}
+
+.browser-panel__surface--disabled {
+  cursor: default;
+}
+
+.browser-panel__snapshot {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: contain;
+  object-position: top center;
+  background: #ffffff;
+}
+
+.browser-panel__iframe {
+  width: 100%;
+  height: 100%;
+  display: block;
+  border: none;
+  background: #ffffff;
+}
+
+.browser-panel__state {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 20px;
+  text-align: center;
+}
+
+.browser-panel__state--overlay {
+  position: absolute;
+  left: 16px;
+  right: 16px;
+  bottom: 16px;
+  height: auto;
+  padding: 14px 18px;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.82);
+  border: 1px solid rgba(18, 33, 43, 0.08);
+  box-shadow: 0 16px 34px rgba(18, 33, 43, 0.16);
+  backdrop-filter: blur(12px);
+}
+
+:root[data-theme='dark'] .browser-panel__state--overlay {
+  background: rgba(7, 10, 15, 0.78);
+  border-color: rgba(177, 194, 211, 0.14);
+  box-shadow: 0 18px 36px rgba(0, 0, 0, 0.32);
+}
+
+.browser-panel__state strong {
+  font-size: 1.02rem;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.browser-panel__state p {
+  margin: 0;
+  color: var(--text-muted);
+}
+
+.browser-panel__meta {
+  max-width: min(720px, 100%);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.88rem;
+  color: var(--text-muted);
+  opacity: 0.82;
+}
+
+.browser-panel__spinner {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  border: 3px solid rgba(14, 165, 164, 0.2);
+  border-top-color: var(--accent);
+  animation: spin 0.8s linear infinite;
+}
+
+.browser-panel__hint {
+  padding: 10px 14px 12px;
+  border-top: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 0.82rem;
+}
+

@@ -1,14 +1,22 @@
 {
   "name": "protohuman",
   "private": true,
-  "version": "0.0.2",
+  "version": "0.0.3",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "concurrently -k -n server,client \"npm:dev:server\" \"npm:dev:client\"",
+    "dev:client": "vite",
+    "dev:server": "node --watch server/proxy.js",
     "build": "vite build",
-    "lint": "eslint .",
+    "lint": "eslint src server test",
+    "test:architecture": "node --test test/architecture/checkArchitecture.js",
+    "test": "node --test \"test/client/*.test.js\" \"test/server/*.test.js\"",
+    "test:live": "node test/live/liveSmoke.js",
+    "test:e2e": "playwright test",
+    "verify": "npm run lint && npm run test:architecture && npm test && npm run build && npm run test:e2e",
+    "demo:gate": "npm run verify && npm run test:live",
     "preview": "vite preview",
-    "knowledge:export-yandex": "node ./scripts/exportYandexKnowledgeJsonl.mjs"
+    "start": "node server/proxy.js"
   },
   "dependencies": {
     "@react-three/drei": "^10.7.7",
@@ -24,14 +32,15 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",
+    "@playwright/test": "^1.58.2",
     "@types/react": "^19.2.5",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^5.1.1",
+    "concurrently": "^9.2.1",
     "eslint": "^9.39.1",
     "eslint-plugin-react-hooks": "^7.0.1",
     "eslint-plugin-react-refresh": "^0.4.24",
     "globals": "^16.5.0",
-    "vite": "^7.2.4",
-    "vite-plugin-pwa": "^1.2.0"
+    "vite": "^7.2.4"
   }
 }

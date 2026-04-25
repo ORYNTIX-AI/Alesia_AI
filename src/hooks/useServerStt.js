@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { downsampleBuffer, float32ToBase64 } from '../utils/audioConverter';
+import { downsampleBuffer, float32ToBase64 } from '../utils/audioConverter.js';
 
 const LOCAL_STT_VOICE_RMS_THRESHOLD = 0.015;
 const LOCAL_STT_FINAL_DEDUP_MS = 3200;
@@ -319,7 +319,7 @@ export function useServerStt({
       cancelled = true;
       disconnect();
     };
-  }, [clearPartial, conversationSessionId, disconnect, enabled, language]);
+  }, [clearPartial, conversationSessionId, disconnect, enabled, language, releaseAudioResources]);
 
   const getUserVolume = useCallback(() => userVolumeRef.current, []);
 

@@ -2,26 +2,19 @@ import fs from 'fs/promises';
 import path from 'path';
 import {
   BATYUSHKA_AVATAR_MODEL_URL,
-  BATYUSHKA_GREETING,
-  BATYUSHKA_SYSTEM_PROMPT,
-  createCharacterRuntimeConfig,
   DEFAULT_APP_CONFIG,
   DEFAULT_AVATAR_MODEL_URL,
-  DEFAULT_KNOWLEDGE_REFRESH_POLICY,
-  DEFAULT_KNOWLEDGE_SOURCES,
   DEFAULT_RUNTIME_PROVIDER,
-  DEFAULT_WEB_PROVIDERS,
   DEFAULT_VOICE_MODEL,
-  DEFAULT_GREETING,
-  DEFAULT_SYSTEM_PROMPT,
-  DEFAULT_PRAYER_READ_MODE,
-  DEFAULT_SAFETY_SWITCHES,
-  DEFAULT_SPEECH_STABILITY_PROFILE,
-  SUPPORTED_PRAYER_READ_MODES,
-  SUPPORTED_SPEECH_STABILITY_PROFILES,
+  DEFAULT_YANDEX_ENABLED_TOOLS,
   SUPPORTED_VOICE_NAMES,
   YANDEX_LEGACY_RUNTIME_PROVIDER,
   YANDEX_REALTIME_RUNTIME_PROVIDER,
+  createCharacterRuntimeConfig,
+  getCharacterContentDefaults,
+  getVectorStoreFallbackForCharacter,
+  resolveGreetingRef,
+  resolvePromptRef,
 } from './defaultAppConfig.js';
 import { DEFAULT_APP_CONFIG_PATH } from './runtimePaths.js';
 
@@ -29,10 +22,8 @@ const APP_CONFIG_PATH = DEFAULT_APP_CONFIG_PATH;
 const LEGACY_VOICE_MODELS = new Set([
   'models/gemini-2.5-flash-native-audio-preview-09-2025',
 ]);
-
 const REMOTE_ALESYA_AVATAR_ID = '6940682e5917bffe25eb75ed';
 const REMOTE_BATYUSHKA_AVATAR_ID = '69ae9e904d98c76821037766';
-
 const LEGACY_SOURCE_URL_REMAP = new Map([
   ['https://azbyka.ru/molitvoslov/molitva-gospodnya-otche-nash/', 'https://azbyka.ru/molitvoslov/molitva-gospodnya-otche-nash.html'],
   ['https://www.pravmir.ru/otche-nash/', 'https://azbyka.ru/molitvoslov/molitva-gospodnya-otche-nash.html'],
@@ -41,13 +32,17 @@ const LEGACY_SOURCE_URL_REMAP = new Map([
   ['https://arfox.by/faq/', 'https://arfox.by/'],
   ['https://arfox.by/faq', 'https://arfox.by/'],
 ]);
-const CONFIG_SNAPSHOT_DIR = process.env.APP_CONFIG_SNAPSHOT_DIR || path.resolve(path.dirname(APP_CONFIG_PATH), 'safety-snapshots');
-const MAX_CONFIG_SNAPSHOTS = 40;
-const BATYUSHKA_CHARACTER_IDS = new Set(['alesya-puck', 'batyushka-2', 'batyushka-3']);
-let bootstrapSnapshotCreated = false;
 
 function normalizeWhitespace(value) {
   return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function normalizeMultilineText(value) {
+  return String(value || '').replace(/\r\n/g, '\n').trim();
+}
+
+function normalizeThemeMode(value) {
+  return String(value || '').trim() === 'dark' ? 'dark' : 'light';
 }
 
 function normalizeVoiceModelId(value) {
@@ -76,13 +71,12 @@ function normalizeRuntimeProvider(value) {
   return DEFAULT_RUNTIME_PROVIDER;
 }
 
-function templateUsesPreferredDomain(urlTemplate) {
-  try {
-    const candidate = new URL(String(urlTemplate || '').replace('{query}', 'test'));
-    return candidate.hostname.endsWith('.by') || candidate.hostname.endsWith('.ru');
-  } catch {
-    return false;
+function normalizeVoiceName(value, fallback = SUPPORTED_VOICE_NAMES[0]) {
+  const normalized = String(value || '').trim();
+  if (SUPPORTED_VOICE_NAMES.includes(normalized)) {
+    return normalized;
   }
+  return String(fallback || SUPPORTED_VOICE_NAMES[0]).trim() || SUPPORTED_VOICE_NAMES[0];
 }
 
 function normalizeAvatarModelUrl(value, fallbackUrl = DEFAULT_AVATAR_MODEL_URL) {
@@ -111,343 +105,344 @@ function normalizeAvatarModelUrl(value, fallbackUrl = DEFAULT_AVATAR_MODEL_URL) 
   return normalized;
 }
 
-function normalizeSystemPrompt(characterId, value, fallbackValue = DEFAULT_SYSTEM_PROMPT) {
-  const prompt = String(value || '').trim();
-  const fallbackPrompt = String(fallbackValue || DEFAULT_SYSTEM_PROMPT).trim();
-  if (!BATYUSHKA_CHARACTER_IDS.has(characterId)) {
-    return prompt || fallbackPrompt || DEFAULT_SYSTEM_PROMPT;
-  }
-
-  return BATYUSHKA_SYSTEM_PROMPT;
+function normalizePromptRef(value, fallback = '') {
+  const normalized = normalizeWhitespace(value);
+  return normalized || fallback;
 }
 
-function normalizeGreetingText(characterId, value, fallbackValue = DEFAULT_GREETING) {
-  const greeting = String(value || '').trim();
-  const fallbackGreeting = String(fallbackValue || DEFAULT_GREETING).trim();
-  if (!BATYUSHKA_CHARACTER_IDS.has(characterId)) {
-    return greeting || fallbackGreeting || DEFAULT_GREETING;
-  }
-
-  return BATYUSHKA_GREETING;
+function normalizeGreetingRef(value, fallback = '') {
+  const normalized = normalizeWhitespace(value);
+  return normalized || fallback;
 }
 
-function sanitizeCharacter(rawCharacter, fallbackId, fallbackCharacter = null) {
-  const character = rawCharacter || {};
-  const characterId = String(character.id || fallbackId).trim() || fallbackId;
-  const fallbackRuntime = createCharacterRuntimeConfig(fallbackCharacter || {});
-  const rawRuntimeProvider = normalizeWhitespace(character.runtimeProvider || '');
+function normalizeBrowserPanelMode(value) {
+  return String(value || '').trim() === 'client-inline' ? 'client-inline' : 'remote';
+}
+
+function normalizePageContextMode(value) {
+  return String(value || '').trim() === 'url-fetch' ? 'url-fetch' : 'browser-session';
+}
+
+function normalizeKnowledgePriorityTags(rawValue = [], fallbackValue = []) {
+  return Array.from(new Set([
+    ...(Array.isArray(fallbackValue) ? fallbackValue : []),
+    ...(Array.isArray(rawValue) ? rawValue : []),
+  ].map((tag) => String(tag).trim()).filter(Boolean)));
+}
+
+function normalizeToolList(rawValue = [], fallbackValue = []) {
+  return Array.from(new Set([
+    ...(Array.isArray(fallbackValue) ? fallbackValue : []),
+    ...(Array.isArray(rawValue) ? rawValue : []),
+  ].map((tool) => String(tool).trim()).filter(Boolean)));
+}
+
+function buildPromptState(source = {}, rawCharacter = {}, defaults = {}) {
+  const promptSource = source.prompt || {};
+  return {
+    ref: normalizePromptRef(promptSource.ref || rawCharacter.systemPromptRef, defaults.promptRef),
+    text: normalizeMultilineText(promptSource.text ?? rawCharacter.systemPrompt ?? ''),
+  };
+}
+
+function buildGreetingState(source = {}, rawCharacter = {}, defaults = {}) {
+  const greetingSource = source.greeting || {};
+  return {
+    ref: normalizeGreetingRef(greetingSource.ref || rawCharacter.greetingRef, defaults.greetingRef),
+    text: normalizeMultilineText(greetingSource.text ?? rawCharacter.greetingText ?? ''),
+  };
+}
+
+function sanitizeStoredCharacter(rawCharacter = {}, fallbackCharacter = null) {
+  const identitySource = rawCharacter.identity || rawCharacter;
+  const fallbackIdentitySource = fallbackCharacter?.identity || fallbackCharacter || {};
+  const characterId = normalizeWhitespace(identitySource.id || rawCharacter.id || fallbackIdentitySource.id || '');
+  const defaults = getCharacterContentDefaults(characterId);
+  const runtimeSource = rawCharacter.runtime || rawCharacter;
+  const fallbackRuntimeSource = fallbackCharacter?.runtime || fallbackCharacter || {};
+  const avatarSource = rawCharacter.avatar || rawCharacter;
+  const fallbackAvatarSource = fallbackCharacter?.avatar || fallbackCharacter || {};
+  const backgroundSource = rawCharacter.background || rawCharacter;
+  const fallbackBackgroundSource = fallbackCharacter?.background || fallbackCharacter || {};
+  const browserSource = rawCharacter.browser || rawCharacter;
+  const fallbackBrowserSource = fallbackCharacter?.browser || fallbackCharacter || {};
+  const knowledgeSource = rawCharacter.knowledge || rawCharacter;
+  const fallbackKnowledgeSource = fallbackCharacter?.knowledge || fallbackCharacter || {};
+  const prompt = buildPromptState(rawCharacter.content || {}, rawCharacter, defaults);
+  const greeting = buildGreetingState(rawCharacter.content || {}, rawCharacter, defaults);
   const runtimeProvider = normalizeRuntimeProvider(
-    character.runtimeProvider
-    || fallbackRuntime.runtimeProvider
+    runtimeSource.provider
+    || runtimeSource.runtimeProvider
+    || fallbackRuntimeSource.provider
+    || fallbackRuntimeSource.runtimeProvider
     || DEFAULT_RUNTIME_PROVIDER,
   );
-  const rawModelId = normalizeWhitespace(character.modelId || character.voiceModelId || '');
   const modelId = normalizeVoiceModelId(
-    character.modelId || character.voiceModelId || fallbackRuntime.modelId || DEFAULT_VOICE_MODEL,
+    runtimeSource.modelId
+    || runtimeSource.voiceModelId
+    || fallbackRuntimeSource.modelId
+    || fallbackRuntimeSource.voiceModelId
+    || DEFAULT_VOICE_MODEL,
   );
-  const voiceName = String(character.voiceName || fallbackCharacter?.voiceName || 'Aoede').trim() || 'Aoede';
-  const greetingFallback = BATYUSHKA_CHARACTER_IDS.has(characterId)
-    ? BATYUSHKA_GREETING
-    : DEFAULT_GREETING;
-  const explicitPriorityTags = Array.isArray(character.knowledgePriorityTags)
-    ? character.knowledgePriorityTags.map((tag) => String(tag).trim()).filter(Boolean)
-    : [];
-  const fallbackPriorityTags = Array.isArray(fallbackCharacter?.knowledgePriorityTags)
-    ? fallbackCharacter.knowledgePriorityTags.map((tag) => String(tag).trim()).filter(Boolean)
-    : [];
-  const mergedPriorityTags = Array.from(new Set([
-    ...fallbackPriorityTags,
-    ...explicitPriorityTags,
-  ]));
   const runtimeDefaults = createCharacterRuntimeConfig({
-    ...fallbackRuntime,
     runtimeProvider,
     modelId,
-    voiceModelId: modelId,
-    liveInputEnabled: character.liveInputEnabled === undefined
-      ? fallbackRuntime.liveInputEnabled
-      : character.liveInputEnabled,
-    voiceGatewayUrl: String(character.voiceGatewayUrl || fallbackRuntime.voiceGatewayUrl || '').trim(),
-    voiceName,
-    ttsVoiceName: String(character.ttsVoiceName || fallbackRuntime.ttsVoiceName || voiceName).trim() || voiceName,
-    sttProfile: String(character.sttProfile || fallbackRuntime.sttProfile || 'general').trim() || 'general',
-    outputAudioTranscription: character.outputAudioTranscription === undefined
-      ? fallbackRuntime.outputAudioTranscription !== false
-      : character.outputAudioTranscription !== false,
-    vectorStoreId: String(character.vectorStoreId || fallbackRuntime.vectorStoreId || '').trim(),
-    enabledTools: Array.isArray(character.enabledTools)
-      ? character.enabledTools
-      : fallbackRuntime.enabledTools,
-    webSearchEnabled: character.webSearchEnabled === undefined
-      ? fallbackRuntime.webSearchEnabled === true
-      : character.webSearchEnabled === true,
-    maxToolResults: Math.max(1, Number(character.maxToolResults || fallbackRuntime.maxToolResults || 4) || 4),
-    fallbackRuntimeProvider: normalizeRuntimeProvider(
-      character.fallbackRuntimeProvider
-      || fallbackRuntime.fallbackRuntimeProvider
-      || (runtimeProvider === YANDEX_REALTIME_RUNTIME_PROVIDER ? YANDEX_LEGACY_RUNTIME_PROVIDER : DEFAULT_RUNTIME_PROVIDER),
-    ),
+    liveInputEnabled: runtimeSource.liveInputEnabled === undefined
+      ? fallbackRuntimeSource.liveInputEnabled
+      : runtimeSource.liveInputEnabled,
+    voiceGatewayUrl: runtimeSource.voiceGatewayUrl || fallbackRuntimeSource.voiceGatewayUrl || '',
+    voiceName: runtimeSource.voiceName || fallbackRuntimeSource.voiceName || SUPPORTED_VOICE_NAMES[0],
+    ttsVoiceName: runtimeSource.ttsVoiceName || fallbackRuntimeSource.ttsVoiceName || runtimeSource.voiceName || fallbackRuntimeSource.voiceName || '',
+    sttProfile: runtimeSource.sttProfile || fallbackRuntimeSource.sttProfile || 'general',
+    outputAudioTranscription: runtimeSource.outputAudioTranscription === undefined
+      ? fallbackRuntimeSource.outputAudioTranscription !== false
+      : runtimeSource.outputAudioTranscription !== false,
+    vectorStoreId: runtimeSource.vectorStoreId || fallbackRuntimeSource.vectorStoreId || getVectorStoreFallbackForCharacter(characterId),
+    enabledTools: normalizeToolList(runtimeSource.enabledTools, fallbackRuntimeSource.enabledTools),
+    webSearchEnabled: runtimeSource.webSearchEnabled === undefined
+      ? fallbackRuntimeSource.webSearchEnabled === true
+      : runtimeSource.webSearchEnabled === true,
+    maxToolResults: runtimeSource.maxToolResults || fallbackRuntimeSource.maxToolResults || 4,
+    fallbackRuntimeProvider: runtimeSource.fallbackProvider
+      || runtimeSource.fallbackRuntimeProvider
+      || fallbackRuntimeSource.fallbackProvider
+      || fallbackRuntimeSource.fallbackRuntimeProvider
+      || (runtimeProvider === YANDEX_REALTIME_RUNTIME_PROVIDER ? YANDEX_LEGACY_RUNTIME_PROVIDER : ''),
   });
+  const fallbackVoiceName = normalizeVoiceName(
+    fallbackRuntimeSource.voiceName
+    || fallbackCharacter?.voiceName
+    || runtimeDefaults.ttsVoiceName
+    || SUPPORTED_VOICE_NAMES[0],
+  );
+  const voiceName = runtimeProvider === YANDEX_REALTIME_RUNTIME_PROVIDER
+    ? normalizeWhitespace(runtimeSource.voiceName || fallbackRuntimeSource.voiceName || runtimeDefaults.ttsVoiceName || 'ermil') || 'ermil'
+    : normalizeVoiceName(runtimeSource.voiceName || fallbackRuntimeSource.voiceName, fallbackVoiceName);
+  const ttsVoiceName = normalizeWhitespace(runtimeSource.ttsVoiceName || fallbackRuntimeSource.ttsVoiceName || runtimeDefaults.ttsVoiceName || voiceName) || voiceName;
+  const enabledTools = runtimeProvider === YANDEX_REALTIME_RUNTIME_PROVIDER
+    ? normalizeToolList(runtimeSource.enabledTools, fallbackRuntimeSource.enabledTools?.length ? fallbackRuntimeSource.enabledTools : DEFAULT_YANDEX_ENABLED_TOOLS)
+    : normalizeToolList(runtimeSource.enabledTools, fallbackRuntimeSource.enabledTools);
 
   return {
-    id: characterId,
-    displayName: String(character.displayName || fallbackCharacter?.displayName || 'Character'),
-    runtimeProvider: runtimeDefaults.runtimeProvider,
-    modelId: runtimeDefaults.modelId,
-    voiceModelId: runtimeDefaults.voiceModelId,
-    systemPrompt: normalizeSystemPrompt(characterId, character.systemPrompt, fallbackCharacter?.systemPrompt),
-    voiceName,
-    ttsVoiceName: String(character.ttsVoiceName || runtimeDefaults.ttsVoiceName || voiceName).trim() || voiceName,
-    sttProfile: String(character.sttProfile || runtimeDefaults.sttProfile || 'general').trim() || 'general',
-    outputAudioTranscription: runtimeDefaults.outputAudioTranscription !== false,
-    backgroundPreset: String(character.backgroundPreset || fallbackCharacter?.backgroundPreset || 'aurora'),
-    greetingText: normalizeGreetingText(characterId, character.greetingText, fallbackCharacter?.greetingText || greetingFallback),
-    avatarModelUrl: normalizeAvatarModelUrl(
-      character.avatarModelUrl,
-      String(fallbackCharacter?.avatarModelUrl || DEFAULT_AVATAR_MODEL_URL),
-    ),
-    avatarInstanceId: String(character.avatarInstanceId || fallbackCharacter?.avatarInstanceId || ('avatar-' + characterId)),
-    knowledgePriorityTags: mergedPriorityTags,
-    liveInputEnabled: runtimeDefaults.liveInputEnabled,
-    voiceGatewayUrl: String(character.voiceGatewayUrl || runtimeDefaults.voiceGatewayUrl || '').trim(),
-    vectorStoreId: String(character.vectorStoreId || runtimeDefaults.vectorStoreId || '').trim(),
-    enabledTools: Array.isArray(runtimeDefaults.enabledTools) ? runtimeDefaults.enabledTools : [],
-    webSearchEnabled: runtimeDefaults.webSearchEnabled === true,
-    maxToolResults: Math.max(1, Number(runtimeDefaults.maxToolResults || 4) || 4),
-    fallbackRuntimeProvider: normalizeRuntimeProvider(
-      character.fallbackRuntimeProvider
-      || runtimeDefaults.fallbackRuntimeProvider
-      || (runtimeProvider === YANDEX_REALTIME_RUNTIME_PROVIDER ? YANDEX_LEGACY_RUNTIME_PROVIDER : DEFAULT_RUNTIME_PROVIDER),
-    ),
-    browserPanelMode: String(character.browserPanelMode || fallbackCharacter?.browserPanelMode || 'remote').trim() === 'client-inline'
-      ? 'client-inline'
-      : 'remote',
-    pageContextMode: String(character.pageContextMode || fallbackCharacter?.pageContextMode || 'browser-session').trim() === 'url-fetch'
-      ? 'url-fetch'
-      : 'browser-session',
+    identity: {
+      id: characterId || normalizeWhitespace(fallbackIdentitySource.id),
+      displayName: String(identitySource.displayName || rawCharacter.displayName || fallbackIdentitySource.displayName || fallbackCharacter?.displayName || 'Character').trim() || 'Character',
+    },
+    avatar: {
+      modelUrl: normalizeAvatarModelUrl(
+        avatarSource.modelUrl || rawCharacter.avatarModelUrl,
+        normalizeAvatarModelUrl(fallbackAvatarSource.modelUrl || fallbackCharacter?.avatarModelUrl || DEFAULT_AVATAR_MODEL_URL),
+      ),
+      instanceId: normalizeWhitespace(
+        avatarSource.instanceId
+        || rawCharacter.avatarInstanceId
+        || fallbackAvatarSource.instanceId
+        || fallbackCharacter?.avatarInstanceId
+        || `avatar-${characterId || 'character'}`,
+      ) || `avatar-${characterId || 'character'}`,
+    },
+    background: {
+      preset: normalizeWhitespace(backgroundSource.preset || rawCharacter.backgroundPreset || fallbackBackgroundSource.preset || fallbackCharacter?.backgroundPreset || 'aurora') || 'aurora',
+    },
+    runtime: {
+      provider: runtimeDefaults.runtimeProvider,
+      modelId: runtimeDefaults.modelId,
+      liveInputEnabled: runtimeDefaults.liveInputEnabled,
+      voiceName,
+      ttsVoiceName,
+      sttProfile: normalizeWhitespace(runtimeDefaults.sttProfile || 'general') || 'general',
+      outputAudioTranscription: runtimeDefaults.outputAudioTranscription !== false,
+      voiceGatewayUrl: normalizeWhitespace(runtimeDefaults.voiceGatewayUrl),
+      vectorStoreId: normalizeWhitespace(runtimeDefaults.vectorStoreId || getVectorStoreFallbackForCharacter(characterId)),
+      enabledTools,
+      webSearchEnabled: runtimeDefaults.webSearchEnabled === true,
+      maxToolResults: Math.max(1, Number(runtimeDefaults.maxToolResults || 4) || 4),
+      fallbackProvider: normalizeRuntimeProvider(
+        runtimeDefaults.fallbackRuntimeProvider
+        || (runtimeDefaults.runtimeProvider === YANDEX_REALTIME_RUNTIME_PROVIDER ? YANDEX_LEGACY_RUNTIME_PROVIDER : DEFAULT_RUNTIME_PROVIDER),
+      ),
+    },
+    browser: {
+      panelMode: normalizeBrowserPanelMode(browserSource.panelMode || rawCharacter.browserPanelMode || fallbackBrowserSource.panelMode || fallbackCharacter?.browserPanelMode),
+      pageContextMode: normalizePageContextMode(browserSource.pageContextMode || rawCharacter.pageContextMode || fallbackBrowserSource.pageContextMode || fallbackCharacter?.pageContextMode),
+    },
+    content: {
+      prompt,
+      greeting,
+    },
+    knowledge: {
+      priorityTags: normalizeKnowledgePriorityTags(
+        knowledgeSource.priorityTags || rawCharacter.knowledgePriorityTags,
+        fallbackKnowledgeSource.priorityTags || fallbackCharacter?.knowledgePriorityTags,
+      ),
+    },
   };
 }
 
-function sanitizeKnowledgeSource(rawSource, fallback) {
-  const source = rawSource || {};
-  const fallbackSource = fallback || {};
-  const remapLegacySourceUrl = (value = '') => {
-    const normalized = String(value || '').trim();
-    if (!normalized) {
-      return '';
-    }
-    return LEGACY_SOURCE_URL_REMAP.get(normalized) || normalized;
-  };
-  const canonicalUrl = remapLegacySourceUrl(source.canonicalUrl || fallbackSource.canonicalUrl || '');
-  const seedUrl = remapLegacySourceUrl(source.seedUrl || fallbackSource.seedUrl || source.canonicalUrl || canonicalUrl || '');
-  const sourceId = String(source.id || fallbackSource.id || 'source').trim();
-  const mergedTags = Array.from(new Set([
-    ...(Array.isArray(fallbackSource.tags) ? fallbackSource.tags.map((tag) => String(tag).trim()) : []),
-    ...(Array.isArray(source.tags) ? source.tags.map((tag) => String(tag).trim()) : []),
-  ].filter(Boolean)));
-  const mergedAliases = Array.from(new Set([
-    ...(Array.isArray(fallbackSource.aliases) ? fallbackSource.aliases.map((alias) => String(alias).trim()) : []),
-    ...(Array.isArray(source.aliases) ? source.aliases.map((alias) => String(alias).trim()) : []),
-  ].filter(Boolean)));
-  let title = String(source.title || fallbackSource.title || 'Источник').trim();
-  if (
-    sourceId === 'arfox-faq'
-    && canonicalUrl === 'https://arfox.by/'
-    && /(?:faq|ответы)/i.test(title)
-    && fallbackSource.title
-  ) {
-    title = String(fallbackSource.title).trim();
+function remapLegacySourceUrl(value = '') {
+  const normalized = String(value || '').trim();
+  if (!normalized) {
+    return '';
   }
+  return LEGACY_SOURCE_URL_REMAP.get(normalized) || normalized;
+}
 
+function sanitizeKnowledgeSource(rawSource = {}, fallbackSource = {}) {
+  const canonicalUrl = remapLegacySourceUrl(rawSource.canonicalUrl || fallbackSource.canonicalUrl || '');
+  const seedUrl = remapLegacySourceUrl(rawSource.seedUrl || fallbackSource.seedUrl || canonicalUrl || '');
   return {
-    id: sourceId,
-    title,
+    id: normalizeWhitespace(rawSource.id || fallbackSource.id || 'source') || 'source',
+    title: String(rawSource.title || fallbackSource.title || 'Источник').trim() || 'Источник',
     canonicalUrl,
     seedUrl,
-    scope: String(source.scope || fallbackSource.scope || 'shared').trim() || 'shared',
-    tags: mergedTags,
-    aliases: mergedAliases,
-    refreshMode: String(source.refreshMode || fallbackSource.refreshMode || 'manual-publish').trim() || 'manual-publish',
-    lastFetchedAt: source.lastFetchedAt || null,
-    lastPublishedAt: source.lastPublishedAt || null,
-    status: String(source.status || fallbackSource.status || 'approved').trim() || 'approved',
+    scope: normalizeWhitespace(rawSource.scope || fallbackSource.scope || 'shared') || 'shared',
+    tags: normalizeKnowledgePriorityTags(rawSource.tags, fallbackSource.tags),
+    aliases: normalizeKnowledgePriorityTags(rawSource.aliases, fallbackSource.aliases),
+    refreshMode: normalizeWhitespace(rawSource.refreshMode || fallbackSource.refreshMode || 'manual-publish') || 'manual-publish',
+    lastFetchedAt: rawSource.lastFetchedAt || fallbackSource.lastFetchedAt || null,
+    lastPublishedAt: rawSource.lastPublishedAt || fallbackSource.lastPublishedAt || null,
+    status: normalizeWhitespace(rawSource.status || fallbackSource.status || 'approved') || 'approved',
   };
 }
 
-function sanitizeKnowledgeSources(rawSources) {
-  const incomingSources = Array.isArray(rawSources) ? rawSources : [];
-  const incomingById = new Map(
-    incomingSources
-      .map((source) => [String(source?.id || '').trim(), source])
-      .filter(([id]) => Boolean(id)),
-  );
-  const seenIds = new Set();
-
+function sanitizeKnowledgeSources(rawSources = [], fallbackSources = []) {
+  const incoming = Array.isArray(rawSources) ? rawSources : [];
+  const fallback = Array.isArray(fallbackSources) ? fallbackSources : [];
+  const fallbackById = new Map(fallback.map((source) => [normalizeWhitespace(source?.id), source]));
+  const seen = new Set();
   const merged = [];
-  DEFAULT_KNOWLEDGE_SOURCES.forEach((fallbackSource) => {
-    const fallbackId = String(fallbackSource.id || '').trim();
-    const incoming = incomingById.get(fallbackId) || null;
-    const nextSource = sanitizeKnowledgeSource(incoming || fallbackSource, fallbackSource);
+
+  fallback.forEach((source) => {
+    const sourceId = normalizeWhitespace(source?.id);
+    const incomingSource = incoming.find((entry) => normalizeWhitespace(entry?.id) === sourceId);
+    const nextSource = sanitizeKnowledgeSource(incomingSource || source, source);
     merged.push(nextSource);
-    if (fallbackId) {
-      seenIds.add(fallbackId);
-    }
+    seen.add(sourceId);
   });
 
-  incomingSources.forEach((source) => {
-    const sourceId = String(source?.id || '').trim();
-    if (!sourceId || seenIds.has(sourceId)) {
+  incoming.forEach((source) => {
+    const sourceId = normalizeWhitespace(source?.id);
+    if (!sourceId || seen.has(sourceId)) {
       return;
     }
-    merged.push(sanitizeKnowledgeSource(source));
-    seenIds.add(sourceId);
+    merged.push(sanitizeKnowledgeSource(source, fallbackById.get(sourceId)));
+    seen.add(sourceId);
   });
 
-  return merged
-    .filter((source) => source.canonicalUrl && source.seedUrl);
+  return merged.filter((source) => source.canonicalUrl && source.seedUrl);
 }
 
-function sanitizeKnowledgeRefreshPolicy(rawPolicy) {
-  const policy = rawPolicy || {};
-  return {
-    mode: String(policy.mode || DEFAULT_KNOWLEDGE_REFRESH_POLICY.mode || 'draft-publish'),
-    autoRefresh: Boolean(
-      policy.autoRefresh === undefined
-        ? DEFAULT_KNOWLEDGE_REFRESH_POLICY.autoRefresh
-        : policy.autoRefresh,
-    ),
-  };
-}
+function sanitizeWebProviders(rawProviders = {}, fallbackProviders = {}) {
+  const nextProviders = {};
+  const fallbackEntries = Object.entries(fallbackProviders || {});
 
-function sanitizeWebProviders(webProviders) {
-  const providers = webProviders || {};
-  const sanitized = {};
-
-  for (const [key, fallback] of Object.entries(DEFAULT_WEB_PROVIDERS)) {
-    const value = providers[key] || {};
-    const nextTemplate = String(value?.urlTemplate || fallback.urlTemplate || '');
-    const nextTemplateLower = nextTemplate.toLowerCase();
-    const useFallbackTemplate = !templateUsesPreferredDomain(nextTemplate)
-      || key === 'search'
-      || (key === 'weather' && nextTemplateLower.includes('gismeteo.by'))
-      || (key === 'news' && nextTemplate.includes('/search/'))
-      || (key === 'currency' && nextTemplate.includes('search'))
-      || (key === 'wiki' && nextTemplate.includes('/w/index.php'))
-      || (key === 'news' && nextTemplate !== fallback.urlTemplate)
-      || (key === 'currency' && nextTemplate !== fallback.urlTemplate)
-      || (key === 'wiki' && nextTemplate !== fallback.urlTemplate);
-
-    sanitized[key] = {
-      label: String(useFallbackTemplate ? fallback.label : (value?.label || fallback.label || key)),
-      urlTemplate: String(useFallbackTemplate ? fallback.urlTemplate : nextTemplate),
+  fallbackEntries.forEach(([key, fallbackValue]) => {
+    const currentValue = rawProviders?.[key] || {};
+    nextProviders[key] = {
+      label: String(currentValue.label || fallbackValue.label || key).trim() || key,
+      urlTemplate: String(currentValue.urlTemplate || fallbackValue.urlTemplate || '').trim(),
     };
-  }
+  });
 
-  return sanitized;
+  return nextProviders;
 }
 
-function sanitizeSpeechStabilityProfile(value) {
-  const profile = String(value || '').trim().toLowerCase();
-  if (!profile || !SUPPORTED_SPEECH_STABILITY_PROFILES.includes(profile)) {
-    return DEFAULT_SPEECH_STABILITY_PROFILE;
-  }
-  return profile;
-}
-
-function sanitizePrayerReadMode(value) {
-  const mode = String(value || '').trim().toLowerCase();
-  if (!mode || !SUPPORTED_PRAYER_READ_MODES.includes(mode)) {
-    return DEFAULT_PRAYER_READ_MODE;
-  }
-  return mode;
-}
-
-function sanitizeSafetySwitches(rawSafetySwitches = {}) {
-  const switches = rawSafetySwitches && typeof rawSafetySwitches === 'object'
-    ? rawSafetySwitches
-    : {};
-
-  return {
-    safeSpeechFlowEnabled: switches.safeSpeechFlowEnabled === undefined
-      ? Boolean(DEFAULT_SAFETY_SWITCHES.safeSpeechFlowEnabled)
-      : Boolean(switches.safeSpeechFlowEnabled),
-  };
-}
-
-export function sanitizeAppConfig(rawConfig) {
-  const config = rawConfig || {};
-  const defaultCharacters = Array.isArray(DEFAULT_APP_CONFIG.characters) ? DEFAULT_APP_CONFIG.characters : [];
-  const defaultCharactersById = new Map(
-    defaultCharacters.map((character) => [String(character.id || '').trim(), character]),
+function sanitizeStoredAppConfig(rawConfig = {}) {
+  const fallbackConfig = DEFAULT_APP_CONFIG;
+  const incomingCharacters = Array.isArray(rawConfig.characters) ? rawConfig.characters : [];
+  const fallbackCharacters = Array.isArray(fallbackConfig.characters) ? fallbackConfig.characters : [];
+  const fallbackById = new Map(
+    fallbackCharacters.map((character) => [normalizeWhitespace(character?.identity?.id || character?.id), character]),
   );
-  const incomingCharacters = Array.isArray(config.characters) ? config.characters : [];
-  const mergedCharacters = [];
   const seenCharacterIds = new Set();
+  const characters = [];
 
   incomingCharacters.forEach((character, index) => {
-    const characterId = String(character?.id || '').trim();
-    const fallbackCharacter = defaultCharactersById.get(characterId)
-      || defaultCharacters[index]
-      || null;
-    const sanitizedCharacter = sanitizeCharacter(character, 'character-' + (index + 1), fallbackCharacter);
-    if (!sanitizedCharacter.id || seenCharacterIds.has(sanitizedCharacter.id)) {
+    const sourceId = normalizeWhitespace(character?.identity?.id || character?.id);
+    const fallbackCharacter = fallbackById.get(sourceId) || fallbackCharacters[index] || null;
+    const nextCharacter = sanitizeStoredCharacter(character, fallbackCharacter);
+    if (!nextCharacter.identity.id || seenCharacterIds.has(nextCharacter.identity.id)) {
       return;
     }
-    mergedCharacters.push(sanitizedCharacter);
-    seenCharacterIds.add(sanitizedCharacter.id);
+    characters.push(nextCharacter);
+    seenCharacterIds.add(nextCharacter.identity.id);
   });
 
-  defaultCharacters.forEach((defaultCharacter, index) => {
-    const characterId = String(defaultCharacter?.id || '').trim();
-    if (!characterId || seenCharacterIds.has(characterId)) {
+  fallbackCharacters.forEach((character, index) => {
+    const sourceId = normalizeWhitespace(character?.identity?.id || character?.id);
+    if (!sourceId || seenCharacterIds.has(sourceId)) {
       return;
     }
-    mergedCharacters.push(sanitizeCharacter(defaultCharacter, 'default-character-' + (index + 1), defaultCharacter));
-    seenCharacterIds.add(characterId);
+    characters.push(sanitizeStoredCharacter(character, fallbackCharacters[index] || null));
+    seenCharacterIds.add(sourceId);
   });
 
-  const characters = mergedCharacters.length > 0
-    ? mergedCharacters
-    : defaultCharacters.map((character, index) => sanitizeCharacter(character, 'default-character-' + (index + 1), character));
-
-  const activeCharacterId = characters.some((character) => character.id === config.activeCharacterId)
-    ? config.activeCharacterId
-    : characters[0].id;
+  const activeCharacterId = characters.some((character) => character.identity.id === rawConfig.activeCharacterId)
+    ? rawConfig.activeCharacterId
+    : characters[0]?.identity.id || fallbackConfig.activeCharacterId;
 
   return {
-    themeMode: config.themeMode === 'dark' ? 'dark' : 'light',
+    schemaVersion: 2,
+    themeMode: normalizeThemeMode(rawConfig.themeMode || fallbackConfig.themeMode),
     activeCharacterId,
     characters,
-    safetySwitches: sanitizeSafetySwitches(config.safetySwitches),
-    speechStabilityProfile: sanitizeSpeechStabilityProfile(config.speechStabilityProfile),
-    prayerReadMode: sanitizePrayerReadMode(config.prayerReadMode),
-    webProviders: sanitizeWebProviders(config.webProviders),
-    knowledgeRefreshPolicy: sanitizeKnowledgeRefreshPolicy(config.knowledgeRefreshPolicy),
-    knowledgeSources: sanitizeKnowledgeSources(config.knowledgeSources),
+    webProviders: sanitizeWebProviders(rawConfig.webProviders, fallbackConfig.webProviders),
+    knowledgeSources: sanitizeKnowledgeSources(rawConfig.knowledgeSources, fallbackConfig.knowledgeSources),
   };
 }
 
-async function createConfigSnapshot(reason = 'save') {
-  try {
-    const raw = await fs.readFile(APP_CONFIG_PATH, 'utf8');
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    await fs.mkdir(CONFIG_SNAPSHOT_DIR, { recursive: true });
-    const snapshotPath = path.join(CONFIG_SNAPSHOT_DIR, `app-config.${timestamp}.${reason}.json`);
-    await fs.writeFile(snapshotPath, raw, 'utf8');
+function resolvePromptText(promptState = {}) {
+  return normalizeMultilineText(promptState.text || '') || resolvePromptRef(promptState.ref);
+}
 
-    const files = (await fs.readdir(CONFIG_SNAPSHOT_DIR))
-      .filter((file) => file.startsWith('app-config.') && file.endsWith('.json'))
-      .sort();
-    if (files.length > MAX_CONFIG_SNAPSHOTS) {
-      const staleFiles = files.slice(0, files.length - MAX_CONFIG_SNAPSHOTS);
-      await Promise.all(staleFiles.map((file) => fs.unlink(path.join(CONFIG_SNAPSHOT_DIR, file)).catch(() => {})));
-    }
-  } catch (error) {
-    if (error?.code === 'ENOENT') {
-      return;
-    }
-    // Snapshot errors should not block config flow.
-  }
+function resolveGreetingText(greetingState = {}) {
+  return normalizeMultilineText(greetingState.text || '') || resolveGreetingRef(greetingState.ref);
+}
+
+function hydrateCharacter(character) {
+  const promptRef = normalizePromptRef(character?.content?.prompt?.ref);
+  const greetingRef = normalizeGreetingRef(character?.content?.greeting?.ref);
+  const systemPrompt = resolvePromptText(character?.content?.prompt);
+  const greetingText = resolveGreetingText(character?.content?.greeting);
+  return {
+    id: character.identity.id,
+    displayName: character.identity.displayName,
+    runtimeProvider: character.runtime.provider,
+    modelId: character.runtime.modelId,
+    voiceModelId: character.runtime.modelId,
+    liveInputEnabled: character.runtime.liveInputEnabled,
+    voiceName: character.runtime.voiceName,
+    ttsVoiceName: character.runtime.ttsVoiceName,
+    sttProfile: character.runtime.sttProfile,
+    outputAudioTranscription: character.runtime.outputAudioTranscription !== false,
+    voiceGatewayUrl: character.runtime.voiceGatewayUrl,
+    vectorStoreId: character.runtime.vectorStoreId,
+    enabledTools: Array.isArray(character.runtime.enabledTools) ? [...character.runtime.enabledTools] : [],
+    webSearchEnabled: character.runtime.webSearchEnabled === true,
+    maxToolResults: character.runtime.maxToolResults,
+    fallbackRuntimeProvider: character.runtime.fallbackProvider,
+    backgroundPreset: character.background.preset,
+    avatarModelUrl: character.avatar.modelUrl,
+    avatarInstanceId: character.avatar.instanceId,
+    browserPanelMode: character.browser.panelMode,
+    pageContextMode: character.browser.pageContextMode,
+    knowledgePriorityTags: Array.isArray(character.knowledge.priorityTags) ? [...character.knowledge.priorityTags] : [],
+    systemPromptRef: promptRef,
+    greetingRef,
+    systemPrompt,
+    greetingText,
+  };
+}
+
+function toRuntimeAppConfig(storedConfig) {
+  return {
+    schemaVersion: 2,
+    themeMode: storedConfig.themeMode,
+    activeCharacterId: storedConfig.activeCharacterId,
+    characters: storedConfig.characters.map(hydrateCharacter),
+    webProviders: storedConfig.webProviders,
+    knowledgeSources: storedConfig.knowledgeSources,
+  };
 }
 
 async function ensureConfigFile() {
@@ -456,34 +451,36 @@ async function ensureConfigFile() {
   try {
     await fs.access(APP_CONFIG_PATH);
   } catch {
-    const seeded = sanitizeAppConfig(DEFAULT_APP_CONFIG);
-    await fs.writeFile(APP_CONFIG_PATH, `${JSON.stringify(seeded, null, 2)}\n`, 'utf8');
+    await fs.writeFile(APP_CONFIG_PATH, `${JSON.stringify(sanitizeStoredAppConfig(DEFAULT_APP_CONFIG), null, 2)}\n`, 'utf8');
   }
 }
 
-export async function loadAppConfig() {
+async function readStoredConfig() {
   await ensureConfigFile();
-  if (!bootstrapSnapshotCreated) {
-    await createConfigSnapshot('bootstrap');
-    bootstrapSnapshotCreated = true;
-  }
   const raw = await fs.readFile(APP_CONFIG_PATH, 'utf8');
-  const parsed = JSON.parse(raw);
-  const sanitized = sanitizeAppConfig(parsed);
+  return JSON.parse(raw);
+}
 
-  if (JSON.stringify(parsed) !== JSON.stringify(sanitized)) {
-    await saveAppConfig(sanitized);
+export function sanitizeAppConfig(rawConfig) {
+  return toRuntimeAppConfig(sanitizeStoredAppConfig(rawConfig));
+}
+
+export async function loadAppConfig() {
+  const rawConfig = await readStoredConfig();
+  const storedConfig = sanitizeStoredAppConfig(rawConfig);
+
+  if (JSON.stringify(rawConfig) !== JSON.stringify(storedConfig)) {
+    await fs.writeFile(APP_CONFIG_PATH, `${JSON.stringify(storedConfig, null, 2)}\n`, 'utf8');
   }
 
-  return sanitized;
+  return toRuntimeAppConfig(storedConfig);
 }
 
 export async function saveAppConfig(nextConfig) {
   await ensureConfigFile();
-  await createConfigSnapshot('save');
-  const sanitized = sanitizeAppConfig(nextConfig);
-  await fs.writeFile(APP_CONFIG_PATH, `${JSON.stringify(sanitized, null, 2)}\n`, 'utf8');
-  return sanitized;
+  const storedConfig = sanitizeStoredAppConfig(nextConfig);
+  await fs.writeFile(APP_CONFIG_PATH, `${JSON.stringify(storedConfig, null, 2)}\n`, 'utf8');
+  return toRuntimeAppConfig(storedConfig);
 }
 
 export function getAppConfigPath() {

@@ -1,0 +1,161 @@
+﻿@media (max-width: 900px) {
+  .app-frame {
+    padding-top: 4px;
+  }
+
+  .avatar-stage-layout {
+    width: min(560px, 100%);
+    grid-template-columns: 40px minmax(0, 1fr) 40px;
+    gap: 14px;
+  }
+
+  .avatar-stage {
+    width: min(100%, 240px);
+  }
+
+}
+
+@media (max-width: 640px) {
+  .screen-shell {
+    padding: 8px;
+  }
+
+  .app-frame {
+    gap: 10px;
+  }
+
+  .top-toolbar {
+    gap: 10px;
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .top-toolbar__meta {
+    max-width: none;
+    width: 100%;
+  }
+
+  .top-toolbar__actions {
+    width: 100%;
+    justify-content: flex-end;
+  }
+
+  .avatar-stage {
+    width: min(100%, 220px);
+  }
+
+  .browser-panel__toolbar {
+    padding: 10px;
+    gap: 10px;
+  }
+
+  .browser-panel__toolbar-meta {
+    max-width: calc(100% - 182px);
+  }
+
+  .browser-panel__toolbar-actions {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+
+  .settings-drawer {
+    top: 10px;
+    left: 10px;
+    right: 10px;
+    bottom: 10px;
+    width: auto;
+    height: auto;
+    padding: 16px;
+    border-radius: 22px;
+  }
+
+  .settings-drawer__body {
+    padding-right: 2px;
+  }
+
+  .settings-field textarea {
+    min-height: 144px;
+    max-height: min(28dvh, 280px);
+  }
+
+  .settings-drawer__footer {
+    padding-top: 12px;
+  }
+
+  .settings-save-button {
+    width: 100%;
+  }
+
+  .tester-drawer {
+    top: 10px;
+    left: 10px;
+    right: 10px;
+    width: auto;
+    height: auto;
+    max-height: calc(100dvh - 20px);
+    padding: 16px;
+    border-radius: 22px;
+    transform: translateX(calc(-100% - 20px));
+  }
+
+  .tester-drawer__handle {
+    top: auto;
+    bottom: 18px;
+    transform: none;
+    writing-mode: horizontal-tb;
+    text-orientation: initial;
+    padding: 10px 14px;
+  }
+
+  .tester-status-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .tester-event__detail {
+    grid-template-columns: 1fr;
+    gap: 4px;
+  }
+}
+
+@media (orientation: portrait) and (min-width: 700px) {
+  .screen-shell {
+    justify-content: center;
+    align-items: stretch;
+    padding-top: 12px;
+  }
+
+  .app-frame {
+    height: 100%;
+    min-height: 0;
+    width: min(980px, 100%);
+    grid-template-rows: auto auto auto auto minmax(0, 1fr);
+    gap: 16px;
+  }
+
+  .avatar-stage-layout {
+    width: min(920px, 100%);
+    grid-template-columns: 58px minmax(0, 1fr) 58px;
+    gap: 26px;
+  }
+
+  .avatar-stage {
+    width: min(100%, 625px);
+    margin-inline: auto;
+  }
+
+  .controls-strip {
+    width: min(760px, 100%);
+  }
+
+  .top-toolbar {
+    width: min(920px, 100%);
+    margin-inline: auto;
+  }
+
+  .status-stack {
+    max-height: min(10vh, 96px);
+    overflow-y: auto;
+    padding-right: 4px;
+  }
+}
+

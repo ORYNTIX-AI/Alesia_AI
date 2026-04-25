@@ -6,7 +6,7 @@ import { clone as cloneSkeleton } from 'three/examples/jsm/utils/SkeletonUtils.j
 import { useLipSync } from '../hooks/useLipSync';
 
 // ARKit and Oculus Visemes are required for specific lip-sync morphs
-export const DEFAULT_AVATAR_MODEL_URL = 'avatars/alesya.webp.glb';
+export const DEFAULT_AVATAR_MODEL_URL = 'avatars/alesya.glb';
 const DEFAULT_IDLE_MOTION_PROFILE = {
     yawAmplitude: 0.03,
     yawSpeed: 0.5,
@@ -71,7 +71,7 @@ export function Avatar({
     ), [sourceScene, instanceId]);
 
     // Custom Hook for Spectral Lip-Sync
-    useLipSync({ scene: avatarScene, analyser });
+    useLipSync({ scene: avatarScene, analyser, getVolume: audioPlayer?.getVolume?.bind(audioPlayer) });
 
     useLayoutEffect(() => {
         if (!avatarRef.current || !avatarScene) {

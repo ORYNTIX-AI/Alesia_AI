@@ -1,5 +1,5 @@
 ﻿import { useCallback, useEffect, useRef, useState } from 'react';
-import { base64ToFloat32Array, downsampleBuffer, float32ToBase64 } from '../utils/audioConverter';
+import { base64ToFloat32Array, downsampleBuffer, float32ToBase64 } from '../utils/audioConverter.js';
 
 const DEFAULT_RUNTIME_CONFIG = {
   runtimeProvider: 'yandex-full-legacy',
@@ -148,7 +148,7 @@ export function useYandexVoiceSession(audioPlayer, runtimeConfig = DEFAULT_RUNTI
     audioPlayer.stop?.();
     callbacksRef.current.onAssistantInterrupted?.();
     callbacksRef.current.onAssistantTurnCancel?.({ text: '', interrupted: true });
-  }, [audioPlayer, extendBotSpeechGuard]);
+  }, [audioPlayer]);
 
   const finalizeSpeechCapture = useCallback(async (sampleRate) => {
     const speechState = speechStateRef.current;
@@ -316,7 +316,7 @@ export function useYandexVoiceSession(audioPlayer, runtimeConfig = DEFAULT_RUNTI
       setError(connectionError?.message || 'Не удалось подключить Yandex voice session');
       setStatus('error');
     }
-  }, [audioPlayer, finalizeSpeechCapture, releaseAudioResources]);
+  }, [audioPlayer, finalizeSpeechCapture, releaseAudioResources, resetSpeechState]);
 
   const disconnect = useCallback(() => {
     lifecycleTokenRef.current += 1;
@@ -400,7 +400,7 @@ export function useYandexVoiceSession(audioPlayer, runtimeConfig = DEFAULT_RUNTI
         currentTurnAbortRef.current = null;
       }
     }
-  }, [audioPlayer]);
+  }, [audioPlayer, extendBotSpeechGuard]);
 
   const clearSessionResumption = useCallback(() => {}, []);
   const getUserVolume = useCallback(() => userVolumeRef.current, []);

@@ -1,16 +1,101 @@
-# React + Vite
+# Alesia AI Demo
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Demo app with four live subsystems:
 
-Currently, two official plugins are available:
+- `avatar`: 3D avatar scene
+- `voice`: Gemini Live, Yandex Realtime, Yandex Legacy
+- `browser`: open, inspect, query, and act on websites
+- `knowledge`: local knowledge sources and query flow
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+Architecture source of truth: [ARCHITECTURE.md](D:/Oryntix/Git/Alesia_AI/ARCHITECTURE.md)
 
-## React Compiler
+## Setup
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+1. Install dependencies:
 
-## Expanding the ESLint configuration
+```bash
+npm install
+```
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+2. Create `.env` from [.env.example](D:/Oryntix/Git/Alesia_AI/.env.example).
+
+3. Start client and server:
+
+```bash
+npm run dev
+```
+
+## Main Scripts
+
+- `npm run dev`: start server and client together
+- `npm run dev:server`: start Node API/proxy only
+- `npm run dev:client`: start Vite only
+- `npm run lint`: lint `src`, `server`, and `test`
+- `npm test`: deterministic unit and smoke tests
+- `npm run build`: production build
+- `npm run test:e2e`: deterministic Playwright smoke
+- `npm run verify`: `lint + test + build + test:e2e`
+- `npm run test:live`: real live smoke against Gemini, Yandex, browser, and knowledge integrations
+- `npm run demo:gate`: `verify + test:live`
+
+## Config And Content
+
+- `demo-content/default-app-config.json`: versioned demo config
+- `demo-content/prompts/*.md`: system prompts
+- `demo-content/greetings/*.txt`: character greetings
+- `server/configStore.js`: strict `schemaVersion: 2` sanitize, load, save, and migration logic
+
+Persisted config stays nested on disk:
+
+- `identity`
+- `avatar`
+- `background`
+- `runtime`
+- `browser`
+- `content`
+- `knowledge`
+
+Legacy flat fields are normalized on read and are never written back.
+
+## Editing The Demo
+
+To change a character, edit `demo-content/default-app-config.json` or use the in-app settings drawer.
+
+Main character fields:
+
+- `displayName`
+- `runtimeProvider`
+- `voiceModelId`
+- `voiceName`
+- `ttsVoiceName`
+- `backgroundPreset`
+- `browserPanelMode`
+- `pageContextMode`
+- `promptRef`
+- `greetingRef`
+
+Prompt and greeting source files live in:
+
+- `demo-content/prompts`
+- `demo-content/greetings`
+
+## Current Architecture
+
+See [ARCHITECTURE.md](D:/Oryntix/Git/Alesia_AI/ARCHITECTURE.md) for canonical entrypoints and runtime flows.
+
+## Live Smoke Notes
+
+`npm run test:live` requires configured live secrets:
+
+- `GEMINI_API_KEY`
+- `YANDEX_FOLDER_ID`
+- `YANDEX_API_KEY` or `YANDEX_IAM_TOKEN`
+
+The live smoke starts a dedicated local server instance, runs live runtime flows, and fails if:
+
+- required env vars are missing
+- browser open/query/action fails
+- Gemini live websocket flow fails
+- Yandex realtime flow fails
+- Yandex legacy turn or STT/TTS fails
+- runtime log contains `level: error`

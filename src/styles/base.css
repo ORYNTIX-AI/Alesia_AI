@@ -1,0 +1,130 @@
+﻿:root {
+  --font-display: 'Manrope', 'Segoe UI', sans-serif;
+  --bg: #eef2f1;
+  --surface: rgba(255, 255, 255, 0.72);
+  --surface-strong: #ffffff;
+  --surface-muted: rgba(255, 255, 255, 0.58);
+  --border: rgba(58, 70, 78, 0.12);
+  --text: #12212b;
+  --text-muted: #60717d;
+  --accent: #0ea5a4;
+  --accent-strong: #0a7e7d;
+  --shadow: 0 30px 80px rgba(32, 52, 63, 0.12);
+  --panel-bg: rgba(255, 255, 255, 0.78);
+  --panel-inner: rgba(252, 252, 252, 0.88);
+  --error: #b93845;
+  --warning: #8c6b10;
+}
+
+:root[data-theme='dark'] {
+  --bg: #060a0f;
+  --surface: rgba(10, 14, 21, 0.78);
+  --surface-strong: rgba(14, 19, 28, 0.94);
+  --surface-muted: rgba(17, 24, 32, 0.82);
+  --border: rgba(177, 194, 211, 0.14);
+  --text: #edf6fa;
+  --text-muted: #93a6b2;
+  --accent: #4ee9d8;
+  --accent-strong: #96fff4;
+  --shadow: 0 30px 90px rgba(0, 0, 0, 0.45);
+  --panel-bg: rgba(8, 12, 17, 0.84);
+  --panel-inner: rgba(15, 21, 30, 0.94);
+  --error: #ff8e96;
+  --warning: #f5ce65;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-display);
+  color: var(--text);
+  background:
+    radial-gradient(circle at top left, rgba(99, 182, 189, 0.28), transparent 34%),
+    radial-gradient(circle at top right, rgba(255, 196, 128, 0.2), transparent 30%),
+    linear-gradient(180deg, rgba(249, 250, 251, 0.96), var(--bg));
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow: hidden;
+}
+
+:root[data-theme='dark'] body {
+  background:
+    radial-gradient(circle at top left, rgba(14, 94, 98, 0.34), transparent 32%),
+    radial-gradient(circle at top right, rgba(52, 85, 126, 0.28), transparent 30%),
+    linear-gradient(180deg, rgba(6, 9, 13, 0.98), var(--bg));
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+a {
+  color: inherit;
+}
+
+.screen-shell {
+  min-height: 100dvh;
+  height: 100dvh;
+  display: flex;
+  justify-content: center;
+  padding: 10px 22px 12px;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 12% 18%, var(--screen-left-glow, transparent) 0%, transparent 34%),
+    radial-gradient(circle at 88% 16%, var(--screen-right-glow, transparent) 0%, transparent 32%);
+}
+
+.screen-shell__loading {
+  margin: auto;
+  padding: 18px 22px;
+  border-radius: 20px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow);
+}
+
+.app-frame {
+  position: relative;
+  width: min(1240px, 100%);
+  height: 100%;
+  min-height: 0;
+  padding: 8px 0 0;
+  display: grid;
+  grid-template-rows: auto auto auto auto minmax(0, 1fr);
+  gap: 12px;
+  isolation: isolate;
+}
+
+.app-frame::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(circle at 50% 0%, var(--frame-tint, transparent) 0%, transparent 54%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.05), transparent 28%);
+}
+
+.app-frame > * {
+  position: relative;
+  z-index: 1;
+}
+

@@ -1,0 +1,356 @@
+{
+  "schemaVersion": 2,
+  "themeMode": "light",
+  "activeCharacterId": "alesya-classic",
+  "characters": [
+    {
+      "identity": {
+        "id": "alesya-classic",
+        "displayName": "Алеся"
+      },
+      "avatar": {
+        "modelUrl": "avatars/alesya.glb",
+        "instanceId": "avatar-alesya-classic"
+      },
+      "background": {
+        "preset": "aurora"
+      },
+      "runtime": {
+        "provider": "gemini-live",
+        "modelId": "models/gemini-2.5-flash-native-audio-preview-12-2025",
+        "liveInputEnabled": false,
+        "voiceName": "Achernar",
+        "ttsVoiceName": "Achernar",
+        "sttProfile": "general",
+        "outputAudioTranscription": true,
+        "voiceGatewayUrl": "",
+        "vectorStoreId": "",
+        "enabledTools": [],
+        "webSearchEnabled": false,
+        "maxToolResults": 4,
+        "fallbackProvider": ""
+      },
+      "browser": {
+        "panelMode": "remote",
+        "pageContextMode": "browser-session"
+      },
+      "content": {
+        "prompt": {
+          "ref": "alesya-classic",
+          "text": ""
+        },
+        "greeting": {
+          "ref": "alesya-classic",
+          "text": ""
+        }
+      },
+      "knowledge": {
+        "priorityTags": ["travel", "tourism", "alatantour", "arfox"]
+      }
+    },
+    {
+      "identity": {
+        "id": "alesya-kore",
+        "displayName": "Алеся Neo"
+      },
+      "avatar": {
+        "modelUrl": "avatars/alesya.glb",
+        "instanceId": "avatar-alesya-kore"
+      },
+      "background": {
+        "preset": "sunset"
+      },
+      "runtime": {
+        "provider": "gemini-live",
+        "modelId": "models/gemini-2.5-flash-native-audio-preview-12-2025",
+        "liveInputEnabled": false,
+        "voiceName": "Achird",
+        "ttsVoiceName": "Achird",
+        "sttProfile": "general",
+        "outputAudioTranscription": true,
+        "voiceGatewayUrl": "",
+        "vectorStoreId": "",
+        "enabledTools": [],
+        "webSearchEnabled": false,
+        "maxToolResults": 4,
+        "fallbackProvider": ""
+      },
+      "browser": {
+        "panelMode": "remote",
+        "pageContextMode": "browser-session"
+      },
+      "content": {
+        "prompt": {
+          "ref": "alesya-neo",
+          "text": ""
+        },
+        "greeting": {
+          "ref": "alesya-neo",
+          "text": ""
+        }
+      },
+      "knowledge": {
+        "priorityTags": ["pikant", "pinsk", "meat", "food", "jobs", "contacts", "factory", "arfox"]
+      }
+    },
+    {
+      "identity": {
+        "id": "alesya-puck",
+        "displayName": "Батюшка"
+      },
+      "avatar": {
+        "modelUrl": "avatars/nikolay.glb",
+        "instanceId": "avatar-batyushka"
+      },
+      "background": {
+        "preset": "white"
+      },
+      "runtime": {
+        "provider": "gemini-live",
+        "modelId": "models/gemini-2.5-flash-native-audio-preview-12-2025",
+        "liveInputEnabled": false,
+        "voiceName": "Algenib",
+        "ttsVoiceName": "Algenib",
+        "sttProfile": "general",
+        "outputAudioTranscription": true,
+        "voiceGatewayUrl": "",
+        "vectorStoreId": "",
+        "enabledTools": [],
+        "webSearchEnabled": false,
+        "maxToolResults": 4,
+        "fallbackProvider": ""
+      },
+      "browser": {
+        "panelMode": "remote",
+        "pageContextMode": "browser-session"
+      },
+      "content": {
+        "prompt": {
+          "ref": "batyushka",
+          "text": ""
+        },
+        "greeting": {
+          "ref": "batyushka",
+          "text": ""
+        }
+      },
+      "knowledge": {
+        "priorityTags": ["church", "orthodox", "prayer", "otche-nash", "bpcmm", "veniamin"]
+      }
+    },
+    {
+      "identity": {
+        "id": "batyushka-2",
+        "displayName": "Батюшка 2"
+      },
+      "avatar": {
+        "modelUrl": "avatars/nikolay.glb",
+        "instanceId": "avatar-batyushka-2"
+      },
+      "background": {
+        "preset": "white"
+      },
+      "runtime": {
+        "provider": "gemini-live",
+        "modelId": "models/gemini-3.1-flash-live-preview",
+        "liveInputEnabled": true,
+        "voiceName": "Schedar",
+        "ttsVoiceName": "Schedar",
+        "sttProfile": "general",
+        "outputAudioTranscription": false,
+        "voiceGatewayUrl": "",
+        "vectorStoreId": "",
+        "enabledTools": [],
+        "webSearchEnabled": false,
+        "maxToolResults": 4,
+        "fallbackProvider": ""
+        },
+        "browser": {
+          "panelMode": "remote",
+          "pageContextMode": "url-fetch"
+        },
+      "content": {
+        "prompt": {
+          "ref": "batyushka",
+          "text": ""
+        },
+        "greeting": {
+          "ref": "batyushka",
+          "text": ""
+        }
+      },
+      "knowledge": {
+        "priorityTags": ["church", "orthodox", "prayer", "otche-nash", "bpcmm", "veniamin"]
+      }
+    },
+    {
+      "identity": {
+        "id": "batyushka-3",
+        "displayName": "Батюшка 3"
+      },
+      "avatar": {
+        "modelUrl": "avatars/nikolay.glb",
+        "instanceId": "avatar-batyushka-3"
+      },
+      "background": {
+        "preset": "white"
+      },
+      "runtime": {
+        "provider": "yandex-realtime",
+        "modelId": "speech-realtime-250923",
+        "liveInputEnabled": true,
+        "voiceName": "ermil",
+        "ttsVoiceName": "ermil",
+        "sttProfile": "general",
+        "outputAudioTranscription": false,
+        "voiceGatewayUrl": "",
+        "vectorStoreId": "",
+        "enabledTools": ["file_search", "open_site", "view_page", "extract_page_context", "summarize_visible_page"],
+        "webSearchEnabled": false,
+        "maxToolResults": 4,
+        "fallbackProvider": "yandex-full-legacy"
+      },
+      "browser": {
+        "panelMode": "client-inline",
+        "pageContextMode": "url-fetch"
+      },
+      "content": {
+        "prompt": {
+          "ref": "batyushka",
+          "text": ""
+        },
+        "greeting": {
+          "ref": "batyushka",
+          "text": ""
+        }
+      },
+      "knowledge": {
+        "priorityTags": ["church", "orthodox", "prayer", "otche-nash", "bpcmm", "veniamin"]
+      }
+    }
+  ],
+  "webProviders": {
+    "weather": {
+      "label": "Яндекс Погода Минск",
+      "urlTemplate": "https://yandex.by/pogoda/ru/minsk"
+    },
+    "news": {
+      "label": "Новости Mail.ru",
+      "urlTemplate": "https://news.mail.ru/"
+    },
+    "currency": {
+      "label": "Курсы Mail.ru",
+      "urlTemplate": "https://finance.mail.ru/currency/"
+    },
+    "maps": {
+      "label": "Яндекс Карты BY",
+      "urlTemplate": "https://yandex.by/maps/?text={query}"
+    },
+    "wiki": {
+      "label": "Wikipedia RU",
+      "urlTemplate": "https://ru.wikipedia.org/wiki/{query}"
+    },
+    "search": {
+      "label": "Onliner BY",
+      "urlTemplate": "https://www.onliner.by/"
+    }
+  },
+  "knowledgeSources": [
+    {
+      "id": "alatantour",
+      "title": "Туристическая компания АлатанТур",
+      "canonicalUrl": "https://alatantour.by/",
+      "seedUrl": "https://alatantour.by/",
+      "scope": "shared",
+      "tags": ["travel", "tourism", "alatantour"],
+      "aliases": ["алатантур", "алатан тур"],
+      "refreshMode": "manual-publish",
+      "status": "approved"
+    },
+    {
+      "id": "bpcmm",
+      "title": "Приход Храма равноапостольной Марии Магдалины в г. Минске",
+      "canonicalUrl": "https://bpcmm.by/",
+      "seedUrl": "https://bpcmm.by/",
+      "scope": "shared",
+      "tags": ["church", "orthodox", "bpcmm", "parish"],
+      "aliases": ["марии магдалины", "храм марии магдалины", "bpcmm"],
+      "refreshMode": "manual-publish",
+      "status": "approved"
+    },
+    {
+      "id": "metropolitan-veniamin",
+      "title": "Митрополит Вениамин",
+      "canonicalUrl": "http://church.by/sinod/veniamin-episkop-borisovskij-vikarij-minskoj-eparhii",
+      "seedUrl": "http://church.by/sinod/veniamin-episkop-borisovskij-vikarij-minskoj-eparhii",
+      "scope": "shared",
+      "tags": ["church", "orthodox", "veniamin", "metropolitan"],
+      "aliases": ["митрополит вениамин", "вениамин"],
+      "refreshMode": "manual-publish",
+      "status": "approved"
+    },
+    {
+      "id": "church-by",
+      "title": "Белорусская Православная Церковь",
+      "canonicalUrl": "http://church.by/",
+      "seedUrl": "http://church.by/",
+      "scope": "shared",
+      "tags": ["church", "orthodox", "bpc"],
+      "aliases": [
+        "белорусская православная церковь",
+        "церковь by",
+        "church by",
+        "минская епархия",
+        "минской епархии",
+        "сайт минской епархии",
+        "епархия минск"
+      ],
+      "refreshMode": "manual-publish",
+      "status": "approved"
+    },
+    {
+      "id": "arfox-faq",
+      "title": "Официальный сайт ARFox",
+      "canonicalUrl": "https://arfox.by/",
+      "seedUrl": "https://arfox.by/",
+      "scope": "shared",
+      "tags": ["arfox", "technology"],
+      "aliases": ["арфокс", "альфокс", "альфокса", "ar fox", "air fox", "airfox", "эйр фокс", "эйрфокс"],
+      "refreshMode": "manual-publish",
+      "status": "approved"
+    },
+    {
+      "id": "pinsk-pikant",
+      "title": "ОАО «Пинский мясокомбинат»",
+      "canonicalUrl": "https://pikant.by/",
+      "seedUrl": "https://pikant.by/",
+      "scope": "shared",
+      "tags": ["food", "meat", "pikant", "pinsk", "jobs", "contacts"],
+      "aliases": ["пинск пикант", "пинский мясокомбинат", "пикант", "pikant", "pikant.by"],
+      "refreshMode": "manual-publish",
+      "status": "approved"
+    },
+    {
+      "id": "prayer-our-father",
+      "title": "Молитва Отче наш",
+      "canonicalUrl": "https://azbyka.ru/molitvoslov/molitva-gospodnya-otche-nash.html",
+      "seedUrl": "https://azbyka.ru/molitvoslov/molitva-gospodnya-otche-nash.html",
+      "scope": "shared",
+      "tags": ["church", "orthodox", "prayer", "otche-nash"],
+      "aliases": ["отче наш", "молитва отче наш", "прочти отче наш"],
+      "refreshMode": "manual-publish",
+      "status": "approved"
+    },
+    {
+      "id": "prayer-bogoroditse-devo",
+      "title": "Молитва Богородице Дево, радуйся",
+      "canonicalUrl": "https://www.pravmir.ru/bogorodice-devo-radujsya/",
+      "seedUrl": "https://www.pravmir.ru/bogorodice-devo-radujsya/",
+      "scope": "shared",
+      "tags": ["church", "orthodox", "prayer", "bogoroditse-devo"],
+      "aliases": ["богородице дево", "молитва богородице дево", "радуйся благодатная"],
+      "refreshMode": "manual-publish",
+      "status": "approved"
+    }
+  ]
+}

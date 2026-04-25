@@ -18,12 +18,14 @@ ENV APP_CONFIG_PATH=/app/data/app-config.json
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev \
-  && npx playwright install --with-deps chromium \
+RUN npm ci \
+  && node node_modules/playwright/cli.js install chromium \
+  && npm prune --omit=dev \
   && mkdir -p /app/data
 
 COPY --from=build /app/dist ./dist
 COPY server ./server
+COPY demo-content ./demo-content
 
 EXPOSE 3000
 CMD ["node", "server/proxy.js"]
