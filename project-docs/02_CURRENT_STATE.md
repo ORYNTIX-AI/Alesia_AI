@@ -144,3 +144,11 @@
 - Footer version is raised to `v0.0.3`.
 - Current production deploy is live on `https://alesia-ai.constitution.of.by`; `/health` is OK and the active bundle is `assets/index-yfgPhMap.js`.
 - Local checks passed after the change: `npm test`, `npm run build`.
+
+## 2026-04-26 Avatar and Batya 2 runtime config
+
+- Fixed production runtime config that still pointed Batyushka avatars to missing `avatars/nikolay.webp.glb`; the working asset is `avatars/nikolay.glb`.
+- Batyushka 2 remains on `models/gemini-3.1-flash-live-preview` and now uses the same browser principle as Batyushka 3: `remote` panel with `url-fetch` page context.
+- Domain Chromium check no longer shows `Ошибка 3D-аватара`; footer version is raised to `v0.0.4`.
+- Production deploy restored after `/app/data/app-config.json` was found empty; domain `/health` is OK again, active character is `batyushka-3`, and the active bundle is `assets/index-Bllxplk_.js`.
+- Current blocker for Batyushka 2 live Gemini testing is infrastructure: server env has no working Gemini proxy (`proxyHost` is empty), so Gemini Live can still hit regional restrictions until a supported-region proxy is configured.

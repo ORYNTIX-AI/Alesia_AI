@@ -211,7 +211,7 @@
         "fallbackProvider": "yandex-full-legacy"
       },
       "browser": {
-        "panelMode": "client-inline",
+        "panelMode": "remote",
         "pageContextMode": "url-fetch"
       },
       "content": {
