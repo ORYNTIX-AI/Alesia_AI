@@ -152,3 +152,6 @@
 - Domain Chromium check no longer shows `Ошибка 3D-аватара`; footer version is raised to `v0.0.4`.
 - Production deploy restored after `/app/data/app-config.json` was found empty; domain `/health` is OK again, active character is `batyushka-3`, and the active bundle is `assets/index-Bllxplk_.js`.
 - Current blocker for Batyushka 2 live Gemini testing is infrastructure: server env has no working Gemini proxy (`proxyHost` is empty), so Gemini Live can still hit regional restrictions until a supported-region proxy is configured.
+- Added a Brazil proxy in production env without committing credentials; `/health` now reports proxy host `196.19.122.152` and scheme `http`.
+- Gemini Live smoke for Batyushka 2 through the proxy passed `setupComplete` and returned both text and audio (`Христос воскресе.`, 10 audio chunks).
+- Production active character is now `batyushka-2`; Chromium domain check shows `Батюшка 2`, footer `v0.0.4`, no 3D avatar error, and no console errors.
