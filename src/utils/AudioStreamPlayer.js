@@ -11,6 +11,10 @@
         this.htmlAudio = null;
         this.htmlAudioPlaying = false;
         this.htmlAudioCurrentItem = null;
+        this.htmlPendingChunks = [];
+        this.htmlPendingSamples = 0;
+        this.htmlPendingSampleRate = 0;
+        this.htmlFlushTimer = null;
         this.activeSources = new Set();
         this.playbackGeneration = 0;
         this.bufferedUntil = 0;
@@ -19,10 +23,12 @@
         this.syntheticVolumeUntilMs = 0;
         this.lastChunkAt = 0;
         this.initialBufferMs = 110;
-        this.fadeDurationSec = 0.012;
+        this.fadeDurationSec = 0.004;
         this.restartCooldownMs = 140;
         this.blockedUntilMs = 0;
         this.resumeTimer = null;
+        this.htmlChunkTargetMs = 360;
+        this.htmlChunkFlushDelayMs = 90;
         this.preferHtmlAudioOutput = typeof navigator !== 'undefined'
             && /Android|iPhone|iPad|iPod/i.test(navigator.userAgent || '');
     }
@@ -139,15 +145,60 @@
     }
 
     enqueueHtmlAudioChunk(float32Array, sampleRate) {
-        const durationMs = Math.round((float32Array.length / sampleRate) * 1000);
-        const rms = this.calculateRms(float32Array);
-        const bytes = this.encodeWav(float32Array, sampleRate);
+        if (!float32Array?.length) {
+            return;
+        }
+        if (this.htmlPendingSampleRate && this.htmlPendingSampleRate !== sampleRate) {
+            this.flushPendingHtmlAudioChunk();
+        }
+
+        this.htmlPendingChunks.push(float32Array);
+        this.htmlPendingSamples += float32Array.length;
+        this.htmlPendingSampleRate = sampleRate;
+
+        const pendingDurationMs = Math.round((this.htmlPendingSamples / sampleRate) * 1000);
+        if (pendingDurationMs >= this.htmlChunkTargetMs || !this.htmlAudioPlaying) {
+            this.flushPendingHtmlAudioChunk();
+            return;
+        }
+
+        if (!this.htmlFlushTimer) {
+            this.htmlFlushTimer = window.setTimeout(() => {
+                this.htmlFlushTimer = null;
+                this.flushPendingHtmlAudioChunk();
+            }, this.htmlChunkFlushDelayMs);
+        }
+    }
+
+    flushPendingHtmlAudioChunk() {
+        if (this.htmlFlushTimer) {
+            clearTimeout(this.htmlFlushTimer);
+            this.htmlFlushTimer = null;
+        }
+        if (!this.htmlPendingSamples || this.htmlPendingChunks.length === 0) {
+            return;
+        }
+
+        const sampleRate = this.htmlPendingSampleRate || this.sampleRate;
+        const merged = new Float32Array(this.htmlPendingSamples);
+        let offset = 0;
+        for (const chunk of this.htmlPendingChunks) {
+            merged.set(chunk, offset);
+            offset += chunk.length;
+        }
+        this.htmlPendingChunks = [];
+        this.htmlPendingSamples = 0;
+        this.htmlPendingSampleRate = 0;
+
+        const durationMs = Math.round((merged.length / sampleRate) * 1000);
+        const rms = this.calculateRms(merged);
+        const bytes = this.encodeWav(merged, sampleRate);
         const blobUrl = URL.createObjectURL(new Blob([bytes], { type: 'audio/wav' }));
         const item = {
             blobUrl,
             durationMs,
             rms,
-            float32Array,
+            float32Array: merged,
             sampleRate,
             generation: this.playbackGeneration,
         };
@@ -157,6 +208,9 @@
     }
 
     playNextHtmlAudioChunk() {
+        if (!this.htmlAudioPlaying && this.htmlQueue.length === 0 && this.htmlPendingSamples > 0) {
+            this.flushPendingHtmlAudioChunk();
+        }
         if (!this.htmlAudio || this.htmlAudioPlaying || this.htmlQueue.length === 0) {
             return;
         }
@@ -260,6 +314,13 @@
             }
         });
         this.htmlQueue = [];
+        this.htmlPendingChunks = [];
+        this.htmlPendingSamples = 0;
+        this.htmlPendingSampleRate = 0;
+        if (this.htmlFlushTimer) {
+            clearTimeout(this.htmlFlushTimer);
+            this.htmlFlushTimer = null;
+        }
         this.blockedUntilMs = performance.now() + this.restartCooldownMs;
         if (this.resumeTimer) {
             clearTimeout(this.resumeTimer);
@@ -320,6 +381,10 @@
         if (this.resumeTimer) {
             clearTimeout(this.resumeTimer);
             this.resumeTimer = null;
+        }
+        if (this.htmlFlushTimer) {
+            clearTimeout(this.htmlFlushTimer);
+            this.htmlFlushTimer = null;
         }
         if (this.audioContext) {
             await this.audioContext.close();
