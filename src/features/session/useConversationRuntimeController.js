@@ -1250,15 +1250,33 @@ export function useConversationRuntimeController({
       || (requestId > 0 && requestId !== activeDialogRequestRef.current)
     );
 
-    const requestTtsChunk = async (chunkText, timeoutMs) => jsonRequest('/api/yandex/tts', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        text: chunkText,
-        voiceName: selectedCharacter?.ttsVoiceName || selectedCharacter?.voiceName || 'ermil',
-        sampleRateHertz: SILENT_TURN_FALLBACK_SAMPLE_RATE,
-      }),
-    }, timeoutMs);
+    const shouldUseGeminiTts = String(selectedCharacter?.id || '').trim() === 'batyushka-2'
+      && String(selectedCharacter?.runtimeProvider || '').trim() === 'gemini-live'
+      && String(selectedCharacter?.ttsModelId || '').trim();
+    const requestTtsChunk = async (chunkText, timeoutMs) => {
+      if (shouldUseGeminiTts) {
+        return jsonRequest('/api/gemini/tts', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            text: chunkText,
+            modelId: selectedCharacter?.ttsModelId,
+            voiceName: selectedCharacter?.ttsVoiceName || selectedCharacter?.voiceName || 'Schedar',
+            stylePrompt: 'Read naturally in Russian with a calm, warm, human voice. Keep the pace conversational and use natural short pauses.',
+          }),
+        }, timeoutMs);
+      }
+
+      return jsonRequest('/api/yandex/tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text: chunkText,
+          voiceName: selectedCharacter?.ttsVoiceName || selectedCharacter?.voiceName || 'ermil',
+          sampleRateHertz: SILENT_TURN_FALLBACK_SAMPLE_RATE,
+        }),
+      }, timeoutMs);
+    };
 
     try {
       const chunks = splitSpeechPlaybackChunks(normalizedText, SILENT_TURN_FALLBACK_CHUNK_MAX_CHARS);
@@ -1377,7 +1395,9 @@ export function useConversationRuntimeController({
         recordConversationTurn(
           'assistant',
           normalizedText,
-          usesYandexRealtimeRuntime ? 'yandex-realtime-audio-fallback' : 'yandex-legacy-audio-fallback',
+          shouldUseGeminiTts
+            ? 'gemini-3.1-tts-audio-fallback'
+            : (usesYandexRealtimeRuntime ? 'yandex-realtime-audio-fallback' : 'yandex-legacy-audio-fallback'),
         );
         if (requestId > 0 && !finalizedAnswered) {
           finalizedAnswered = true;
@@ -1418,6 +1438,9 @@ export function useConversationRuntimeController({
     finalizeDialogRequest,
     recordConversationAction,
     recordConversationTurn,
+    selectedCharacter?.id,
+    selectedCharacter?.runtimeProvider,
+    selectedCharacter?.ttsModelId,
     selectedCharacter?.ttsVoiceName,
     selectedCharacter?.voiceName,
     sessionShouldSendGreeting,

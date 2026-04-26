@@ -7,6 +7,7 @@ import {
   DEFAULT_RUNTIME_PROVIDER,
   DEFAULT_VOICE_MODEL,
   DEFAULT_YANDEX_ENABLED_TOOLS,
+  GEMINI_31_FLASH_TTS_MODEL,
   SUPPORTED_VOICE_NAMES,
   YANDEX_LEGACY_RUNTIME_PROVIDER,
   YANDEX_REALTIME_RUNTIME_PROVIDER,
@@ -19,9 +20,6 @@ import {
 import { DEFAULT_APP_CONFIG_PATH } from './runtimePaths.js';
 
 const APP_CONFIG_PATH = DEFAULT_APP_CONFIG_PATH;
-const LEGACY_VOICE_MODELS = new Set([
-  'models/gemini-2.5-flash-native-audio-preview-09-2025',
-]);
 const REMOTE_ALESYA_AVATAR_ID = '6940682e5917bffe25eb75ed';
 const REMOTE_BATYUSHKA_AVATAR_ID = '69ae9e904d98c76821037766';
 const LEGACY_SOURCE_URL_REMAP = new Map([
@@ -47,10 +45,20 @@ function normalizeThemeMode(value) {
 
 function normalizeVoiceModelId(value) {
   const normalized = String(value || '').trim();
-  if (!normalized || LEGACY_VOICE_MODELS.has(normalized)) {
+  const modelCode = normalized.replace(/^models\//, '');
+  if (!normalized || (modelCode.startsWith('gemini-') && !modelCode.startsWith('gemini-3.1-'))) {
     return DEFAULT_VOICE_MODEL;
   }
   return normalized;
+}
+
+function normalizeGeminiTtsModelId(value) {
+  const normalized = String(value || '').trim();
+  const modelCode = normalized.replace(/^models\//, '');
+  if (!normalized || (modelCode.startsWith('gemini-') && !modelCode.startsWith('gemini-3.1-'))) {
+    return GEMINI_31_FLASH_TTS_MODEL;
+  }
+  return modelCode;
 }
 
 function normalizeRuntimeProvider(value) {
@@ -187,6 +195,7 @@ function sanitizeStoredCharacter(rawCharacter = {}, fallbackCharacter = null) {
   const runtimeDefaults = createCharacterRuntimeConfig({
     runtimeProvider,
     modelId,
+    ttsModelId: normalizeGeminiTtsModelId(runtimeSource.ttsModelId || fallbackRuntimeSource.ttsModelId || ''),
     liveInputEnabled: runtimeSource.liveInputEnabled === undefined
       ? fallbackRuntimeSource.liveInputEnabled
       : runtimeSource.liveInputEnabled,
@@ -247,6 +256,7 @@ function sanitizeStoredCharacter(rawCharacter = {}, fallbackCharacter = null) {
     runtime: {
       provider: runtimeDefaults.runtimeProvider,
       modelId: runtimeDefaults.modelId,
+      ttsModelId: runtimeDefaults.ttsModelId,
       liveInputEnabled: runtimeDefaults.liveInputEnabled,
       voiceName,
       ttsVoiceName,
@@ -410,6 +420,7 @@ function hydrateCharacter(character) {
     runtimeProvider: character.runtime.provider,
     modelId: character.runtime.modelId,
     voiceModelId: character.runtime.modelId,
+    ttsModelId: character.runtime.ttsModelId,
     liveInputEnabled: character.runtime.liveInputEnabled,
     voiceName: character.runtime.voiceName,
     ttsVoiceName: character.runtime.ttsVoiceName,

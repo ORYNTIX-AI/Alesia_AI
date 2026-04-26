@@ -55,6 +55,7 @@ import { createSttGatewayConnectionHandler } from './ws/sttGateway.js';
 import { registerCoreRoutes } from './routes/coreRoutes.js';
 import { registerConversationRoutes } from './routes/conversationRoutes.js';
 import { registerKnowledgeRoutes } from './routes/knowledgeRoutes.js';
+import { registerGeminiRoutes } from './routes/geminiRoutes.js';
 import { registerYandexRoutes } from './routes/yandexRoutes.js';
 import { registerBrowserRoutes } from './routes/browserRoutes.js';
 import { createYandexRuntimeService } from './services/yandexRuntimeService.js';
@@ -475,6 +476,13 @@ registerKnowledgeRoutes(app, {
   saveAppConfig,
   searchKnowledge,
   setConversationKnowledgeHits,
+});
+
+registerGeminiRoutes(app, {
+  agent: proxyAgent || undefined,
+  apiKey: API_KEY,
+  logRuntime,
+  normalizeWhitespace,
 });
 
 registerYandexRoutes(app, {

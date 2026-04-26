@@ -297,7 +297,7 @@ function App() {
         events={testerEvents}
         onClearEvents={clearTesterEvents}
       />
-      <div className="app-footer-version">v0.0.4</div>
+      <div className="app-footer-version">v0.0.5</div>
     </>
   )
 }

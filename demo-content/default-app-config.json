@@ -17,7 +17,7 @@
       },
       "runtime": {
         "provider": "gemini-live",
-        "modelId": "models/gemini-2.5-flash-native-audio-preview-12-2025",
+        "modelId": "models/gemini-3.1-flash-live-preview",
         "liveInputEnabled": false,
         "voiceName": "Achernar",
         "ttsVoiceName": "Achernar",
@@ -62,7 +62,7 @@
       },
       "runtime": {
         "provider": "gemini-live",
-        "modelId": "models/gemini-2.5-flash-native-audio-preview-12-2025",
+        "modelId": "models/gemini-3.1-flash-live-preview",
         "liveInputEnabled": false,
         "voiceName": "Achird",
         "ttsVoiceName": "Achird",
@@ -107,7 +107,7 @@
       },
       "runtime": {
         "provider": "gemini-live",
-        "modelId": "models/gemini-2.5-flash-native-audio-preview-12-2025",
+        "modelId": "models/gemini-3.1-flash-live-preview",
         "liveInputEnabled": false,
         "voiceName": "Algenib",
         "ttsVoiceName": "Algenib",
@@ -153,6 +153,7 @@
       "runtime": {
         "provider": "gemini-live",
         "modelId": "models/gemini-3.1-flash-live-preview",
+        "ttsModelId": "gemini-3.1-flash-tts-preview",
         "liveInputEnabled": true,
         "voiceName": "Schedar",
         "ttsVoiceName": "Schedar",

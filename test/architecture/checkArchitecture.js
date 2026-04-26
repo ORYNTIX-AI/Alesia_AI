@@ -53,3 +53,20 @@ test('non-exception JS modules stay under 900 lines', () => {
 
   assert.deepEqual(oversized, [])
 })
+
+test('Google runtime models are not older than Gemini 3.1', () => {
+  const files = [
+    path.join(ROOT, 'demo-content', 'default-app-config.json'),
+    path.join(ROOT, 'server', 'defaultAppConfig.js'),
+    path.join(ROOT, 'src', 'hooks', 'geminiLiveShared.js'),
+    path.join(ROOT, 'src', 'features', 'session', 'sessionModels.js'),
+  ]
+
+  const offenders = files.flatMap((file) => {
+    const text = fs.readFileSync(file, 'utf8')
+    const matches = text.match(/models\/gemini-(?!3\.1-)\d[\w.-]+|gemini-(?!3\.1-)\d[\w.-]+/g) || []
+    return matches.map((modelId) => ({ file, modelId }))
+  })
+
+  assert.deepEqual(offenders, [])
+})

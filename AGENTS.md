@@ -73,6 +73,7 @@
   - `project-docs/03_NEXT_STEPS.md`
   - `project-docs/04_DECISIONS.md` — если решение реально изменилось
 - Не плодить лишние файлы без причины.
+- Для Google/Gemini запрещено добавлять или использовать модели ниже 3.1. Live-рантайм должен использовать `models/gemini-3.1-flash-live-preview`, TTS — `gemini-3.1-flash-tts-preview`.
 
 ## Что важно помнить
 

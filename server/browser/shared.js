@@ -111,14 +111,22 @@ let sessionCleanupTimer = null;
 let activeRequestId = 0;
 export let geminiApiKey = '';
 export let geminiAgent = null;
-export let geminiModel = process.env.BROWSER_RESOLVER_MODEL || 'gemini-3-flash-preview';
+function normalizeGeminiResolverModel(model = '') {
+  const normalized = String(model || '').trim().replace(/^models\//, '');
+  if (normalized.startsWith('gemini-') && !normalized.startsWith('gemini-3.1-')) {
+    return '';
+  }
+  return normalized;
+}
+
+export let geminiModel = normalizeGeminiResolverModel(process.env.BROWSER_RESOLVER_MODEL || '');
 export const siteResolutionCache = new Map();
 let browserProxyBridgePromise = null;
 
 export function configureBrowserController({ apiKey, agent, model } = {}) {
   geminiApiKey = String(apiKey || '');
   geminiAgent = agent || null;
-  geminiModel = String(model || process.env.BROWSER_RESOLVER_MODEL || 'gemini-3-flash-preview');
+  geminiModel = normalizeGeminiResolverModel(model || process.env.BROWSER_RESOLVER_MODEL || '');
 }
 
 export function normalizeWhitespace(input) {

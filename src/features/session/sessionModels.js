@@ -3,6 +3,7 @@ import { isClientInlinePanelMode } from '../browser/browserPanelModel.js'
 export const SIDECAR_BOT_VOLUME_GUARD = 0.08
 export const BATYUSHKA_CHARACTER_IDS = new Set(['alesya-puck', 'batyushka-2', 'batyushka-3'])
 export const GEMINI_31_FLASH_LIVE_MODEL = 'models/gemini-3.1-flash-live-preview'
+export const GEMINI_31_FLASH_TTS_MODEL = 'gemini-3.1-flash-tts-preview'
 export const DEMO_SPEECH_CONFIG = Object.freeze({
   profile: 'balanced',
   bargeInHoldMs: 180,
@@ -105,6 +106,7 @@ export function buildRuntimeConfig({
     runtimeProvider: String(runtimeProvider || character.runtimeProvider || 'gemini-live').trim() || 'gemini-live',
     modelId: character.modelId || character.voiceModelId,
     voiceModelId: character.voiceModelId || character.modelId,
+    ttsModelId: character.ttsModelId || GEMINI_31_FLASH_TTS_MODEL,
     voiceName: character.voiceName,
     ttsVoiceName: character.ttsVoiceName || character.voiceName,
     systemPrompt: character.systemPrompt,
@@ -138,6 +140,7 @@ export function buildSignature(character, globalRuntimeConfig = {}) {
     String(character.runtimeProvider || 'gemini-live').trim(),
     String(character.modelId || character.voiceModelId || '').trim(),
     character.voiceModelId,
+    character.ttsModelId,
     character.voiceName,
     character.systemPrompt,
     character.greetingText,

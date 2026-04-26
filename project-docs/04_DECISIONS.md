@@ -41,3 +41,10 @@
   - Why: the assistant must not say that a site is open until the browser runtime returns verified URL/title/visible state/screenshot or an honest error.
 - Scenario text is allowed only as tests/acceptance criteria, not as hardcoded answer behavior.
   - Why: the demo must behave like a live voice agent, not a scripted flow.
+
+## 2026-04-27 Gemini 3.1 decision
+
+- Google/Gemini runtime models below 3.1 are forbidden for production config and defaults.
+  - Why: current Batyushka 2 work targets Gemini 3.1; old model strings create silent regressions and wrong integration assumptions.
+- `batyushka-2` uses `models/gemini-3.1-flash-live-preview` for realtime dialogue and `gemini-3.1-flash-tts-preview` for Gemini TTS repair/playback.
+  - Why: Google documents Live 3.1 as the low-latency audio-to-audio model and Gemini 3.1 Flash TTS as the latest steerable TTS model.

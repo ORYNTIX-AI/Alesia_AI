@@ -1,5 +1,5 @@
 export const DEFAULT_RUNTIME_CONFIG = {
-  voiceModelId: 'models/gemini-2.5-flash-native-audio-preview-12-2025',
+  voiceModelId: 'models/gemini-3.1-flash-live-preview',
   voiceName: 'Aoede',
   systemPrompt: '',
   greetingText: 'Поздоровайся коротко с пользователем, тебя зовут Алеся из AR-Fox.',

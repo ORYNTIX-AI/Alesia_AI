@@ -9,8 +9,9 @@ const PROMPTS_DIR = path.join(DEMO_CONTENT_DIR, 'prompts');
 const GREETINGS_DIR = path.join(DEMO_CONTENT_DIR, 'greetings');
 const DEFAULT_CONFIG_FILE = path.join(DEMO_CONTENT_DIR, 'default-app-config.json');
 
-export const DEFAULT_VOICE_MODEL = 'models/gemini-2.5-flash-native-audio-preview-12-2025';
 export const GEMINI_31_FLASH_LIVE_MODEL = 'models/gemini-3.1-flash-live-preview';
+export const GEMINI_31_FLASH_TTS_MODEL = 'gemini-3.1-flash-tts-preview';
+export const DEFAULT_VOICE_MODEL = GEMINI_31_FLASH_LIVE_MODEL;
 export const SUPPORTED_VOICES = [
   { name: 'Achernar', gender: 'female' },
   { name: 'Achird', gender: 'male' },
@@ -89,10 +90,12 @@ export function resolveGreetingRef(ref = '') {
 export function createCharacterRuntimeConfig(overrides = {}) {
   const runtimeProvider = String(overrides.runtimeProvider || overrides.provider || DEFAULT_RUNTIME_PROVIDER).trim() || DEFAULT_RUNTIME_PROVIDER;
   const modelId = String(overrides.modelId || overrides.voiceModelId || DEFAULT_VOICE_MODEL).trim() || DEFAULT_VOICE_MODEL;
+  const ttsModelId = String(overrides.ttsModelId || GEMINI_31_FLASH_TTS_MODEL).trim() || GEMINI_31_FLASH_TTS_MODEL;
   return {
     runtimeProvider,
     modelId,
     voiceModelId: modelId,
+    ttsModelId,
     liveInputEnabled: runtimeProvider === DEFAULT_RUNTIME_PROVIDER || runtimeProvider === YANDEX_REALTIME_RUNTIME_PROVIDER
       ? Boolean(overrides.liveInputEnabled)
       : false,

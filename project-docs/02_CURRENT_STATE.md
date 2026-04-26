@@ -155,3 +155,13 @@
 - Added a Brazil proxy in production env without committing credentials; `/health` now reports proxy host `196.19.122.152` and scheme `http`.
 - Gemini Live smoke for Batyushka 2 through the proxy passed `setupComplete` and returned both text and audio (`Христос воскресе.`, 10 audio chunks).
 - Production active character is now `batyushka-2`; Chromium domain check shows `Батюшка 2`, footer `v0.0.4`, no 3D avatar error, and no console errors.
+
+## 2026-04-27 Batya 2 Gemini 3.1 TTS update
+
+- Project rules now forbid Google/Gemini models below 3.1 in production defaults/config.
+- Default Gemini Live model is `models/gemini-3.1-flash-live-preview`.
+- `batyushka-2` has an explicit TTS model: `gemini-3.1-flash-tts-preview`.
+- Added server route `/api/gemini/tts` that calls Gemini `generateContent` with `responseModalities: ["AUDIO"]` and `speechConfig.voiceConfig.prebuiltVoiceConfig.voiceName`.
+- Batyushka 2 silent-audio repair now uses Gemini 3.1 Flash TTS instead of Yandex TTS.
+- Footer version is raised to `v0.0.5`.
+- Deployed to `https://alesia-ai.constitution.of.by`; `/health` is OK, runtime config is active on `batyushka-2`, and `/api/gemini/tts` returned PCM audio for a short Russian phrase.

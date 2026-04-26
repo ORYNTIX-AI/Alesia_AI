@@ -4,6 +4,9 @@ import { assertPublicUrl } from './browserRuntime.js';
 import { buildSessionHistoryPromptBlock, extractSpokenDomain, normalizeSpokenDomainLabel, parseHistoryUrl, sanitizeSessionHistory } from './siteResolutionSupport.js';
 
 export function buildGeminiModelPath() {
+  if (!geminiModel) {
+    throw new Error('Gemini browser resolver model is not configured');
+  }
   return geminiModel.startsWith('models/') ? geminiModel : `models/${geminiModel}`;
 }
 
