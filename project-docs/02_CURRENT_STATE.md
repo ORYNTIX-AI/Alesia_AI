@@ -171,3 +171,4 @@
 - 2026-04-27 follow-up: Batyushka 2 Gemini Live now uses `NO_INTERRUPTION` activity handling so phone echo/noise cannot server-interrupt the assistant mid-phrase; footer version is raised to `v0.0.9`.
 - 2026-04-27 follow-up: frontend HTML now loads `/registerSW.js` to unregister old service workers and clear stale browser caches on real clients; footer version is raised to `v0.0.10`.
 - 2026-04-27 follow-up: avatar GLB files are now served through an explicit `/avatars/:fileName` route with `model/gltf-binary` and immutable cache headers to avoid browser `ERR_HTTP2_PROTOCOL_ERROR`; footer version is raised to `v0.0.11`.
+- 2026-04-27 follow-up: reduced streamed-audio restart gaps, disabled Yandex Realtime server auto-interrupt while keeping native `create_response`, and raised early local-output cancel guard; footer version is raised to `v0.0.12`.

@@ -48,6 +48,7 @@ const SPEECH_STARTED_VOLUME_GUARD = 0.025;
 const INPUT_ECHO_SUPPRESSION_BUFFER_MS = 180;
 const INPUT_ECHO_SUPPRESSION_TAIL_MS = 650;
 const INPUT_ECHO_SUPPRESSION_VOLUME_GUARD = 0.012;
+const ACTIVE_OUTPUT_BUFFER_GUARD_MS = 200;
 
 function defaultBackendWsUrl(pathname = '/yandex-realtime-proxy') {
   if (DEFAULT_BACKEND_WS_BASE) {
@@ -361,7 +362,7 @@ export function useYandexRealtimeSession(audioPlayer, runtimeConfig = DEFAULT_RU
   const cancelAssistantOutput = useCallback((options = {}) => {
     const responseId = normalizeText(assistantTurnRef.current.responseId || '');
     const bufferedAudioMs = Number(audioPlayer?.getBufferedMs?.() || 0);
-    const hasLocalOutput = assistantTurnRef.current.active || Boolean(responseId) || bufferedAudioMs > 80;
+    const hasLocalOutput = assistantTurnRef.current.active || Boolean(responseId) || bufferedAudioMs > ACTIVE_OUTPUT_BUFFER_GUARD_MS;
     const interruptRequested = options.notifyServer === false || !hasLocalOutput ? false : requestAssistantInterrupt(responseId);
     if (!hasLocalOutput && !interruptRequested) {
       return false;
@@ -388,7 +389,7 @@ export function useYandexRealtimeSession(audioPlayer, runtimeConfig = DEFAULT_RU
     if (options.interrupt !== false) {
       const responseId = normalizeText(assistantTurnRef.current.responseId || '');
       const bufferedAudioMs = Number(audioPlayer?.getBufferedMs?.() || 0);
-      const hasLocalOutput = assistantTurnRef.current.active || Boolean(responseId) || bufferedAudioMs > 80;
+      const hasLocalOutput = assistantTurnRef.current.active || Boolean(responseId) || bufferedAudioMs > ACTIVE_OUTPUT_BUFFER_GUARD_MS;
       if (hasLocalOutput) {
         requestAssistantInterrupt(responseId);
         audioPlayer.stop?.();

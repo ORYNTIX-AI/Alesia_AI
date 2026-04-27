@@ -56,8 +56,9 @@ test('Yandex realtime uses native server VAD response creation', () => {
   })
 
   assert.equal(payload.session.audio.input.turn_detection.type, 'server_vad')
+  assert.equal(payload.session.audio.input.turn_detection.threshold, 0.7)
   assert.equal(payload.session.audio.input.turn_detection.create_response, true)
-  assert.equal(payload.session.audio.input.turn_detection.interrupt_response, true)
+  assert.equal(payload.session.audio.input.turn_detection.interrupt_response, false)
   assert.equal(payload.session.audio.input.format.rate, 24000)
   assert.equal(payload.session.audio.input.format.channels, 1)
   assert.equal(payload.session.temperature, 0.2)

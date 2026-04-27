@@ -22,9 +22,9 @@
         this.syntheticVolume = 0;
         this.syntheticVolumeUntilMs = 0;
         this.lastChunkAt = 0;
-        this.initialBufferMs = 110;
+        this.initialBufferMs = 80;
         this.fadeDurationSec = 0.004;
-        this.restartCooldownMs = 140;
+        this.restartCooldownMs = 40;
         this.blockedUntilMs = 0;
         this.resumeTimer = null;
         this.htmlChunkTargetMs = 360;
@@ -108,7 +108,9 @@
 
         const currentTime = this.audioContext.currentTime;
         if (this.nextStartTime < currentTime + 0.01) {
-            this.nextStartTime = currentTime + (this.initialBufferMs / 1000);
+            const initialBufferSec = this.initialBufferMs / 1000;
+            const idleSince = currentTime - this.bufferedUntil;
+            this.nextStartTime = currentTime + (idleSince > initialBufferSec ? initialBufferSec : 0.02);
         }
 
         while (this.queue.length > 0) {
