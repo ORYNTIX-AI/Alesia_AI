@@ -172,7 +172,7 @@ async function runGeminiLiveSmoke(appConfig) {
         assistantText = `${assistantText} ${payload.serverContent.outputTranscription.text}`.trim()
       }
 
-      if (payload?.serverContent?.turnComplete || payload?.serverContent?.generationComplete) {
+      if (payload?.serverContent?.turnComplete) {
         if (!assistantText || audioChunkCount < 1) {
           settled = true
           clearTimeout(timerId)
