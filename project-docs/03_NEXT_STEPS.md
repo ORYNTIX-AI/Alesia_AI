@@ -81,6 +81,7 @@
 
 1. `v0.0.13` is deployed to production.
 2. Production live smoke passed for `gemini-live,yandex-realtime,browser,knowledge`.
-3. Re-check on a phone:
+3. `v0.0.14` is ready for deploy after the Gemini turn lifecycle repair.
+4. After deploy, re-check on a phone:
    - Batyushka 2 does not cut itself mid-word while speaking;
    - Batyushka 3 answers after a normal user phrase, without `assistant.turn.drop: unexpected-start`.

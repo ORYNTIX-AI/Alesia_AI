@@ -14,6 +14,7 @@ import {
   resolveAssistantTurnIdleFlushMs,
   resolveBackendUrl,
   resolveRealtimeInputConfig,
+  shouldCommitGeminiAssistantTurn,
 } from './geminiLiveShared.js';
 
 const BATYUSHKA_2_BARGE_IN_RMS_THRESHOLD = 0.18;
@@ -125,12 +126,20 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
   const scheduleAssistantTurnFlush = useCallback(() => {
     clearAssistantTurnTimer();
     const debounceMs = resolveAssistantTurnIdleFlushMs(runtimeConfigRef.current);
-    assistantTurnRef.current.timerId = window.setTimeout(() => {
-      if (!assistantTurnRef.current.interrupted) {
-        flushAssistantTurn('commit');
-      }
-    }, debounceMs);
-  }, [clearAssistantTurnTimer, flushAssistantTurn]);
+    const armTimer = (delayMs) => {
+      assistantTurnRef.current.timerId = window.setTimeout(() => {
+        if (!assistantTurnRef.current.interrupted) {
+          const bufferedMs = Number(audioPlayer?.getBufferedMs?.() || 0);
+          if (isBatyushka2StableRuntime(runtimeConfigRef.current) && bufferedMs > 250) {
+            armTimer(500);
+            return;
+          }
+          flushAssistantTurn('commit');
+        }
+      }, delayMs);
+    };
+    armTimer(debounceMs);
+  }, [audioPlayer, clearAssistantTurnTimer, flushAssistantTurn]);
 
   const ensureAssistantTurnStarted = useCallback(() => {
     if (assistantTurnRef.current.active) {
@@ -553,7 +562,7 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
             flushAssistantTurn('cancel');
           }
 
-          if (data.serverContent?.turnComplete || data.serverContent?.generationComplete) {
+          if (shouldCommitGeminiAssistantTurn(data.serverContent)) {
             const finalInputTranscription = normalizeAssistantText(inputTranscriptionRef.current);
             if (finalInputTranscription) {
               callbacksRef.current.onInputTranscriptionCommit?.({ text: finalInputTranscription });

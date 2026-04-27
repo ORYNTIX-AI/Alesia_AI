@@ -20,7 +20,10 @@ import {
   buildRuntimeTurnPrompt,
   buildSessionHistorySummary,
 } from '../../src/features/session/transcriptPromptBuilders.js'
-import { resolveRealtimeInputConfig } from '../../src/hooks/geminiLiveShared.js'
+import {
+  resolveRealtimeInputConfig,
+  shouldCommitGeminiAssistantTurn,
+} from '../../src/hooks/geminiLiveShared.js'
 import { shouldUseRealtimeFallback } from '../../src/features/voice/useVoiceRuntimeAdapters.js'
 
 const MOJIBAKE_MARKERS = ['Рџ', 'Рќ', 'СЃ', 'вЂ', '�', '����']
@@ -83,6 +86,11 @@ test('Batyushka 2 Gemini realtime config prevents server-side echo self-interrup
   assert.equal(config.activityHandling, 'NO_INTERRUPTION')
   assert.equal(config.automaticActivityDetection.startOfSpeechSensitivity, 'START_SENSITIVITY_HIGH')
   assert.ok(config.automaticActivityDetection.silenceDurationMs < 900)
+})
+
+test('Gemini Live assistant turn commits only on turnComplete', () => {
+  assert.equal(shouldCommitGeminiAssistantTurn({ generationComplete: true }), false)
+  assert.equal(shouldCommitGeminiAssistantTurn({ turnComplete: true }), true)
 })
 
 test('Batyushka 3 can fall back from Yandex realtime to legacy runtime', () => {

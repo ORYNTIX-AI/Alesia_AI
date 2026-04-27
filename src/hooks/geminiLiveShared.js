@@ -126,6 +126,10 @@ export function resolveAssistantTurnIdleFlushMs(runtimeConfig) {
   return ASSISTANT_TURN_IDLE_FLUSH_MS;
 }
 
+export function shouldCommitGeminiAssistantTurn(serverContent) {
+  return Boolean(serverContent?.turnComplete);
+}
+
 export function resolveRealtimeInputConfig(runtimeConfig) {
   const stableBatyushkaProfile = isBatyushka2StableRuntime(runtimeConfig);
 
