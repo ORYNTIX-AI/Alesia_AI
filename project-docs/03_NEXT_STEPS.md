@@ -79,8 +79,8 @@
 
 ## 2026-04-28 After voice cutoff repair
 
-1. Deploy `v0.0.13`.
-2. Re-run production live smoke.
+1. `v0.0.13` is deployed to production.
+2. Production live smoke passed for `gemini-live,yandex-realtime,browser,knowledge`.
 3. Re-check on a phone:
    - Batyushka 2 does not cut itself mid-word while speaking;
    - Batyushka 3 answers after a normal user phrase, without `assistant.turn.drop: unexpected-start`.

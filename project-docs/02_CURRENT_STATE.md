@@ -187,3 +187,5 @@
 - Batyushka 2 still keeps local guarded interruption: weak mic echo is suppressed during playback, and only strong local speech can stop local playback.
 - Batyushka 3 no longer holds Yandex Realtime final transcripts before creating the local request state. Native Yandex `create_response` can start the assistant response immediately, so client-side final-hold caused `assistant.turn.drop: unexpected-start` and missed answers.
 - Local checks after the repair passed: `npm run lint`, `npm test`, `npm run build`, `npm run test:architecture`.
+- Deployed `v0.0.13` to `https://alesia-ai.constitution.of.by`; `/health` is OK, container `ALesia_AI` is healthy, and active bundle is `assets/index-DyFDlTTd.js`.
+- Production `LIVE_SMOKE_TARGETS=gemini-live,yandex-realtime,browser,knowledge npm run test:live` passed on port `3314` with real production env: Gemini Live setup/text/audio, Yandex Realtime verified `open_site`, browser query/action, and knowledge query all succeeded.
