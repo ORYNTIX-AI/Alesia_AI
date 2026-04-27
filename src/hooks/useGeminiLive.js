@@ -16,6 +16,10 @@ import {
   resolveRealtimeInputConfig,
 } from './geminiLiveShared.js';
 
+const BATYUSHKA_2_BARGE_IN_RMS_THRESHOLD = 0.085;
+const BATYUSHKA_2_BARGE_IN_HOLD_MS = 900;
+const BATYUSHKA_2_ASSISTANT_BUFFER_GUARD_MS = 80;
+
 export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFIG, callbacks = DEFAULT_CALLBACKS) {
   const [status, setStatus] = useState('disconnected');
   const [error, setError] = useState(null);
@@ -45,6 +49,7 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
   const sessionResumptionHandleRef = useRef('');
   const pendingGoAwayRef = useRef(null);
   const lifecycleTokenRef = useRef(0);
+  const strongUserSpeechUntilRef = useRef(0);
 
   const releaseSuppressedAudio = useCallback(() => {
     suppressAudioRef.current = false;
@@ -299,6 +304,19 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
           }
           const rms = Math.sqrt(sum / inputData.length);
           userVolumeRef.current = Math.min(1, rms * 5);
+          const stableBatyushkaRuntime = isBatyushka2StableRuntime(activeRuntime);
+          const assistantOutputActive = stableBatyushkaRuntime && (
+            assistantTurnRef.current.active
+            || Number(audioPlayer?.getBufferedMs?.() || 0) > BATYUSHKA_2_ASSISTANT_BUFFER_GUARD_MS
+            || Number(audioPlayer?.getVolume?.() || 0) > 0.035
+          );
+          const nowMs = Date.now();
+          if (stableBatyushkaRuntime && rms >= BATYUSHKA_2_BARGE_IN_RMS_THRESHOLD) {
+            strongUserSpeechUntilRef.current = nowMs + BATYUSHKA_2_BARGE_IN_HOLD_MS;
+          }
+          if (assistantOutputActive && nowMs > strongUserSpeechUntilRef.current) {
+            return;
+          }
 
           if (
             setupCompleteRef.current
@@ -505,6 +523,13 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
           }
 
           if (data.serverContent?.interrupted) {
+            if (
+              isBatyushka2StableRuntime(runtimeConfigRef.current)
+              && Date.now() > strongUserSpeechUntilRef.current
+            ) {
+              suppressAudioRef.current = false;
+              return;
+            }
             audioPlayer.stop?.();
             suppressAudioRef.current = true;
             assistantTurnRef.current.interrupted = true;
