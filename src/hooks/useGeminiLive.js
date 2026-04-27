@@ -308,17 +308,19 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
           userVolumeRef.current = Math.min(1, rms * 5);
           const stableBatyushkaRuntime = isBatyushka2StableRuntime(activeRuntime);
           const nowMs = Date.now();
-          const assistantOutputActive = stableBatyushkaRuntime && (
+          const assistantPlaybackActive = stableBatyushkaRuntime && (
             assistantTurnRef.current.active
             || Number(audioPlayer?.getBufferedMs?.() || 0) > BATYUSHKA_2_ASSISTANT_BUFFER_GUARD_MS
             || Number(audioPlayer?.getVolume?.() || 0) > 0.035
-            || nowMs < assistantEchoHoldUntilRef.current
           );
-          if (assistantOutputActive) {
+          if (assistantPlaybackActive) {
             assistantEchoHoldUntilRef.current = Math.max(
               assistantEchoHoldUntilRef.current,
               nowMs + BATYUSHKA_2_ASSISTANT_ECHO_HOLD_MS,
             );
+            return;
+          }
+          if (stableBatyushkaRuntime && nowMs < assistantEchoHoldUntilRef.current) {
             return;
           }
           if (stableBatyushkaRuntime && rms >= BATYUSHKA_2_BARGE_IN_RMS_THRESHOLD) {

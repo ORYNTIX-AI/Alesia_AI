@@ -1452,7 +1452,10 @@ export function useConversationRuntimeController({
 
   const voiceSessionCallbacks = {
       onSessionReady: ({ resumed = false, shouldSendGreeting = false }) => {
-        const shouldAutoGreet = shouldSendGreeting && !(usesYandexRealtimeRuntime && selectedCharacter?.id === 'batyushka-3');
+        const shouldAutoGreet = shouldSendGreeting && !(
+          (usesYandexRealtimeRuntime && selectedCharacter?.id === 'batyushka-3')
+          || selectedCharacter?.id === 'batyushka-2'
+        );
         transitionVoiceConversationState(VOICE_CONVERSATION_EVENTS.SESSION_READY, {
           reason: resumed ? 'resumed' : 'ready',
         });
@@ -2461,7 +2464,10 @@ export function useConversationRuntimeController({
     updateConversationSessionState({
       activeSttSessionId: inputSessionId,
     });
-    const shouldSendSessionGreeting = !(usesYandexRealtimeRuntime && selectedCharacter?.id === 'batyushka-3');
+    const shouldSendSessionGreeting = !(
+      (usesYandexRealtimeRuntime && selectedCharacter?.id === 'batyushka-3')
+      || selectedCharacter?.id === 'batyushka-2'
+    );
     const bootstrapText = await bootstrapConversationContext(nextConversationSessionId, { shouldSendGreeting: shouldSendSessionGreeting });
     setAppliedSessionSignature(currentSignature);
     connect(buildSessionConnectConfig({
