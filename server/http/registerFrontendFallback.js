@@ -57,6 +57,22 @@ export function registerFrontendFallback(app, {
     res.type('text/javascript; charset=utf-8').send(unregisterServiceWorkerClientScript);
   });
 
+  app.get('/avatars/:fileName', (req, res, next) => {
+    const fileName = path.basename(String(req.params.fileName || ''));
+    if (!fileName || fileName !== req.params.fileName) {
+      return res.status(404).type('text/plain; charset=utf-8').send('Static file not found');
+    }
+    const avatarPath = path.join(distDir, 'avatars', fileName);
+    if (!fs.existsSync(avatarPath)) {
+      return next();
+    }
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    if (fileName.toLowerCase().endsWith('.glb')) {
+      res.type('model/gltf-binary');
+    }
+    return res.sendFile(avatarPath);
+  });
+
   if (fs.existsSync(distDir)) {
     app.use(express.static(distDir, {
       index: false,
@@ -72,6 +88,12 @@ export function registerFrontendFallback(app, {
         }
         if (normalizedPath.includes('/assets/')) {
           res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+        }
+        if (normalizedPath.includes('/avatars/')) {
+          res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+          if (normalizedPath.toLowerCase().endsWith('.glb')) {
+            res.setHeader('Content-Type', 'model/gltf-binary');
+          }
         }
       },
     }));
