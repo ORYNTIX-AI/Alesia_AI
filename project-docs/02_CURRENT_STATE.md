@@ -176,3 +176,4 @@
 - 2026-04-27 follow-up: reduced Batyushka 3 Yandex Realtime turn latency: final merge window 600ms, normal hold 180ms, short hold 280ms, assistant echo window 400ms, and short answers such as `да`, `нет`, `ок` now count as meaningful turns.
 - 2026-04-27 follow-up: restored automatic session greeting for Batyushka 2 and Batyushka 3; Yandex Realtime now lets strong local user speech pass through the playback echo gate and ignores server `speech_started` interrupts when local mic volume is below the user-speech guard.
 - Local checks after the guarded barge-in update passed: `npm run lint`, `npm test`, `npm run build`, `npm run test:architecture`.
+- Deployed guarded barge-in update to `https://alesia-ai.constitution.of.by`; `/health` is OK, container `ALesia_AI` is healthy, active bundle is `assets/index-Cw_LSh5i.js`, and Chromium domain sanity found no page console errors.

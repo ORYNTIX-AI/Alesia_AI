@@ -71,7 +71,7 @@
 
 ## 2026-04-27 After guarded barge-in update
 
-1. Deploy the guarded Batyushka 2 / Batyushka 3 barge-in update to production.
+1. Production deploy is complete for the guarded Batyushka 2 / Batyushka 3 barge-in update.
 2. On a real phone, verify both opposite cases:
    - user can interrupt an active assistant answer with normal speech;
    - assistant does not cut itself off when the user is silent and the phone speaker is loud.
