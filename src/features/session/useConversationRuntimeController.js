@@ -65,9 +65,6 @@ const SILENT_TURN_FALLBACK_NEXT_CHUNK_TIMEOUT_MS = 12000;
 const SILENT_TURN_FALLBACK_CHUNK_MAX_CHARS = 90;
 const USER_FINAL_DEDUP_WINDOW_MS = 4200;
 const YANDEX_REALTIME_EXTRA_FINAL_SUPPRESS_MS = 900;
-const YANDEX_REALTIME_FINAL_MERGE_WINDOW_MS = 600;
-const YANDEX_REALTIME_FINAL_HOLD_MS = 180;
-const YANDEX_REALTIME_SHORT_FINAL_HOLD_MS = 280;
 const LIVE_INPUT_FINAL_DEDUP_SOURCES = new Set([
   'gemini-input',
   'yandex-realtime-input',
@@ -787,36 +784,6 @@ export function useConversationRuntimeController({
     usesClientInlinePanel,
   ]);
 
-  const schedulePendingYandexRealtimeFinal = React.useCallback((delayMs = YANDEX_REALTIME_FINAL_HOLD_MS) => {
-    const bufferedText = normalizeSpeechText(pendingYandexRealtimeFinalRef.current.text);
-    if (!bufferedText) {
-      clearPendingYandexRealtimeFinal();
-      return;
-    }
-
-    if (pendingYandexRealtimeFinalRef.current.timerId) {
-      clearTimeout(pendingYandexRealtimeFinalRef.current.timerId);
-    }
-
-    pendingYandexRealtimeFinalRef.current.timerId = window.setTimeout(() => {
-      const pendingText = normalizeSpeechText(pendingYandexRealtimeFinalRef.current.text);
-      clearPendingYandexRealtimeFinal();
-      if (!pendingText) {
-        return;
-      }
-      commitNativeYandexRealtimeUserTranscript(pendingText);
-    }, Math.max(220, delayMs));
-  }, [clearPendingYandexRealtimeFinal, commitNativeYandexRealtimeUserTranscript]);
-
-  const flushPendingYandexRealtimeFinal = React.useCallback((mode = 'commit') => {
-    const pendingText = normalizeSpeechText(pendingYandexRealtimeFinalRef.current.text);
-    clearPendingYandexRealtimeFinal();
-    if (mode !== 'commit' || !pendingText) {
-      return false;
-    }
-    return commitNativeYandexRealtimeUserTranscript(pendingText);
-  }, [clearPendingYandexRealtimeFinal, commitNativeYandexRealtimeUserTranscript]);
-
   const schedulePendingServerFinal = React.useCallback((delayMs = SERVER_STT_FRAGMENT_HOLD_MS) => {
     const bufferedText = normalizeSpeechText(pendingServerFinalRef.current.text);
     if (!bufferedText) {
@@ -942,50 +909,6 @@ export function useConversationRuntimeController({
     }
 
     const now = Date.now();
-    const pendingText = normalizeSpeechText(pendingYandexRealtimeFinalRef.current.text);
-    const pendingCapturedAt = Number(pendingYandexRealtimeFinalRef.current.capturedAt || 0);
-    if (pendingText) {
-      const withinMergeWindow = pendingCapturedAt > 0
-        && (now - pendingCapturedAt) <= YANDEX_REALTIME_FINAL_MERGE_WINDOW_MS;
-      if (withinMergeWindow && canMergeServerTranscriptFragments(pendingText, normalized)) {
-        const mergedText = mergeServerTranscriptFragments(pendingText, normalized);
-        pendingYandexRealtimeFinalRef.current.text = mergedText;
-        pendingYandexRealtimeFinalRef.current.capturedAt = now;
-        recordConversationAction('stt.stream.final.merge', {
-          conversationSessionId: conversationSessionIdRef.current || '',
-          source: 'yandex-realtime-input',
-          textLength: mergedText.length,
-        });
-        schedulePendingYandexRealtimeFinal(
-          looksLikeIncompleteTranscriptFragment(mergedText)
-            ? YANDEX_REALTIME_SHORT_FINAL_HOLD_MS
-            : YANDEX_REALTIME_FINAL_HOLD_MS,
-        );
-        return;
-      }
-
-      flushPendingYandexRealtimeFinal('commit');
-    }
-
-    if (looksLikeIncompleteTranscriptFragment(normalized)) {
-      pendingYandexRealtimeFinalRef.current = {
-        text: normalized,
-        timerId: null,
-        capturedAt: now,
-      };
-      recordConversationAction('stt.stream.final.hold', {
-        conversationSessionId: conversationSessionIdRef.current || '',
-        source: 'yandex-realtime-input',
-        textLength: normalized.length,
-      });
-      schedulePendingYandexRealtimeFinal(
-        classifyTranscriptIntent(normalized) === 'site_open'
-          ? YANDEX_REALTIME_SHORT_FINAL_HOLD_MS
-          : YANDEX_REALTIME_FINAL_HOLD_MS,
-      );
-      return;
-    }
-
     const previousFinal = lastLiveFinalRef.current;
     const transcriptKey = normalizeTranscriptKey(normalized);
     if (
@@ -1012,10 +935,7 @@ export function useConversationRuntimeController({
     assistantAwaitingResponseRef,
     clearPendingYandexRealtimeFinal,
     commitNativeYandexRealtimeUserTranscript,
-    flushPendingYandexRealtimeFinal,
-    pendingYandexRealtimeFinalRef,
     recordConversationAction,
-    schedulePendingYandexRealtimeFinal,
     transitionVoiceConversationState,
   ]);
 

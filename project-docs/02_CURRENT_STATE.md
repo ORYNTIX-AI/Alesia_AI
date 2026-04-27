@@ -179,3 +179,11 @@
 - Deployed guarded barge-in update to `https://alesia-ai.constitution.of.by`; `/health` is OK, container `ALesia_AI` is healthy, active bundle is `assets/index-Cw_LSh5i.js`, and Chromium domain sanity found no page console errors.
 - Fixed `test/live/liveSmoke.js` for Gemini 3.1 text turns (`realtimeInput.text` instead of legacy `client_content`).
 - Production `LIVE_SMOKE_TARGETS=gemini-live,yandex-realtime,browser,knowledge npm run test:live` passed from a server temp checkout with real production env: Gemini Live returned setup/text/audio, Yandex Realtime opened verified `https://azbyka.ru/`, browser query/action passed, and knowledge returned hits.
+
+## 2026-04-28 Voice cutoff repair
+
+- Footer/package version raised to `v0.0.13`.
+- Batyushka 2 Gemini Live returns to `NO_INTERRUPTION` activity handling; Google docs state `START_OF_ACTIVITY_INTERRUPTS` cuts the current response at activity start, which matches the observed half-word cutoff from phone echo/noise.
+- Batyushka 2 still keeps local guarded interruption: weak mic echo is suppressed during playback, and only strong local speech can stop local playback.
+- Batyushka 3 no longer holds Yandex Realtime final transcripts before creating the local request state. Native Yandex `create_response` can start the assistant response immediately, so client-side final-hold caused `assistant.turn.drop: unexpected-start` and missed answers.
+- Local checks after the repair passed: `npm run lint`, `npm test`, `npm run build`, `npm run test:architecture`.

@@ -77,10 +77,10 @@ test('prompt builders do not contain mojibake markers', () => {
   }
 })
 
-test('Batyushka 2 Gemini realtime config allows guarded barge-in', () => {
+test('Batyushka 2 Gemini realtime config prevents server-side echo self-interrupts', () => {
   const config = resolveRealtimeInputConfig({ characterId: 'batyushka-2' })
 
-  assert.equal(config.activityHandling, 'START_OF_ACTIVITY_INTERRUPTS')
+  assert.equal(config.activityHandling, 'NO_INTERRUPTION')
   assert.equal(config.automaticActivityDetection.startOfSpeechSensitivity, 'START_SENSITIVITY_HIGH')
   assert.ok(config.automaticActivityDetection.silenceDurationMs < 900)
 })

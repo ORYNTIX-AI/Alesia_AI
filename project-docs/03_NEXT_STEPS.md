@@ -76,3 +76,11 @@
    - user can interrupt an active assistant answer with normal speech;
    - assistant does not cut itself off when the user is silent and the phone speaker is loud.
 3. Production smoke with real env passed for `gemini-live,yandex-realtime,browser,knowledge`; remaining validation is a real phone/microphone pass.
+
+## 2026-04-28 After voice cutoff repair
+
+1. Deploy `v0.0.13`.
+2. Re-run production live smoke.
+3. Re-check on a phone:
+   - Batyushka 2 does not cut itself mid-word while speaking;
+   - Batyushka 3 answers after a normal user phrase, without `assistant.turn.drop: unexpected-start`.

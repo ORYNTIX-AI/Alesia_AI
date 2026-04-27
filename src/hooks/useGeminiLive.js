@@ -539,6 +539,13 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
           }
 
           if (data.serverContent?.interrupted) {
+            if (
+              isBatyushka2StableRuntime(runtimeConfigRef.current)
+              && Date.now() >= strongUserSpeechUntilRef.current
+            ) {
+              suppressAudioRef.current = false;
+              return;
+            }
             audioPlayer.stop?.();
             suppressAudioRef.current = true;
             assistantTurnRef.current.interrupted = true;
