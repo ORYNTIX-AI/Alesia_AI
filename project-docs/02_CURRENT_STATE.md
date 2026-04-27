@@ -22,7 +22,7 @@
   - приветствия, stop-фразы, persona-вопросы, молитвы
   - открытие сайтов и действия `назад / вперёд / обнови / прокрути / нажми`
   - STT prompt и статусы session/browser
-- Для `Батюшка 2` в Gemini Live включен barge-in через `START_OF_ACTIVITY_INTERRUPTS`; профиль `NO_INTERRUPTION` убран.
+- Для `Батюшка 2` в Gemini Live включен профиль `NO_INTERRUPTION`, чтобы эхо телефона не обрезало ответ ассистента на полуслове.
 - Gemini audio-only turn теперь финализируется как отвеченный turn, а не дропается как `empty-commit`.
 - Для `Батюшка 3` разрешен кодовый fallback `yandex-realtime -> yandex-full-legacy` при runtime/connect ошибках.
 - Добавлены unit-тесты на русские voice/browser сценарии и проверку prompt builders на mojibake.
@@ -168,3 +168,4 @@
 - 2026-04-27 follow-up: mobile playback now uses the scheduled WebAudio path instead of forcing per-chunk HTMLAudio output; footer version is raised to `v0.0.6`.
 - 2026-04-27 follow-up: Batyushka 2 now hard-gates microphone frames during and shortly after assistant playback to stop echo from becoming a false Gemini barge-in; footer version is raised to `v0.0.7`.
 - 2026-04-27 follow-up: fixed Batyushka 2 echo hold so it no longer extends itself forever after assistant speech, disabled automatic session greeting for Batyushka 2, and reduced Gemini Live endpointing delay; footer version is raised to `v0.0.8`.
+- 2026-04-27 follow-up: Batyushka 2 Gemini Live now uses `NO_INTERRUPTION` activity handling so phone echo/noise cannot server-interrupt the assistant mid-phrase; footer version is raised to `v0.0.9`.
