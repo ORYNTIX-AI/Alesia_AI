@@ -195,6 +195,9 @@
 - Footer/package version raised to `v0.0.14`.
 - Root cause found in history/logs: Batyushka 2 could close the local assistant turn on Gemini `generationComplete` or idle fallback while Google was still delivering/playing the turn; late chunks then hit `assistant.turn.drop: unexpected-start` and could be suppressed.
 - Gemini Live assistant turns now commit only on `turnComplete`; Batyushka 2 idle fallback also waits while the audio player still has buffered output.
-- Added a unit test that rejects treating `generationComplete` as a completed Gemini turn.
+- Added tests that reject treating `generationComplete` as a completed Gemini turn, including the production live-smoke path.
 - Production logs after `v0.0.13` showed Batyushka 3 producing `assistant.turn.start`, `assistant.turn.audio-start`, and `assistant.turn.commit` for normal Yandex Realtime turns; no fresh `unexpected-start` was found in the recent checked window.
 - Local checks after the lifecycle repair passed: `npm run lint`, `npm test`, `npm run build`, `npm run test:architecture`, `npm run test:e2e`.
+- Deployed `v0.0.14` to `https://alesia-ai.constitution.of.by`; `/health` is OK, container `ALesia_AI` is healthy, active bundle is `assets/index-BgxocFBR.js`, and the footer shows `v0.0.14`.
+- Direct production WebSocket smoke passed: Gemini Live returned text/audio and reached `turnComplete` after `generationComplete`; Yandex Realtime returned text/audio and `assistant_turn_done`.
+- Fresh production logs after the smoke had no `assistant.turn.interrupted`, `assistant.turn.drop`, `audio-drop`, `answer-audio-missed`, or `unexpected-start`.
