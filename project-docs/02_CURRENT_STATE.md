@@ -169,3 +169,4 @@
 - 2026-04-27 follow-up: Batyushka 2 now hard-gates microphone frames during and shortly after assistant playback to stop echo from becoming a false Gemini barge-in; footer version is raised to `v0.0.7`.
 - 2026-04-27 follow-up: fixed Batyushka 2 echo hold so it no longer extends itself forever after assistant speech, disabled automatic session greeting for Batyushka 2, and reduced Gemini Live endpointing delay; footer version is raised to `v0.0.8`.
 - 2026-04-27 follow-up: Batyushka 2 Gemini Live now uses `NO_INTERRUPTION` activity handling so phone echo/noise cannot server-interrupt the assistant mid-phrase; footer version is raised to `v0.0.9`.
+- 2026-04-27 follow-up: frontend HTML now loads `/registerSW.js` to unregister old service workers and clear stale browser caches on real clients; footer version is raised to `v0.0.10`.
