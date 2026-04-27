@@ -75,4 +75,4 @@
 2. On a real phone, verify both opposite cases:
    - user can interrupt an active assistant answer with normal speech;
    - assistant does not cut itself off when the user is silent and the phone speaker is loud.
-3. Re-run production smoke for Gemini Live and Yandex Realtime if production secrets/proxy are available.
+3. Production smoke with real env passed for `gemini-live,yandex-realtime,browser,knowledge`; remaining validation is a real phone/microphone pass.

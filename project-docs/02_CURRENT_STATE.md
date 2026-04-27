@@ -177,3 +177,5 @@
 - 2026-04-27 follow-up: restored automatic session greeting for Batyushka 2 and Batyushka 3; Yandex Realtime now lets strong local user speech pass through the playback echo gate and ignores server `speech_started` interrupts when local mic volume is below the user-speech guard.
 - Local checks after the guarded barge-in update passed: `npm run lint`, `npm test`, `npm run build`, `npm run test:architecture`.
 - Deployed guarded barge-in update to `https://alesia-ai.constitution.of.by`; `/health` is OK, container `ALesia_AI` is healthy, active bundle is `assets/index-Cw_LSh5i.js`, and Chromium domain sanity found no page console errors.
+- Fixed `test/live/liveSmoke.js` for Gemini 3.1 text turns (`realtimeInput.text` instead of legacy `client_content`).
+- Production `LIVE_SMOKE_TARGETS=gemini-live,yandex-realtime,browser,knowledge npm run test:live` passed from a server temp checkout with real production env: Gemini Live returned setup/text/audio, Yandex Realtime opened verified `https://azbyka.ru/`, browser query/action passed, and knowledge returned hits.
