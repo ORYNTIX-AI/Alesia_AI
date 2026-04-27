@@ -68,3 +68,11 @@
 1. Deploy the native Yandex Realtime correction to production.
 2. Re-run production Yandex-only live smoke and verify real audio response, lip-sync, interruption, and browser tool verified snapshots.
 3. Re-check logs for absence of mocked/forced reply paths, `create_response:false`, assistant-answer suppression, and delayed `input_text` replay for microphone turns.
+
+## 2026-04-27 After guarded barge-in update
+
+1. Deploy the guarded Batyushka 2 / Batyushka 3 barge-in update to production.
+2. On a real phone, verify both opposite cases:
+   - user can interrupt an active assistant answer with normal speech;
+   - assistant does not cut itself off when the user is silent and the phone speaker is loud.
+3. Re-run production smoke for Gemini Live and Yandex Realtime if production secrets/proxy are available.

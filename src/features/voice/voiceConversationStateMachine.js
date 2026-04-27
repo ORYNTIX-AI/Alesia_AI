@@ -51,10 +51,8 @@ const LOW_VALUE_USER_FRAGMENTS = new Set([
   'а',
   'и',
   'ну',
-  'да',
   'ага',
   'угу',
-  'ок',
   'ладно',
   'хм',
   'мм',
@@ -133,7 +131,7 @@ export function isMeaningfulYandexUserTurn(text = '') {
     return false;
   }
   const compact = normalized.replace(/\s+/g, '');
-  if (compact.length < 4) {
+  if (compact.length < 2) {
     return false;
   }
   return /[\p{L}\p{N}]/u.test(compact);

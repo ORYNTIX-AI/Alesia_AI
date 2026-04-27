@@ -16,10 +16,10 @@ import {
   resolveRealtimeInputConfig,
 } from './geminiLiveShared.js';
 
-const BATYUSHKA_2_BARGE_IN_RMS_THRESHOLD = 0.085;
+const BATYUSHKA_2_BARGE_IN_RMS_THRESHOLD = 0.18;
 const BATYUSHKA_2_BARGE_IN_HOLD_MS = 900;
 const BATYUSHKA_2_ASSISTANT_BUFFER_GUARD_MS = 80;
-const BATYUSHKA_2_ASSISTANT_ECHO_HOLD_MS = 1800;
+const BATYUSHKA_2_ASSISTANT_ECHO_HOLD_MS = 250;
 
 export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFIG, callbacks = DEFAULT_CALLBACKS) {
   const [status, setStatus] = useState('disconnected');
@@ -308,23 +308,27 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
           userVolumeRef.current = Math.min(1, rms * 5);
           const stableBatyushkaRuntime = isBatyushka2StableRuntime(activeRuntime);
           const nowMs = Date.now();
+          if (stableBatyushkaRuntime && rms >= BATYUSHKA_2_BARGE_IN_RMS_THRESHOLD) {
+            strongUserSpeechUntilRef.current = nowMs + BATYUSHKA_2_BARGE_IN_HOLD_MS;
+          }
+          const strongUserSpeechActive = stableBatyushkaRuntime && nowMs < strongUserSpeechUntilRef.current;
           const assistantPlaybackActive = stableBatyushkaRuntime && (
             assistantTurnRef.current.active
             || Number(audioPlayer?.getBufferedMs?.() || 0) > BATYUSHKA_2_ASSISTANT_BUFFER_GUARD_MS
             || Number(audioPlayer?.getVolume?.() || 0) > 0.035
           );
-          if (assistantPlaybackActive) {
+          if (assistantPlaybackActive && !strongUserSpeechActive) {
             assistantEchoHoldUntilRef.current = Math.max(
               assistantEchoHoldUntilRef.current,
               nowMs + BATYUSHKA_2_ASSISTANT_ECHO_HOLD_MS,
             );
             return;
           }
-          if (stableBatyushkaRuntime && nowMs < assistantEchoHoldUntilRef.current) {
-            return;
+          if (assistantPlaybackActive && strongUserSpeechActive) {
+            audioPlayer.stop?.();
           }
-          if (stableBatyushkaRuntime && rms >= BATYUSHKA_2_BARGE_IN_RMS_THRESHOLD) {
-            strongUserSpeechUntilRef.current = nowMs + BATYUSHKA_2_BARGE_IN_HOLD_MS;
+          if (stableBatyushkaRuntime && !strongUserSpeechActive && nowMs < assistantEchoHoldUntilRef.current) {
+            return;
           }
 
           if (
@@ -535,17 +539,6 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
           }
 
           if (data.serverContent?.interrupted) {
-            if (
-              isBatyushka2StableRuntime(runtimeConfigRef.current)
-              && (
-                Date.now() < assistantEchoHoldUntilRef.current
-                || assistantTurnRef.current.active
-                || Number(audioPlayer?.getBufferedMs?.() || 0) > BATYUSHKA_2_ASSISTANT_BUFFER_GUARD_MS
-              )
-            ) {
-              suppressAudioRef.current = false;
-              return;
-            }
             audioPlayer.stop?.();
             suppressAudioRef.current = true;
             assistantTurnRef.current.interrupted = true;

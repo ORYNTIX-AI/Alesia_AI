@@ -136,7 +136,7 @@ export function resolveRealtimeInputConfig(runtimeConfig) {
       prefixPaddingMs: stableBatyushkaProfile ? 60 : 40,
       silenceDurationMs: stableBatyushkaProfile ? 420 : 780,
     },
-    activityHandling: stableBatyushkaProfile ? 'NO_INTERRUPTION' : 'START_OF_ACTIVITY_INTERRUPTS',
+    activityHandling: 'START_OF_ACTIVITY_INTERRUPTS',
     turnCoverage: 'TURN_INCLUDES_ONLY_ACTIVITY',
   };
 }

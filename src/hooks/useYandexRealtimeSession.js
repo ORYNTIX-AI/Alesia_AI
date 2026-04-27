@@ -45,8 +45,9 @@ const ASSISTANT_TURN_IDLE_FLUSH_MS = 2600;
 const SPEECH_STARTED_INTERRUPT_COOLDOWN_MS = 350;
 const SPEECH_STARTED_BUFFER_GUARD_MS = 120;
 const SPEECH_STARTED_VOLUME_GUARD = 0.025;
+const SPEECH_STARTED_USER_VOLUME_GUARD = 0.18;
 const INPUT_ECHO_SUPPRESSION_BUFFER_MS = 180;
-const INPUT_ECHO_SUPPRESSION_TAIL_MS = 650;
+const INPUT_ECHO_SUPPRESSION_TAIL_MS = 400;
 const INPUT_ECHO_SUPPRESSION_VOLUME_GUARD = 0.012;
 const ACTIVE_OUTPUT_BUFFER_GUARD_MS = 200;
 
@@ -349,6 +350,10 @@ export function useYandexRealtimeSession(audioPlayer, runtimeConfig = DEFAULT_RU
   }, []);
 
   const shouldSuppressUserAudioInput = useCallback(() => {
+    const userVolume = Number(userVolumeRef.current || 0);
+    if (userVolume >= SPEECH_STARTED_USER_VOLUME_GUARD) {
+      return false;
+    }
     const bufferedAudioMs = Number(audioPlayer?.getBufferedMs?.() || 0);
     const assistantVolume = Number(audioPlayer?.getVolume?.() || 0);
     const recentlyPlayedAssistantAudio =
@@ -606,11 +611,12 @@ export function useYandexRealtimeSession(audioPlayer, runtimeConfig = DEFAULT_RU
               }
               const bufferedAudioMs = Number(audioPlayer?.getBufferedMs?.() || 0);
               const assistantVolume = Number(audioPlayer?.getVolume?.() || 0);
+              const userVolume = Number(userVolumeRef.current || 0);
               const hasAssistantOutput = assistantTurnRef.current.active
                 || assistantTurnRef.current.audioChunks > 0
                 || bufferedAudioMs > SPEECH_STARTED_BUFFER_GUARD_MS
                 || assistantVolume > SPEECH_STARTED_VOLUME_GUARD;
-              if (hasAssistantOutput) {
+              if (hasAssistantOutput && userVolume >= SPEECH_STARTED_USER_VOLUME_GUARD) {
                 lastSpeechStartedInterruptAtRef.current = now;
                 const responseId = normalizeText(assistantTurnRef.current.responseId || '');
                 requestAssistantInterrupt(responseId);

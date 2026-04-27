@@ -40,6 +40,9 @@ test('voice conversation state machine follows realtime turn lifecycle', () => {
 test('low-value Yandex realtime fragments do not become user turns', () => {
   assert.equal(isMeaningfulYandexUserTurn('а'), false);
   assert.equal(isMeaningfulYandexUserTurn('ага'), false);
+  assert.equal(isMeaningfulYandexUserTurn('да'), true);
+  assert.equal(isMeaningfulYandexUserTurn('нет'), true);
+  assert.equal(isMeaningfulYandexUserTurn('ок'), true);
   assert.equal(isMeaningfulYandexUserTurn('кто ты'), true);
   assert.equal(isMeaningfulYandexUserTurn('открой сайт church.by'), true);
 });
