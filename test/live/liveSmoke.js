@@ -141,15 +141,19 @@ async function runGeminiLiveSmoke(appConfig) {
       }
 
       if (payload?.setupComplete) {
-        ws.send(JSON.stringify({
-          client_content: {
-            turns: [{
-              role: 'user',
-              parts: [{ text: 'Скажи одно короткое приветствие по-русски.' }],
-            }],
-            turn_complete: true,
-          },
-        }))
+        const promptText = 'Скажи одно короткое приветствие по-русски.'
+        const textTurnPayload = geminiCharacter.voiceModelId === 'models/gemini-3.1-flash-live-preview'
+          ? { realtimeInput: { text: promptText } }
+          : {
+            client_content: {
+              turns: [{
+                role: 'user',
+                parts: [{ text: promptText }],
+              }],
+              turn_complete: true,
+            },
+          }
+        ws.send(JSON.stringify(textTurnPayload))
         return
       }
 
