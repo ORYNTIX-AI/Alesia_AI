@@ -166,3 +166,4 @@
 - Footer version is raised to `v0.0.5`.
 - Deployed to `https://alesia-ai.constitution.of.by`; `/health` is OK, runtime config is active on `batyushka-2`, and `/api/gemini/tts` returned PCM audio for a short Russian phrase.
 - 2026-04-27 follow-up: mobile playback now uses the scheduled WebAudio path instead of forcing per-chunk HTMLAudio output; footer version is raised to `v0.0.6`.
+- 2026-04-27 follow-up: Batyushka 2 now hard-gates microphone frames during and shortly after assistant playback to stop echo from becoming a false Gemini barge-in; footer version is raised to `v0.0.7`.
