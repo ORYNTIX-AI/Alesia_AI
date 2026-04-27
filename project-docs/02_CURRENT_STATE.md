@@ -165,3 +165,4 @@
 - Batyushka 2 silent-audio repair now uses Gemini 3.1 Flash TTS instead of Yandex TTS.
 - Footer version is raised to `v0.0.5`.
 - Deployed to `https://alesia-ai.constitution.of.by`; `/health` is OK, runtime config is active on `batyushka-2`, and `/api/gemini/tts` returned PCM audio for a short Russian phrase.
+- 2026-04-27 follow-up: mobile playback now uses the scheduled WebAudio path instead of forcing per-chunk HTMLAudio output; footer version is raised to `v0.0.6`.

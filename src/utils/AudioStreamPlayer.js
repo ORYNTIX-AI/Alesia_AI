@@ -29,8 +29,7 @@
         this.resumeTimer = null;
         this.htmlChunkTargetMs = 360;
         this.htmlChunkFlushDelayMs = 90;
-        this.preferHtmlAudioOutput = typeof navigator !== 'undefined'
-            && /Android|iPhone|iPad|iPod/i.test(navigator.userAgent || '');
+        this.preferHtmlAudioOutput = false;
     }
 
     async initialize() {
