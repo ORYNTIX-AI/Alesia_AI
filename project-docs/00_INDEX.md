@@ -43,9 +43,11 @@
 - `eslint.config.js` — lint
 - `playwright.config.js` — e2e
 - `.env.example` — пример env
+- `project-docs/05_VOICE_RUNTIME_HISTORY.md` — история гипотез и правок по Gemini 3.1 Live / Yandex Realtime
 
 ## Что читать в первую очередь
 
 1. `project-docs/02_CURRENT_STATE.md`
 2. `project-docs/03_NEXT_STEPS.md`
-3. Только потом нужные файлы кода
+3. `project-docs/05_VOICE_RUNTIME_HISTORY.md` — если задача касается голосовых рантаймов
+4. Только потом нужные файлы кода
