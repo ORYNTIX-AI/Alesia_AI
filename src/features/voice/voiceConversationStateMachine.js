@@ -133,7 +133,7 @@ export function isMeaningfulYandexUserTurn(text = '') {
     return false;
   }
   const compact = normalized.replace(/\s+/g, '');
-  if (compact.length < 4) {
+  if (compact.length < 2) {
     return false;
   }
   return /[\p{L}\p{N}]/u.test(compact);

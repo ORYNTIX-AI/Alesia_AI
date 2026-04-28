@@ -64,10 +64,10 @@ const SILENT_TURN_FALLBACK_FIRST_CHUNK_TIMEOUT_MS = 12000;
 const SILENT_TURN_FALLBACK_NEXT_CHUNK_TIMEOUT_MS = 12000;
 const SILENT_TURN_FALLBACK_CHUNK_MAX_CHARS = 90;
 const USER_FINAL_DEDUP_WINDOW_MS = 4200;
-const YANDEX_REALTIME_EXTRA_FINAL_SUPPRESS_MS = 900;
-const YANDEX_REALTIME_FINAL_MERGE_WINDOW_MS = 2200;
-const YANDEX_REALTIME_FINAL_HOLD_MS = 520;
-const YANDEX_REALTIME_SHORT_FINAL_HOLD_MS = 760;
+const YANDEX_REALTIME_EXTRA_FINAL_SUPPRESS_MS = 400;
+const YANDEX_REALTIME_FINAL_MERGE_WINDOW_MS = 600;
+const YANDEX_REALTIME_FINAL_HOLD_MS = 180;
+const YANDEX_REALTIME_SHORT_FINAL_HOLD_MS = 280;
 const LIVE_INPUT_FINAL_DEDUP_SOURCES = new Set([
   'gemini-input',
   'yandex-realtime-input',
@@ -511,7 +511,7 @@ export function useConversationRuntimeController({
     const lastAssistantTs = Number(lastAssistantTurnRef.current?.timestamp || 0);
     const timeSinceAssistantMs = lastAssistantTs > 0 ? Date.now() - lastAssistantTs : Number.POSITIVE_INFINITY;
     const shortTurnType = classifyShortHumanTurn(normalized);
-    const recentAssistantSpeech = usesYandexRuntime && (botBufferedMs > 0 || timeSinceAssistantMs < 2400);
+    const recentAssistantSpeech = usesYandexRuntime && (botBufferedMs > 0 || timeSinceAssistantMs < 400);
 
     if (recentAssistantSpeech && shortTurnType === 'backchannel') {
       recordConversationAction('stt.stream.backchannel', {
@@ -1452,10 +1452,7 @@ export function useConversationRuntimeController({
 
   const voiceSessionCallbacks = {
       onSessionReady: ({ resumed = false, shouldSendGreeting = false }) => {
-        const shouldAutoGreet = shouldSendGreeting && !(
-          (usesYandexRealtimeRuntime && selectedCharacter?.id === 'batyushka-3')
-          || selectedCharacter?.id === 'batyushka-2'
-        );
+        const shouldAutoGreet = shouldSendGreeting;
         transitionVoiceConversationState(VOICE_CONVERSATION_EVENTS.SESSION_READY, {
           reason: resumed ? 'resumed' : 'ready',
         });

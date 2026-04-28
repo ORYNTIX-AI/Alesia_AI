@@ -45,6 +45,7 @@ const ASSISTANT_TURN_IDLE_FLUSH_MS = 2600;
 const SPEECH_STARTED_INTERRUPT_COOLDOWN_MS = 350;
 const SPEECH_STARTED_BUFFER_GUARD_MS = 120;
 const SPEECH_STARTED_VOLUME_GUARD = 0.025;
+const SPEECH_STARTED_USER_RMS_GUARD = 0.3;
 const INPUT_ECHO_SUPPRESSION_BUFFER_MS = 180;
 const INPUT_ECHO_SUPPRESSION_TAIL_MS = 650;
 const INPUT_ECHO_SUPPRESSION_VOLUME_GUARD = 0.012;
@@ -610,6 +611,11 @@ export function useYandexRealtimeSession(audioPlayer, runtimeConfig = DEFAULT_RU
                 || assistantTurnRef.current.audioChunks > 0
                 || bufferedAudioMs > SPEECH_STARTED_BUFFER_GUARD_MS
                 || assistantVolume > SPEECH_STARTED_VOLUME_GUARD;
+              const localUserRms = Number(userVolumeRef.current || 0);
+              const userIsActuallySpeaking = localUserRms >= SPEECH_STARTED_USER_RMS_GUARD;
+              if (hasAssistantOutput && !userIsActuallySpeaking) {
+                break;
+              }
               if (hasAssistantOutput) {
                 lastSpeechStartedInterruptAtRef.current = now;
                 const responseId = normalizeText(assistantTurnRef.current.responseId || '');
