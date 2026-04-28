@@ -19,6 +19,8 @@ import {
 
 const BATYUSHKA_2_BARGE_IN_RMS_THRESHOLD = 0.18;
 const BATYUSHKA_2_BARGE_IN_HOLD_MS = 900;
+const BATYUSHKA_2_LOCAL_BARGE_IN_HOLD_MS = 150;
+const BATYUSHKA_2_LOCAL_BARGE_IN_COOLDOWN_MS = 900;
 const BATYUSHKA_2_MIC_TAIL_GATE_MS = 220;
 
 export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFIG, callbacks = DEFAULT_CALLBACKS) {
@@ -52,6 +54,8 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
   const lifecycleTokenRef = useRef(0);
   const strongUserSpeechUntilRef = useRef(0);
   const lastAssistantPlaybackActiveAtRef = useRef(0);
+  const localBargeInCandidateRef = useRef({ startedAt: 0 });
+  const lastLocalBargeInAtRef = useRef(0);
 
   const releaseSuppressedAudio = useCallback(() => {
     suppressAudioRef.current = false;
@@ -178,7 +182,31 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
   const cancelAssistantOutput = useCallback(() => {
     suppressAudioRef.current = true;
     audioPlayer.stop?.();
+    if (assistantTurnRef.current.active) {
+      assistantTurnRef.current.interrupted = true;
+    }
     flushAssistantTurn('cancel');
+  }, [audioPlayer, flushAssistantTurn]);
+
+  const triggerLocalBargeIn = useCallback((reason = 'local-rms-barge-in') => {
+    const nowMs = Date.now();
+    if ((nowMs - lastLocalBargeInAtRef.current) < BATYUSHKA_2_LOCAL_BARGE_IN_COOLDOWN_MS) {
+      return false;
+    }
+    const bufferedMs = Number(audioPlayer?.getBufferedMs?.() || 0);
+    const hasAssistantOutput = assistantTurnRef.current.active || bufferedMs > 0;
+    if (!hasAssistantOutput) {
+      return false;
+    }
+    lastLocalBargeInAtRef.current = nowMs;
+    suppressAudioRef.current = true;
+    audioPlayer.stop?.();
+    if (assistantTurnRef.current.active) {
+      assistantTurnRef.current.interrupted = true;
+    }
+    callbacksRef.current.onAssistantInterrupted?.({ reason });
+    flushAssistantTurn('cancel');
+    return true;
   }, [audioPlayer, flushAssistantTurn]);
 
   const sendTextTurn = useCallback((text, options = {}) => {
@@ -262,6 +290,9 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
     setupCompleteRef.current = false;
     suppressAudioRef.current = false;
     lastAssistantPlaybackActiveAtRef.current = 0;
+    localBargeInCandidateRef.current = { startedAt: 0 };
+    lastLocalBargeInAtRef.current = 0;
+    audioPlayer.setPreferHtmlAudioOutput?.(false);
 
     try {
       if (runtimeOverride && typeof runtimeOverride === 'object') {
@@ -328,6 +359,20 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
           ) {
             if (stableBatyushkaRuntime) {
               const assistantBufferedMs = Number(audioPlayer?.getBufferedMs?.() || 0);
+              if (
+                assistantBufferedMs > 80
+                && rms >= BATYUSHKA_2_BARGE_IN_RMS_THRESHOLD
+                && !assistantTurnRef.current.interrupted
+              ) {
+                if (!localBargeInCandidateRef.current.startedAt) {
+                  localBargeInCandidateRef.current = { startedAt: nowMs };
+                } else if ((nowMs - localBargeInCandidateRef.current.startedAt) >= BATYUSHKA_2_LOCAL_BARGE_IN_HOLD_MS) {
+                  localBargeInCandidateRef.current = { startedAt: 0 };
+                  triggerLocalBargeIn('local-rms-barge-in');
+                }
+              } else if (rms < BATYUSHKA_2_BARGE_IN_RMS_THRESHOLD) {
+                localBargeInCandidateRef.current = { startedAt: 0 };
+              }
               if (assistantBufferedMs > 0) {
                 lastAssistantPlaybackActiveAtRef.current = nowMs;
               } else if (
@@ -500,7 +545,9 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
                 if (!accepted) {
                   continue;
                 }
-                releaseSuppressedAudio();
+                if (!assistantTurnRef.current.interrupted) {
+                  releaseSuppressedAudio();
+                }
                 const nextText = mergeAssistantText(assistantTurnRef.current.text, part.text);
                 assistantTurnRef.current.text = nextText;
                 noteAssistantTurnChunk({ kind: 'text' });
@@ -511,7 +558,7 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
                 if (!accepted) {
                   continue;
                 }
-                if (assistantTurnRef.current.active && assistantTurnRef.current.text) {
+                if (assistantTurnRef.current.active && assistantTurnRef.current.text && !assistantTurnRef.current.interrupted) {
                   releaseSuppressedAudio();
                 }
                 noteAssistantTurnChunk({ kind: 'audio' });
@@ -525,7 +572,7 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
 
           if (data.serverContent?.outputTranscription?.text) {
             const accepted = ensureAssistantTurnStarted();
-            if (accepted) {
+            if (accepted && !assistantTurnRef.current.interrupted) {
               releaseSuppressedAudio();
             }
             assistantTurnRef.current.text = mergeAssistantText(
@@ -635,7 +682,7 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
         setStatus('error');
       }
     }
-  }, [audioPlayer, clearInputTranscription, ensureAssistantTurnStarted, flushAssistantTurn, noteAssistantTurnChunk, releaseInputResources, releaseSuppressedAudio]);
+  }, [audioPlayer, clearInputTranscription, ensureAssistantTurnStarted, flushAssistantTurn, noteAssistantTurnChunk, releaseInputResources, releaseSuppressedAudio, triggerLocalBargeIn]);
 
   const disconnect = useCallback(() => {
     lifecycleTokenRef.current += 1;

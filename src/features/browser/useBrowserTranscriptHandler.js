@@ -89,8 +89,16 @@ export function useBrowserTranscriptHandler({
     markDialogRequestStateRef.current?.(effectiveRequestId, 'browser-routing', {
       transcript: truncatePromptValue(normalized, 180),
     });
+    recordConversationActionRef.current?.('browser.intent.input', {
+      requestId: effectiveRequestId,
+      transcript: truncatePromptValue(normalized, 180),
+    });
 
     if (isAssistantBrowserNarration(normalized)) {
+      recordConversationActionRef.current?.('browser.intent.skipped', {
+        requestId: effectiveRequestId,
+        reason: 'assistant-browser-narration',
+      });
       return;
     }
 
@@ -102,6 +110,11 @@ export function useBrowserTranscriptHandler({
     if (hasAnyBrowserSession && parseImplicitBrowserActionRequest(normalized)) {
       intentType = 'browser_action';
     }
+    recordConversationActionRef.current?.('browser.intent.classified', {
+      requestId: effectiveRequestId,
+      intentType,
+      hasActiveBrowserSession: hasAnyBrowserSession,
+    });
 
     if (intentType === 'browser_action') {
       let browserActionRequest = parseBrowserActionRequest(normalized);
@@ -277,6 +290,11 @@ export function useBrowserTranscriptHandler({
     }
 
     if (intentType !== 'site_open') {
+      recordConversationActionRef.current?.('browser.intent.skipped', {
+        requestId: effectiveRequestId,
+        reason: 'not-site-open',
+        intentType,
+      });
       return;
     }
 
@@ -293,6 +311,11 @@ export function useBrowserTranscriptHandler({
       || browserFlowStateRef.current === 'opening'
       || browserPanelRef.current?.status === 'loading';
     if (isEchoOfRecentBrowserAction || browserIntentInFlightRef.current || browserOpenAlreadyRunning) {
+      recordConversationActionRef.current?.('browser.intent.skipped', {
+        requestId: effectiveRequestId,
+        reason: browserOpenAlreadyRunning ? 'open-already-running' : (browserIntentInFlightRef.current ? 'intent-in-flight' : 'recent-echo'),
+        intentType,
+      });
       if (browserOpenAlreadyRunning) {
         recordConversationActionRef.current?.('browser.open.duplicate-ignored', {
           requestId: effectiveRequestId,
@@ -305,6 +328,11 @@ export function useBrowserTranscriptHandler({
 
     handledTranscriptsRef.current = handledTranscriptsRef.current.filter((entry) => now - entry.timestamp < 15000);
     if (handledTranscriptsRef.current.some((entry) => isSimilarIntentKey(entry.key, dedupeKey))) {
+      recordConversationActionRef.current?.('browser.intent.skipped', {
+        requestId: effectiveRequestId,
+        reason: 'dedupe-window',
+        intentType,
+      });
       return;
     }
 
@@ -404,6 +432,14 @@ export function useBrowserTranscriptHandler({
         confidenceMargin: intent?.confidenceMargin ?? 0,
         resolutionSource: intent?.resolutionSource || '',
         candidateCount: intent?.candidateCount ?? 0,
+      });
+      recordConversationActionRef.current?.('browser.intent.classified', {
+        requestId,
+        traceId,
+        intentType: intent?.intentType || intent?.type || 'none',
+        url: intent?.url || '',
+        confidence: intent?.confidence ?? 0,
+        resolutionSource: intent?.resolutionSource || '',
       });
 
       if (!intent || intent.type === 'none') {
@@ -515,6 +551,12 @@ export function useBrowserTranscriptHandler({
         traceId: resolvedTraceId,
         url: intent.url || '',
         sourceType: intent.sourceType || intent.type || '',
+        browserPanelMode: useClientInlineTransport ? 'client-inline' : 'remote',
+      });
+      recordConversationActionRef.current?.('browser.open.started', {
+        requestId,
+        traceId: resolvedTraceId,
+        url: intent.url || '',
         browserPanelMode: useClientInlineTransport ? 'client-inline' : 'remote',
       });
 
@@ -681,6 +723,15 @@ export function useBrowserTranscriptHandler({
           embeddable: Boolean(confirmedOpen?.embeddable),
           panelConfirmed,
         });
+        recordConversationActionRef.current?.('browser.open.result', {
+          requestId,
+          traceId: resolvedTraceId,
+          status: 'ready',
+          browserSessionId: nextSessionId,
+          title: truncatePromptValue(confirmedOpen?.title || '', 120),
+          url: confirmedOpen?.url || '',
+          panelConfirmed,
+        });
         const liveDialogRequestId = activeDialogRequestRef.current || effectiveRequestId;
         const resultBelongsToOriginalRequest = liveDialogRequestId === effectiveRequestId;
         markDialogRequestStateRef.current?.(resultBelongsToOriginalRequest ? effectiveRequestId : liveDialogRequestId, 'browser-open-ready', {
@@ -730,6 +781,14 @@ export function useBrowserTranscriptHandler({
           traceId: resolvedTraceId,
           url: intent.url || '',
           error: errorText,
+          errorReason,
+        });
+        recordConversationActionRef.current?.('browser.open.result', {
+          requestId,
+          traceId: resolvedTraceId,
+          status: 'error',
+          url: intent.url || '',
+          error: truncatePromptValue(errorText, 180),
           errorReason,
         });
         enqueueAssistantPromptRef.current?.(

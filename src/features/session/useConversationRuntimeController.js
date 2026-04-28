@@ -16,13 +16,13 @@ import { useConversationTelemetry } from './useConversationTelemetry.js';
 import {
   SERVER_STT_FRAGMENT_HOLD_MS,
   SERVER_STT_FRAGMENT_MERGE_WINDOW_MS,
-  STOP_SPEECH_PATTERN,
   buildConversationSessionId,
   buildExactPrayerReadingPrompt,
   buildGreetingAckPrompt,
   buildPersonaDirectPrompt,
   buildPrayerSourceRequiredPrompt,
   buildRepeatRequestPrompt,
+  buildRuntimeStatusPrompt,
   buildRuntimeTurnPrompt,
   buildSessionBootstrapText,
   canMergeServerTranscriptFragments,
@@ -32,6 +32,7 @@ import {
   isAssistantBrowserNarration,
   isGreetingOnlyTranscript,
   isLikelyAssistantEchoFinal,
+  isLikelyVoiceStopCommand,
   isLikelyUnclearStandaloneTranscript,
   isPersonaDirectQuestion,
   isPrayerRequest,
@@ -42,6 +43,7 @@ import {
   normalizeTranscriptKey,
   parseImplicitBrowserActionRequest,
   resolveExactPrayerReading,
+  shouldSkipKnowledgeForTranscript,
   splitSpeechPlaybackChunks,
   truncatePromptValue,
 } from './transcriptFlowModel.js';
@@ -530,7 +532,7 @@ export function useConversationRuntimeController({
     }
 
     if (
-      STOP_SPEECH_PATTERN.test(normalized)
+      isLikelyVoiceStopCommand(normalized, { allowFuzzy: true })
       && (botBufferedMs > 0 || botVolume > tunedSpeechConfig.botVolumeGuard || assistantPromptInFlightRef.current || assistantAwaitingResponseRef.current)
     ) {
       triggerBargeIn(`voice-stop-command-${source}`);
@@ -683,7 +685,7 @@ export function useConversationRuntimeController({
     }
 
     if (
-      STOP_SPEECH_PATTERN.test(normalized)
+      isLikelyVoiceStopCommand(normalized, { allowFuzzy: true })
       && (botBufferedMs > 0 || botVolume > tunedSpeechConfig.botVolumeGuard || assistantPromptInFlightRef.current || assistantAwaitingResponseRef.current)
     ) {
       triggerBargeIn('voice-stop-command-yandex-realtime-input');
@@ -994,7 +996,7 @@ export function useConversationRuntimeController({
       return;
     }
 
-    if (STOP_SPEECH_PATTERN.test(normalized)) {
+    if (isLikelyVoiceStopCommand(normalized, { allowFuzzy: true })) {
       bargeInCandidateRef.current = { startedAt: 0, textKey: '' };
       triggerBargeIn('bargein-stop-word');
       return;
@@ -1500,6 +1502,7 @@ export function useConversationRuntimeController({
         samples = 0,
         contextState = '',
         queuedMs = 0,
+        outputMode = '',
       } = {}) => {
         transitionVoiceConversationState(VOICE_CONVERSATION_EVENTS.ASSISTANT_AUDIO_START, {
           reason: 'audio-start',
@@ -1518,6 +1521,7 @@ export function useConversationRuntimeController({
           samples,
           contextState,
           queuedMs,
+          outputMode,
         });
         recordConversationAction('assistant.turn.lips-started', {
           conversationSessionId: conversationSessionIdRef.current || '',
@@ -1531,6 +1535,7 @@ export function useConversationRuntimeController({
         samples = 0,
         contextState = '',
         queuedMs = 0,
+        outputMode = '',
       } = {}) => {
         setLastIssueText(reason);
         recordConversationAction('assistant.turn.audio-drop', {
@@ -1541,6 +1546,7 @@ export function useConversationRuntimeController({
           samples,
           contextState,
           queuedMs,
+          outputMode,
         });
       },
       onAssistantTurnCommit: ({ responseId = '', text, textChunks = 0, audioChunks = 0, durationMs = 0 }) => {
@@ -1824,6 +1830,29 @@ export function useConversationRuntimeController({
       },
   };
 
+  React.useEffect(() => {
+    audioPlayer?.setPlaybackEventCallback?.((event, details = {}) => {
+      recordConversationAction(`assistant.turn.${event}`, {
+        conversationSessionId: conversationSessionIdRef.current || '',
+        responseId: assistantOutputState.responseId || '',
+        outputMode: details.outputMode || '',
+        sampleRate: Number(details.sampleRate || 0),
+        samples: Number(details.samples || 0),
+        durationMs: Number(details.durationMs || 0),
+      });
+      if (event === 'audio-playback-start' && details.outputMode) {
+        recordConversationAction('assistant.turn.audio-output-mode', {
+          conversationSessionId: conversationSessionIdRef.current || '',
+          responseId: assistantOutputState.responseId || '',
+          outputMode: details.outputMode,
+        });
+      }
+    });
+    return () => {
+      audioPlayer?.setPlaybackEventCallback?.(null);
+    };
+  }, [assistantOutputState.responseId, audioPlayer, recordConversationAction]);
+
   const {
     geminiSession,
     yandexSession,
@@ -2086,8 +2115,32 @@ export function useConversationRuntimeController({
         return;
       }
 
+      const hasActiveBrowserSession = Boolean(activeBrowserSessionIdRef.current)
+        || Boolean(usesClientInlinePanel && browserPanelRef.current?.clientUrl);
+      const shouldQueryKnowledge = !shouldSkipKnowledgeForTranscript(normalized, { hasActiveBrowserSession })
+        || isPrayerRequest(normalized);
+      if (isPrayerRequest(normalized)) {
+        enqueueAssistantPrompt(buildRuntimeStatusPrompt('prayer'), {
+          source: 'runtime.status.prayer',
+          dedupeKey: `runtime-status-prayer:${normalizeTranscriptKey(normalized)}`,
+          requestId: effectiveRequestId,
+          priority: 'high',
+          finalizeRequestOnCommit: false,
+        });
+      } else if (shouldQueryKnowledge) {
+        enqueueAssistantPrompt(buildRuntimeStatusPrompt('lookup'), {
+          source: 'runtime.status.lookup',
+          dedupeKey: `runtime-status-lookup:${normalizeTranscriptKey(normalized)}`,
+          requestId: effectiveRequestId,
+          priority: 'high',
+          finalizeRequestOnCommit: false,
+        });
+      }
+
       const [knowledgeResult, activePageContext] = await Promise.all([
-        queryKnowledgeForTurn(normalized).catch(() => ({ hits: [] })),
+        shouldQueryKnowledge
+          ? queryKnowledgeForTurn(normalized).catch(() => ({ hits: [] }))
+          : Promise.resolve({ hits: [] }),
         getRuntimePageContextForTurn(normalized),
       ]);
 
@@ -2095,6 +2148,7 @@ export function useConversationRuntimeController({
       recordConversationAction('runtime.turn.orchestrated.context', {
         conversationSessionId: conversationSessionIdRef.current,
         knowledgeHitCount: knowledgeHits.length,
+        knowledgeSkipped: !shouldQueryKnowledge,
         hasActivePageContext: Boolean(activePageContext?.url),
       });
       markDialogRequestState(effectiveRequestId, 'runtime-turn-context-ready', {
@@ -2181,6 +2235,8 @@ export function useConversationRuntimeController({
     queryKnowledgeForTurn,
     recordConversationAction,
     transitionVoiceConversationState,
+    browserPanelRef,
+    usesClientInlinePanel,
     usesYandexRealtimeRuntime,
   ]);
 

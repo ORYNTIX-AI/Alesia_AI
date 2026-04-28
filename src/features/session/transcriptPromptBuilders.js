@@ -19,10 +19,30 @@ function truncatePromptValue(value, maxLength = 180) {
   return `${normalized.slice(0, maxLength - 1).trimEnd()}…`;
 }
 
-const PRAYER_READING_CHUNK_MAX_CHARS = 420;
+const PRAYER_READING_CHUNK_MAX_CHARS = 340;
 
-function buildPrayerReadingChunk(value, maxLength = PRAYER_READING_CHUNK_MAX_CHARS) {
+function stripPrayerPageChrome(value) {
   const normalized = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!normalized) {
+    return '';
+  }
+  const knownOpeners = [
+    /\u041e\u0442\u0447\u0435\s+\u043d\u0430\u0448[,!\s]/i,
+    /\u0411\u043e\u0433\u043e\u0440\u043e\u0434\u0438\u0446\u0435\s+\u0414\u0435\u0432\u043e[,!\s]/i,
+    /\u0426\u0430\u0440\u044e\s+\u041d\u0435\u0431\u0435\u0441\u043d\u044b\u0439[,!\s]/i,
+    /\u0421\u0438\u043c\u0432\u043e\u043b\s+\u0432\u0435\u0440\u044b/i,
+  ];
+  for (const opener of knownOpeners) {
+    const match = normalized.match(opener);
+    if (match?.index >= 0) {
+      return normalized.slice(match.index).trim();
+    }
+  }
+  return normalized;
+}
+
+export function buildPrayerReadingChunk(value, maxLength = PRAYER_READING_CHUNK_MAX_CHARS) {
+  const normalized = stripPrayerPageChrome(value);
   if (normalized.length <= maxLength) {
     return normalized;
   }
@@ -464,6 +484,18 @@ export function buildBrowserOpeningAckPrompt(transcript) {
 
 Не вызывай tools, не уточняй и не повторяй запрос.
 Скажи одну короткую фразу ровно о том, что сайт уже открывается.`;
+}
+
+export function buildRuntimeStatusPrompt(kind = 'lookup') {
+  const normalizedKind = String(kind || 'lookup').trim().toLowerCase();
+  const phrase = normalizedKind === 'prayer'
+    ? 'Начинаю коротким фрагментом.'
+    : normalizedKind === 'browser'
+      ? 'Открываю сайт.'
+      : 'Сейчас посмотрю.';
+  return `RUNTIME_FAST_STATUS:
+Скажи ровно одну короткую фразу без дополнений:
+${phrase}`;
 }
 
 export function buildRepeatRequestPrompt(transcript) {

@@ -137,8 +137,8 @@ export function resolveRealtimeInputConfig(runtimeConfig) {
     automaticActivityDetection: {
       startOfSpeechSensitivity: 'START_SENSITIVITY_LOW',
       endOfSpeechSensitivity: 'END_SENSITIVITY_LOW',
-      prefixPaddingMs: stableBatyushkaProfile ? 180 : 40,
-      silenceDurationMs: stableBatyushkaProfile ? 800 : 780,
+      prefixPaddingMs: stableBatyushkaProfile ? 140 : 40,
+      silenceDurationMs: stableBatyushkaProfile ? 620 : 780,
     },
     activityHandling: stableBatyushkaProfile ? 'NO_INTERRUPTION' : 'START_OF_ACTIVITY_INTERRUPTS',
     turnCoverage: 'TURN_INCLUDES_ONLY_ACTIVITY',

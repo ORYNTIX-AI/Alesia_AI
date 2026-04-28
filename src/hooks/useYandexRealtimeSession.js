@@ -50,6 +50,9 @@ const INPUT_ECHO_SUPPRESSION_BUFFER_MS = 180;
 const INPUT_ECHO_SUPPRESSION_TAIL_MS = 400;
 const INPUT_ECHO_SUPPRESSION_VOLUME_GUARD = 0.012;
 const ACTIVE_OUTPUT_BUFFER_GUARD_MS = 200;
+const LOCAL_BARGE_IN_RMS_THRESHOLD = 0.15;
+const LOCAL_BARGE_IN_HOLD_MS = 140;
+const LOCAL_BARGE_IN_COOLDOWN_MS = 900;
 
 function defaultBackendWsUrl(pathname = '/yandex-realtime-proxy') {
   if (DEFAULT_BACKEND_WS_BASE) {
@@ -145,6 +148,8 @@ export function useYandexRealtimeSession(audioPlayer, runtimeConfig = DEFAULT_RU
   const lastSpeechStartedInterruptAtRef = useRef(0);
   const lastAssistantAudioOutputAtRef = useRef(0);
   const inputAudioStatsRef = useRef({ chunks: 0, lastLoggedAt: 0, peakRms: 0 });
+  const localBargeInCandidateRef = useRef({ startedAt: 0 });
+  const lastLocalBargeInAtRef = useRef(0);
 
   useEffect(() => {
     runtimeConfigRef.current = { ...DEFAULT_RUNTIME_CONFIG, ...runtimeConfig };
@@ -374,6 +379,31 @@ export function useYandexRealtimeSession(audioPlayer, runtimeConfig = DEFAULT_RU
     return true;
   }, [audioPlayer, flushAssistantTurn, requestAssistantInterrupt]);
 
+  const maybeTriggerLocalBargeIn = useCallback((rms = 0, source = 'mic') => {
+    const now = Date.now();
+    const bufferedAudioMs = Number(audioPlayer?.getBufferedMs?.() || 0);
+    const hasAssistantOutput = assistantTurnRef.current.active
+      || assistantTurnRef.current.audioChunks > 0
+      || bufferedAudioMs > SPEECH_STARTED_BUFFER_GUARD_MS;
+    if (!hasAssistantOutput || rms < LOCAL_BARGE_IN_RMS_THRESHOLD) {
+      localBargeInCandidateRef.current = { startedAt: 0 };
+      return false;
+    }
+    if ((now - lastLocalBargeInAtRef.current) < LOCAL_BARGE_IN_COOLDOWN_MS) {
+      return false;
+    }
+    if (!localBargeInCandidateRef.current.startedAt) {
+      localBargeInCandidateRef.current = { startedAt: now };
+      return false;
+    }
+    if ((now - localBargeInCandidateRef.current.startedAt) < LOCAL_BARGE_IN_HOLD_MS) {
+      return false;
+    }
+    localBargeInCandidateRef.current = { startedAt: 0 };
+    lastLocalBargeInAtRef.current = now;
+    return cancelAssistantOutput({ reason: `local-rms-barge-in:${source}` });
+  }, [audioPlayer, cancelAssistantOutput]);
+
   const sendTextTurn = useCallback((text, options = {}) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
       return false;
@@ -424,7 +454,10 @@ export function useYandexRealtimeSession(audioPlayer, runtimeConfig = DEFAULT_RU
       const activeRuntime = runtimeConfigRef.current;
       const isStale = () => lifecycleTokenRef.current !== lifecycleToken;
       inputAudioStatsRef.current = { chunks: 0, lastLoggedAt: 0, peakRms: 0 };
+      localBargeInCandidateRef.current = { startedAt: 0 };
+      lastLocalBargeInAtRef.current = 0;
 
+      audioPlayer.setPreferHtmlAudioOutput?.(true);
       await audioPlayer.initialize?.();
 
       if (activeRuntime.captureUserAudio !== false) {
@@ -467,6 +500,7 @@ export function useYandexRealtimeSession(audioPlayer, runtimeConfig = DEFAULT_RU
             }
             const rms = Math.sqrt(sum / Math.max(1, inputData.length));
             userVolumeRef.current = Math.min(1, rms * 5.5);
+            maybeTriggerLocalBargeIn(rms, 'script-processor');
             if (shouldSuppressUserAudioInput()) {
               return;
             }
@@ -514,6 +548,7 @@ export function useYandexRealtimeSession(audioPlayer, runtimeConfig = DEFAULT_RU
             }
             const rms = Math.sqrt(sum / Math.max(1, inputBuffer.length));
             userVolumeRef.current = Math.min(1, rms * 5.5);
+            maybeTriggerLocalBargeIn(rms, 'audio-worklet');
             if (shouldSuppressUserAudioInput()) {
               return;
             }
@@ -649,6 +684,7 @@ export function useYandexRealtimeSession(audioPlayer, runtimeConfig = DEFAULT_RU
                   samples: pcm.length,
                   contextState: playbackResult.contextState || '',
                   queuedMs: Number(playbackResult.queuedMs || 0),
+                  outputMode: playbackResult?.outputMode || '',
                 });
                 scheduleAssistantTurnFlush();
                 break;
@@ -660,6 +696,7 @@ export function useYandexRealtimeSession(audioPlayer, runtimeConfig = DEFAULT_RU
                   samples: pcm.length,
                   contextState: playbackResult?.contextState || '',
                   queuedMs: Number(playbackResult?.queuedMs || 0),
+                  outputMode: playbackResult?.outputMode || '',
                 });
               }
               assistantTurnRef.current.audioChunks += 1;
@@ -755,6 +792,7 @@ export function useYandexRealtimeSession(audioPlayer, runtimeConfig = DEFAULT_RU
     resetAssistantTurn,
     scheduleAssistantTurnFlush,
     shouldSuppressUserAudioInput,
+    maybeTriggerLocalBargeIn,
   ]);
 
   const disconnect = useCallback(() => {

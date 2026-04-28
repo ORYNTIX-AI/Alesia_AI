@@ -7,7 +7,9 @@ import {
   extractBrowserTarget,
   isExplicitBrowserRequest,
   isGreetingOnlyTranscript,
+  isLikelyVoiceStopCommand,
   isPrayerRequest,
+  shouldSkipKnowledgeForTranscript,
 } from '../../src/features/session/transcriptDetection.js'
 import {
   isBrowserActionFollowupRequest,
@@ -17,7 +19,9 @@ import {
   buildBrowserOpeningAckPrompt,
   buildGreetingAckPrompt,
   buildPersonaDirectPrompt,
+  buildPrayerReadingChunk,
   buildRepeatRequestPrompt,
+  buildRuntimeStatusPrompt,
   buildRuntimeTurnPrompt,
   buildSessionHistorySummary,
 } from '../../src/features/session/transcriptPromptBuilders.js'
@@ -37,6 +41,7 @@ test('Russian short transcript detection handles greetings, stop words, persona 
   assert.equal(STOP_SPEECH_PATTERN.test('стоп'), true)
   assert.equal(STOP_SPEECH_PATTERN.test('остановись'), true)
   assert.equal(STOP_SPEECH_PATTERN.test('замолчи'), true)
+  assert.equal(isLikelyVoiceStopCommand('опыт', { allowFuzzy: true }), true)
   assert.equal(isPrayerRequest('прочти Отче наш'), true)
 })
 
@@ -77,6 +82,7 @@ test('prompt builders do not contain mojibake markers', () => {
     buildGreetingAckPrompt('привет'),
     buildPersonaDirectPrompt('кто ты'),
     buildBrowserOpeningAckPrompt('открой сайт bpcmm.by'),
+    buildRuntimeStatusPrompt('lookup'),
     buildRepeatRequestPrompt('ага'),
   ]
 
@@ -93,7 +99,24 @@ test('Batyushka 2 Gemini realtime config prevents server-side echo self-interrup
   assert.equal(config.activityHandling, 'NO_INTERRUPTION')
   assert.equal(config.automaticActivityDetection.startOfSpeechSensitivity, 'START_SENSITIVITY_LOW')
   assert.equal(config.automaticActivityDetection.endOfSpeechSensitivity, 'END_SENSITIVITY_LOW')
-  assert.ok(config.automaticActivityDetection.silenceDurationMs >= 800)
+  assert.ok(config.automaticActivityDetection.silenceDurationMs >= 550)
+  assert.ok(config.automaticActivityDetection.silenceDurationMs <= 650)
+  assert.ok(config.automaticActivityDetection.prefixPaddingMs >= 120)
+  assert.ok(config.automaticActivityDetection.prefixPaddingMs <= 150)
+})
+
+test('knowledge lookup is skipped for simple voice turns and browser commands', () => {
+  assert.equal(shouldSkipKnowledgeForTranscript('привет'), true)
+  assert.equal(shouldSkipKnowledgeForTranscript('что ты умеешь'), true)
+  assert.equal(shouldSkipKnowledgeForTranscript('открой сайт bpcmm.by'), true)
+  assert.equal(shouldSkipKnowledgeForTranscript('расскажи кратко о молитве отче наш'), false)
+})
+
+test('prayer reading chunk is short and strips page chrome before known prayer text', () => {
+  const chunk = buildPrayerReadingChunk('Азбука веры Молитвослов меню Отче наш, Иже еси на небесех! Да святится имя Твое. Да приидет Царствие Твое. Да будет воля Твоя, яко на небеси и на земли. Хлеб наш насущный даждь нам днесь. И остави нам долги наша, якоже и мы оставляем должником нашим. И не введи нас во искушение, но избави нас от лукаваго. Аминь. Толкование и комментарии дальше по странице.')
+  assert.ok(chunk.length <= 340)
+  assert.equal(chunk.includes('Азбука веры'), false)
+  assert.equal(chunk.startsWith('Отче наш'), true)
 })
 
 test('Gemini Live assistant turn commits only on turnComplete', () => {

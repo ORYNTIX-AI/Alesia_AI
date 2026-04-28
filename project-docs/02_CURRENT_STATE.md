@@ -212,3 +212,15 @@
 - Exact prayer reading is now sent as a short confirmed fragment instead of a long 900-1200 character turn; voice stop commands can locally interrupt active assistant speech.
 - Browser intent detection now treats known Azbyka/Azbyka Vera open-site phrasing as `site_open` before ordinary chat.
 - Local checks after the change passed: `npm test`, `npm run lint`, `npm run build`, `npm run test:architecture`, `npm run test:e2e`.
+
+## 2026-04-28 Human voice loop v0.0.16
+
+- Footer/package version raised to `v0.0.16`.
+- Batyushka 2 keeps Gemini Live `NO_INTERRUPTION`, but local RMS barge-in now stops playback immediately, marks the active turn interrupted, and suppresses late Gemini chunks until `turnComplete`.
+- Batyushka 2 endpointing is faster: `prefixPaddingMs: 140`, `silenceDurationMs: 620`, low start/end sensitivity.
+- Batyushka 3 Yandex Realtime uses local RMS barge-in plus upstream `interrupt`, and Yandex output prefers HTMLAudio fallback with playback start/end/output-mode telemetry.
+- Stop words now include `не надо`/`отмена`; fuzzy stop is enabled for short prayer-reading interruptions such as `опыт`.
+- Prayer exact reading is capped to a short confirmed fragment (`<= 340` chars) and strips known page chrome before prayer text.
+- Runtime skips knowledge lookup for simple greetings/persona/capability/browser/stop turns; longer lookup/prayer turns get a short high-priority status prompt first.
+- Browser voice routing now logs `browser.intent.input`, `browser.intent.classified`, `browser.intent.skipped`, `browser.open.started`, and `browser.open.result`.
+- Local checks after the change passed: `npm test`, `npm run lint`, `npm run build`, `npm run test:architecture`, `npm run test:e2e`.

@@ -3,13 +3,41 @@ import { isBrowserActionFollowupRequest } from './transcriptNetworking.js'
 export const MAX_SESSION_WEB_PROMPT_ENTRIES = 5;
 const SIDECAR_BOT_VOLUME_GUARD = 0.08;
 export const SILENT_TURN_FALLBACK_CHUNK_MAX_CHARS = 160;
-export const STOP_SPEECH_PATTERN = /(^|\s)(\u0441\u0442\u043e\u043f|\u043e\u0441\u0442\u0430\u043d\u043e\u0432\u0438\u0441\u044c|\u0437\u0430\u043c\u043e\u043b\u0447\u0438|\u0445\u0432\u0430\u0442\u0438\u0442|\u0442\u0438\u0448\u0435|\u043f\u0430\u0443\u0437\u0430|stop)(?=\s|$)/i;
+export const STOP_SPEECH_PATTERN = /(^|\s)(\u0441\u0442\u043e\u043f|\u043e\u0441\u0442\u0430\u043d\u043e\u0432\u0438\u0441\u044c|\u0437\u0430\u043c\u043e\u043b\u0447\u0438|\u0445\u0432\u0430\u0442\u0438\u0442|\u0442\u0438\u0448\u0435|\u043f\u0430\u0443\u0437\u0430|\u043d\u0435\s+\u043d\u0430\u0434\u043e|\u043e\u0442\u043c\u0435\u043d\u0430|stop)(?=\s|$)/i;
 export const SERVER_STT_FRAGMENT_HOLD_MS = 900;
 export const SERVER_STT_FRAGMENT_MERGE_WINDOW_MS = 2400;
 export const SERVER_STT_FRAGMENT_MAX_LENGTH = 28;
 export const SERVER_STT_FRAGMENT_MAX_WORDS = 4;
 export const SERVER_STT_SITE_FRAGMENT_HOLD_MS = 520;
 export const SERVER_STT_SHORT_FRAGMENT_HOLD_MS = 650;
+
+export function isLikelyVoiceStopCommand(transcript, { allowFuzzy = false } = {}) {
+  const normalized = normalizeSpeechText(transcript).toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+  if (STOP_SPEECH_PATTERN.test(normalized)) {
+    return true;
+  }
+  if (!allowFuzzy) {
+    return false;
+  }
+  const cleaned = normalized
+    .replace(/[.,!?;:()[\]{}"']/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const words = cleaned.split(/\s+/).filter(Boolean);
+  if (words.length !== 1) {
+    return false;
+  }
+  return new Set([
+    '\u043e\u043f\u044b\u0442',
+    '\u0441\u0442\u043e\u043f\u0430',
+    '\u0441\u0442\u043e\u043f\u044b',
+    '\u0441\u0442\u043e\u043a',
+    '\u0442\u043e\u043f',
+  ]).has(words[0]);
+}
 
 export function normalizeTranscriptKey(transcript) {
   return String(transcript || '')
@@ -512,6 +540,29 @@ export function classifyTranscriptIntent(transcript, { hasActiveBrowserSession =
     return 'site_open';
   }
   return 'chat';
+}
+
+export function shouldSkipKnowledgeForTranscript(transcript, { hasActiveBrowserSession = false } = {}) {
+  const normalized = normalizeSpeechText(transcript).toLowerCase();
+  if (!normalized) {
+    return true;
+  }
+  const intentType = classifyTranscriptIntent(normalized, { hasActiveBrowserSession });
+  if (intentType !== 'chat') {
+    return true;
+  }
+  if (
+    isLikelyVoiceStopCommand(normalized, { allowFuzzy: true })
+    || isGreetingOnlyTranscript(normalized)
+    || isPersonaDirectQuestion(normalized)
+    || isLikelyUnclearStandaloneTranscript(normalized)
+  ) {
+    return true;
+  }
+  if (/^(?:\u043a\u0430\u043a\s+\u0434\u0435\u043b\u0430|\u0447\u0442\u043e\s+\u0442\u044b\s+\u0443\u043c\u0435\u0435\u0448\u044c|\u0447\u0442\u043e\s+\u0432\u044b\s+\u0443\u043c\u0435\u0435\u0442\u0435|\u0447\u0435\u043c\s+\u043f\u043e\u043c\u043e\u0436\u0435\u0448\u044c|\u0441\u043f\u0430\u0441\u0438\u0431\u043e)(?:\s|$)/i.test(normalized)) {
+    return true;
+  }
+  return false;
 }
 
 export function isLikelyIncompleteBrowserRequest(transcript) {

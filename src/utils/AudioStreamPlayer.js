@@ -30,6 +30,28 @@
         this.htmlChunkTargetMs = 360;
         this.htmlChunkFlushDelayMs = 90;
         this.preferHtmlAudioOutput = false;
+        this.playbackEventCallback = null;
+    }
+
+    setPreferHtmlAudioOutput(preferHtmlAudioOutput) {
+        this.preferHtmlAudioOutput = Boolean(preferHtmlAudioOutput);
+        if (this.preferHtmlAudioOutput && !this.htmlAudio && typeof Audio !== 'undefined') {
+            this.htmlAudio = new Audio();
+            this.htmlAudio.preload = 'auto';
+            this.htmlAudio.playsInline = true;
+        }
+    }
+
+    setPlaybackEventCallback(callback) {
+        this.playbackEventCallback = typeof callback === 'function' ? callback : null;
+    }
+
+    emitPlaybackEvent(event, details = {}) {
+        try {
+            this.playbackEventCallback?.(event, details);
+        } catch {
+            // Playback telemetry must never break audio.
+        }
     }
 
     async initialize() {
@@ -63,6 +85,7 @@
             sampleRate: effectiveRate,
             contextState: this.audioContext?.state || '',
             queuedMs: this.getBufferedMs(),
+            outputMode: this.preferHtmlAudioOutput ? 'html' : 'webaudio',
         });
 
         if (!this.audioContext) {
@@ -129,14 +152,27 @@
             const source = this.audioContext.createBufferSource();
             const startAt = this.nextStartTime;
             const endAt = startAt + buffer.duration;
+            const durationMs = Math.round(buffer.duration * 1000);
 
             source.buffer = buffer;
             source.connect(this.gainNode);
             source.onended = () => {
                 this.activeSources.delete(source);
+                this.emitPlaybackEvent('audio-playback-ended', {
+                    outputMode: 'webaudio',
+                    sampleRate: buffer.sampleRate,
+                    samples: buffer.length,
+                    durationMs,
+                });
             };
             this.activeSources.add(source);
             source.start(startAt);
+            this.emitPlaybackEvent('audio-playback-start', {
+                outputMode: 'webaudio',
+                sampleRate: buffer.sampleRate,
+                samples: buffer.length,
+                durationMs,
+            });
             this.nextStartTime = endAt;
             this.bufferedUntil = Math.max(this.bufferedUntil, endAt);
         }
@@ -234,6 +270,12 @@
             this.playWebAudioFallback(item);
             this.playNextHtmlAudioChunk();
         };
+        this.emitPlaybackEvent('audio-playback-start', {
+            outputMode: 'html',
+            sampleRate: item.sampleRate,
+            samples: item.float32Array?.length || 0,
+            durationMs: item.durationMs,
+        });
         const playPromise = this.htmlAudio.play();
         if (playPromise?.catch) {
             playPromise.catch(() => {
@@ -247,6 +289,12 @@
     finishHtmlAudioItem(item) {
         this.htmlAudioPlaying = false;
         this.htmlAudioCurrentItem = null;
+        this.emitPlaybackEvent('audio-playback-ended', {
+            outputMode: 'html',
+            sampleRate: item?.sampleRate || this.sampleRate,
+            samples: item?.float32Array?.length || 0,
+            durationMs: item?.durationMs || 0,
+        });
         if (item?.blobUrl) {
             URL.revokeObjectURL(item.blobUrl);
         }
