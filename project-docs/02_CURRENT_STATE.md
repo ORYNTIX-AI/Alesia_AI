@@ -201,3 +201,14 @@
 - Deployed `v0.0.14` to `https://alesia-ai.constitution.of.by`; `/health` is OK, container `ALesia_AI` is healthy, active bundle is `assets/index-BgxocFBR.js`, and the footer shows `v0.0.14`.
 - Direct production WebSocket smoke passed: Gemini Live returned text/audio and reached `turnComplete` after `generationComplete`; Yandex Realtime returned text/audio and `assistant_turn_done`.
 - Fresh production logs after the smoke had no `assistant.turn.interrupted`, `assistant.turn.drop`, `audio-drop`, `answer-audio-missed`, or `unexpected-start`.
+
+## 2026-04-28 Voice stabilization v0.0.15
+
+- Footer/package version raised to `v0.0.15`.
+- `/health` now exposes `version`, `commit`, and `buildTime`; Docker build accepts `APP_VERSION`, `APP_COMMIT`, and `APP_BUILD_TIME` args so production deploys can be verified by commit.
+- Batyushka 2 Gemini Live keeps `NO_INTERRUPTION`, but server VAD is less sensitive: low start/end sensitivity, longer prefix padding, and `silenceDurationMs: 800`.
+- Batyushka 2 local mic path keeps sending audio during assistant playback, but suppresses weak mic frames for a short tail after playback drains to reduce phone echo false starts without restoring the old hard playback gate.
+- Batyushka 3/Yandex Realtime logs peak RMS per throttle window and retries WebAudio scheduling after a suspended AudioContext resumes.
+- Exact prayer reading is now sent as a short confirmed fragment instead of a long 900-1200 character turn; voice stop commands can locally interrupt active assistant speech.
+- Browser intent detection now treats known Azbyka/Azbyka Vera open-site phrasing as `site_open` before ordinary chat.
+- Local checks after the change passed: `npm test`, `npm run lint`, `npm run build`, `npm run test:architecture`, `npm run test:e2e`.

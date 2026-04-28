@@ -19,6 +19,37 @@ function truncatePromptValue(value, maxLength = 180) {
   return `${normalized.slice(0, maxLength - 1).trimEnd()}…`;
 }
 
+const PRAYER_READING_CHUNK_MAX_CHARS = 420;
+
+function buildPrayerReadingChunk(value, maxLength = PRAYER_READING_CHUNK_MAX_CHARS) {
+  const normalized = String(value || '').replace(/\s+/g, ' ').trim();
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+
+  const sentences = normalized.match(/[^.!?…]+[.!?…]*/gu) || [normalized];
+  const parts = [];
+  let totalLength = 0;
+  for (const sentence of sentences) {
+    const next = sentence.trim();
+    if (!next) {
+      continue;
+    }
+    const nextLength = totalLength + (parts.length ? 1 : 0) + next.length;
+    if (nextLength > maxLength && totalLength >= 180) {
+      break;
+    }
+    parts.push(next);
+    totalLength = nextLength;
+    if (totalLength >= maxLength) {
+      break;
+    }
+  }
+
+  const chunk = parts.join(' ').trim() || normalized.slice(0, maxLength).trim();
+  return truncatePromptValue(chunk, maxLength);
+}
+
 export function buildSessionHistorySummary(sessionHistory) {
   const recentEntries = Array.isArray(sessionHistory)
     ? sessionHistory.slice(-MAX_SESSION_WEB_PROMPT_ENTRIES)
@@ -372,19 +403,21 @@ export function resolveExactPrayerReading(question, {
 }
 
 export function buildExactPrayerReadingPrompt(question, reading) {
+  const readingChunk = buildPrayerReadingChunk(reading?.excerpt || '');
   return `RUNTIME_EXACT_READING:
 Пользователь попросил молитву: "${truncatePromptValue(question, 220)}"
 Разрешено только точное чтение подтверждённого текста.
 Источник: ${truncatePromptValue(reading?.sourceTitle || 'Подтверждённый источник', 180)}${reading?.sourceUrl ? ` (${truncatePromptValue(reading.sourceUrl, 180)})` : ''}
 
-Прочитай сейчас только этот текст, полностью и без добавлений от себя:
-${truncatePromptValue(reading?.excerpt || '', 1200)}
+Прочитай сейчас только этот короткий фрагмент, без добавлений от себя:
+${readingChunk}
 
 Правила:
-1. Не пересказывай и не сокращай текст.
+1. Не пересказывай и не меняй слова внутри фрагмента.
 2. Не добавляй вступление, если пользователь не просил.
 3. Не вставляй комментарии и пояснения между строками.
-4. Не отказывайся, потому что источник уже подтверждён.`;
+4. Не отказывайся, потому что источник уже подтверждён.
+5. Если пользователь попросит продолжить, прочитаешь следующий фрагмент отдельным ответом.`;
 }
 
 export function buildPrayerSourceRequiredPrompt(question, {

@@ -383,6 +383,13 @@ export function buildBrowserIntentKey(transcript) {
   return normalizeTranscriptKey(transcript);
 }
 
+function hasKnownDirectSiteTarget(transcript) {
+  const normalized = normalizeBrowserCommandText(transcript);
+  if (!normalized) return false;
+
+  return /(?:^|\s)(?:\u0430\u0437\u0431\u0443\u043a[\u0430-\u044f\u0451]*|azbyka)(?=\s|$)/iu.test(normalized);
+}
+
 export function isExplicitBrowserRequest(transcript) {
   const normalized = normalizeBrowserCommandText(transcript);
   if (!normalized) return false;
@@ -398,6 +405,7 @@ export function isExplicitBrowserRequest(transcript) {
   const hasLookupVerb = /(?:^|\s)(найди|найти|покажи|посмотри)(?=\s|$)/iu.test(padded);
   const hasWebNoun = /(?:^|\s)(сайт|сайта|страниц[ауые]?|старонк[ауые]?|домен|адрес|url|урл|веб|web)(?=\s|$)/iu.test(padded);
   const hasWebContext = /(?:^|\s)(в интернете|в сети|онлайн|online)(?=\s|$)/iu.test(padded);
+  const hasKnownSiteTarget = hasKnownDirectSiteTarget(normalized);
   const leadingSiteTargetMatch = normalized.match(/^(?:ну|а|и|слушай|смотри|пожалуйста|прошу)?\s*(?:мне\s+)?(?:сайт|сайта|страницу|страница|домен|адрес)\s+(.+)$/iu);
   if (leadingSiteTargetMatch?.[1]) {
     const target = normalizeSpeechText(leadingSiteTargetMatch[1]);
@@ -414,6 +422,10 @@ export function isExplicitBrowserRequest(transcript) {
   }
 
   if (hasLookupVerb && (hasWebNoun || hasWebContext)) {
+    return true;
+  }
+
+  if (hasKnownSiteTarget && (hasOpenVerb || hasPoliteOpen || hasWebNoun || hasWebContext)) {
     return true;
   }
 

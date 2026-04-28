@@ -6,6 +6,10 @@ function withAppConfigMetadata(config, supportedVoiceNames, supportedVoices) {
   };
 }
 
+const APP_VERSION = process.env.APP_VERSION || '0.0.15';
+const APP_COMMIT = process.env.APP_COMMIT || 'unknown';
+const APP_BUILD_TIME = process.env.APP_BUILD_TIME || '';
+
 export function registerCoreRoutes(app, {
   getAppConfigPath,
   getRuntimeLogPath,
@@ -24,6 +28,9 @@ export function registerCoreRoutes(app, {
     const voiceSessionStats = getVoiceSessionStoreStats();
     res.json({
       status: 'ok',
+      version: APP_VERSION,
+      commit: APP_COMMIT,
+      buildTime: APP_BUILD_TIME,
       proxy: proxyInfo?.host || '',
       proxyScheme: proxyInfo?.scheme || '',
       configPath: getAppConfigPath(),

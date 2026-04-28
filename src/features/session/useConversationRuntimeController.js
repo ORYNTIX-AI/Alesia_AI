@@ -529,6 +529,19 @@ export function useConversationRuntimeController({
       return false;
     }
 
+    if (
+      STOP_SPEECH_PATTERN.test(normalized)
+      && (botBufferedMs > 0 || botVolume > tunedSpeechConfig.botVolumeGuard || assistantPromptInFlightRef.current || assistantAwaitingResponseRef.current)
+    ) {
+      triggerBargeIn(`voice-stop-command-${source}`);
+      recordConversationAction('stt.stream.stop-command', {
+        conversationSessionId: conversationSessionIdRef.current || '',
+        source,
+        textLength: normalized.length,
+      });
+      return false;
+    }
+
     const transcriptKey = normalizeTranscriptKey(normalized);
     const now = Date.now();
     const previousLiveFinal = lastLiveFinalRef.current;
@@ -617,6 +630,8 @@ export function useConversationRuntimeController({
     return true;
   }, [
     activeBrowserSessionIdRef,
+    assistantAwaitingResponseRef,
+    assistantPromptInFlightRef,
     audioPlayer,
     beginUserRequest,
     browserPanelRef,
@@ -663,6 +678,19 @@ export function useConversationRuntimeController({
         source: 'yandex-realtime-input',
         textLength: normalized.length,
         reason: recentAssistantSpeech ? 'assistant-overlap' : 'assistant-echo',
+      });
+      return false;
+    }
+
+    if (
+      STOP_SPEECH_PATTERN.test(normalized)
+      && (botBufferedMs > 0 || botVolume > tunedSpeechConfig.botVolumeGuard || assistantPromptInFlightRef.current || assistantAwaitingResponseRef.current)
+    ) {
+      triggerBargeIn('voice-stop-command-yandex-realtime-input');
+      recordConversationAction('stt.stream.stop-command', {
+        conversationSessionId: conversationSessionIdRef.current || '',
+        source: 'yandex-realtime-input',
+        textLength: normalized.length,
       });
       return false;
     }

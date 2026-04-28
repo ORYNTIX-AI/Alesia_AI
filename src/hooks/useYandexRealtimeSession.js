@@ -144,7 +144,7 @@ export function useYandexRealtimeSession(audioPlayer, runtimeConfig = DEFAULT_RU
   const lifecycleTokenRef = useRef(0);
   const lastSpeechStartedInterruptAtRef = useRef(0);
   const lastAssistantAudioOutputAtRef = useRef(0);
-  const inputAudioStatsRef = useRef({ chunks: 0, lastLoggedAt: 0 });
+  const inputAudioStatsRef = useRef({ chunks: 0, lastLoggedAt: 0, peakRms: 0 });
 
   useEffect(() => {
     runtimeConfigRef.current = { ...DEFAULT_RUNTIME_CONFIG, ...runtimeConfig };
@@ -307,11 +307,14 @@ export function useYandexRealtimeSession(audioPlayer, runtimeConfig = DEFAULT_RU
   } = {}) => {
     const stats = inputAudioStatsRef.current;
     stats.chunks += 1;
+    stats.peakRms = Math.max(Number(stats.peakRms || 0), Number(rms || 0));
     const now = Date.now();
     if (stats.chunks !== 1 && (now - stats.lastLoggedAt) < 2500) {
       return;
     }
     stats.lastLoggedAt = now;
+    const peakRms = Number(stats.peakRms || 0);
+    stats.peakRms = 0;
     const activeRuntime = runtimeConfigRef.current || {};
     fetch('/api/browser/client-event', {
       method: 'POST',
@@ -324,6 +327,7 @@ export function useYandexRealtimeSession(audioPlayer, runtimeConfig = DEFAULT_RU
           source,
           chunks: stats.chunks,
           rms: Number(rms.toFixed(5)),
+          peakRms: Number(peakRms.toFixed(5)),
           sampleRate,
           samples,
         },
@@ -419,7 +423,7 @@ export function useYandexRealtimeSession(audioPlayer, runtimeConfig = DEFAULT_RU
       }
       const activeRuntime = runtimeConfigRef.current;
       const isStale = () => lifecycleTokenRef.current !== lifecycleToken;
-      inputAudioStatsRef.current = { chunks: 0, lastLoggedAt: 0 };
+      inputAudioStatsRef.current = { chunks: 0, lastLoggedAt: 0, peakRms: 0 };
 
       await audioPlayer.initialize?.();
 

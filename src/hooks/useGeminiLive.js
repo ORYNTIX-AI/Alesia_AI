@@ -19,6 +19,7 @@ import {
 
 const BATYUSHKA_2_BARGE_IN_RMS_THRESHOLD = 0.18;
 const BATYUSHKA_2_BARGE_IN_HOLD_MS = 900;
+const BATYUSHKA_2_MIC_TAIL_GATE_MS = 220;
 
 export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFIG, callbacks = DEFAULT_CALLBACKS) {
   const [status, setStatus] = useState('disconnected');
@@ -50,6 +51,7 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
   const pendingGoAwayRef = useRef(null);
   const lifecycleTokenRef = useRef(0);
   const strongUserSpeechUntilRef = useRef(0);
+  const lastAssistantPlaybackActiveAtRef = useRef(0);
 
   const releaseSuppressedAudio = useCallback(() => {
     suppressAudioRef.current = false;
@@ -259,6 +261,7 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
     setError(null);
     setupCompleteRef.current = false;
     suppressAudioRef.current = false;
+    lastAssistantPlaybackActiveAtRef.current = 0;
 
     try {
       if (runtimeOverride && typeof runtimeOverride === 'object') {
@@ -323,6 +326,18 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
             && wsRef.current
             && wsRef.current.readyState === WebSocket.OPEN
           ) {
+            if (stableBatyushkaRuntime) {
+              const assistantBufferedMs = Number(audioPlayer?.getBufferedMs?.() || 0);
+              if (assistantBufferedMs > 0) {
+                lastAssistantPlaybackActiveAtRef.current = nowMs;
+              } else if (
+                lastAssistantPlaybackActiveAtRef.current > 0
+                && (nowMs - lastAssistantPlaybackActiveAtRef.current) < BATYUSHKA_2_MIC_TAIL_GATE_MS
+                && rms < BATYUSHKA_2_BARGE_IN_RMS_THRESHOLD
+              ) {
+                return;
+              }
+            }
             if (audioContext.sampleRate !== 16000) {
               inputData = downsampleBuffer(inputData, audioContext.sampleRate, 16000);
             }

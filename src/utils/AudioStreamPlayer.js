@@ -80,7 +80,11 @@
             return buildResult(false, 'audio-context-closed');
         }
         if (this.audioContext.state === 'suspended') {
-            this.audioContext.resume().catch(() => {});
+            this.audioContext.resume()
+                .then(() => {
+                    this.scheduleQueue();
+                })
+                .catch(() => {});
         }
 
         const buffer = this.audioContext.createBuffer(1, float32Array.length, effectiveRate);

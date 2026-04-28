@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   STOP_SPEECH_PATTERN,
+  classifyTranscriptIntent,
   classifyShortHumanTurn,
   extractBrowserTarget,
   isExplicitBrowserRequest,
@@ -56,6 +57,12 @@ test('Russian browser intents and follow-up actions are recognized', () => {
   assert.equal(isBrowserActionFollowupRequest('нажми контакты'), true)
 })
 
+test('Russian known site intents route before ordinary chat', () => {
+  assert.equal(classifyTranscriptIntent('\u043e\u0442\u043a\u0440\u043e\u0439 \u0430\u0437\u0431\u0443\u043a\u0443 \u0432\u0435\u0440\u044b'), 'site_open')
+  assert.equal(classifyTranscriptIntent('\u0430\u0437\u0431\u0443\u043a\u0443 \u0432\u0435\u0440\u044b \u043e\u0442\u043a\u0440\u043e\u0439'), 'site_open')
+  assert.equal(classifyTranscriptIntent('\u0441\u0430\u0439\u0442 \u0430\u0437\u0431\u0443\u043a\u0430'), 'site_open')
+})
+
 test('prompt builders do not contain mojibake markers', () => {
   const prompts = [
     buildSessionHistorySummary([]),
@@ -84,8 +91,9 @@ test('Batyushka 2 Gemini realtime config prevents server-side echo self-interrup
   const config = resolveRealtimeInputConfig({ characterId: 'batyushka-2' })
 
   assert.equal(config.activityHandling, 'NO_INTERRUPTION')
-  assert.equal(config.automaticActivityDetection.startOfSpeechSensitivity, 'START_SENSITIVITY_HIGH')
-  assert.ok(config.automaticActivityDetection.silenceDurationMs < 900)
+  assert.equal(config.automaticActivityDetection.startOfSpeechSensitivity, 'START_SENSITIVITY_LOW')
+  assert.equal(config.automaticActivityDetection.endOfSpeechSensitivity, 'END_SENSITIVITY_LOW')
+  assert.ok(config.automaticActivityDetection.silenceDurationMs >= 800)
 })
 
 test('Gemini Live assistant turn commits only on turnComplete', () => {

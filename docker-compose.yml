@@ -4,6 +4,10 @@ services:
     container_name: ALesia_AI
     build:
       context: .
+      args:
+        APP_VERSION: ${APP_VERSION:-0.0.15}
+        APP_COMMIT: ${APP_COMMIT:-unknown}
+        APP_BUILD_TIME: ${APP_BUILD_TIME:-unknown}
     environment:
       PORT: "3000"
       APP_CONFIG_PATH: /app/data/app-config.json
