@@ -19,8 +19,6 @@ import {
 
 const BATYUSHKA_2_BARGE_IN_RMS_THRESHOLD = 0.18;
 const BATYUSHKA_2_BARGE_IN_HOLD_MS = 900;
-const BATYUSHKA_2_ASSISTANT_BUFFER_GUARD_MS = 80;
-const BATYUSHKA_2_ASSISTANT_ECHO_HOLD_MS = 250;
 
 export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFIG, callbacks = DEFAULT_CALLBACKS) {
   const [status, setStatus] = useState('disconnected');
@@ -52,7 +50,6 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
   const pendingGoAwayRef = useRef(null);
   const lifecycleTokenRef = useRef(0);
   const strongUserSpeechUntilRef = useRef(0);
-  const assistantEchoHoldUntilRef = useRef(0);
 
   const releaseSuppressedAudio = useCallback(() => {
     suppressAudioRef.current = false;
@@ -320,25 +317,6 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
           if (stableBatyushkaRuntime && rms >= BATYUSHKA_2_BARGE_IN_RMS_THRESHOLD) {
             strongUserSpeechUntilRef.current = nowMs + BATYUSHKA_2_BARGE_IN_HOLD_MS;
           }
-          const strongUserSpeechActive = stableBatyushkaRuntime && nowMs < strongUserSpeechUntilRef.current;
-          const assistantPlaybackActive = stableBatyushkaRuntime && (
-            assistantTurnRef.current.active
-            || Number(audioPlayer?.getBufferedMs?.() || 0) > BATYUSHKA_2_ASSISTANT_BUFFER_GUARD_MS
-            || Number(audioPlayer?.getVolume?.() || 0) > 0.035
-          );
-          if (assistantPlaybackActive && !strongUserSpeechActive) {
-            assistantEchoHoldUntilRef.current = Math.max(
-              assistantEchoHoldUntilRef.current,
-              nowMs + BATYUSHKA_2_ASSISTANT_ECHO_HOLD_MS,
-            );
-            return;
-          }
-          if (assistantPlaybackActive && strongUserSpeechActive) {
-            audioPlayer.stop?.();
-          }
-          if (stableBatyushkaRuntime && !strongUserSpeechActive && nowMs < assistantEchoHoldUntilRef.current) {
-            return;
-          }
 
           if (
             setupCompleteRef.current
@@ -525,9 +503,6 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
                 if (!suppressAudioRef.current) {
                   const pcmData = base64ToFloat32Array(part.inlineData.data);
                   audioPlayer.addChunk(pcmData);
-                  if (isBatyushka2StableRuntime(runtimeConfigRef.current)) {
-                    assistantEchoHoldUntilRef.current = Date.now() + BATYUSHKA_2_ASSISTANT_ECHO_HOLD_MS;
-                  }
                 }
               }
             }

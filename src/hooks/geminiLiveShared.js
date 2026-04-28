@@ -146,7 +146,9 @@ export function resolveRealtimeInputConfig(runtimeConfig) {
 }
 
 function buildPrayerInstruction(runtimeConfig) {
-  const mode = String(runtimeConfig?.prayerReadMode || 'knowledge-only').trim().toLowerCase();
+  const characterId = String(runtimeConfig?.characterId || '').trim();
+  const defaultMode = BATYUSHKA_CHARACTER_IDS.has(characterId) ? 'hybrid' : 'knowledge-only';
+  const mode = String(runtimeConfig?.prayerReadMode || defaultMode).trim().toLowerCase();
 
   if (mode === 'free') {
     return 'Правила по молитвам: при запросе на молитву отвечай уважительно и кратко, не выдумывай факты вне подтвержденного контекста.';

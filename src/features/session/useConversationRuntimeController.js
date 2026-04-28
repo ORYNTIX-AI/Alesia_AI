@@ -2109,6 +2109,7 @@ export function useConversationRuntimeController({
       const sent = enqueueAssistantPrompt(buildRuntimeTurnPrompt(normalized, {
         knowledgeHits,
         activePageContext,
+        characterId: selectedCharacter?.id || '',
         recentTurns: recentTurnsForIntentRef.current,
         compactMode: isCompactCharacter
           || isGemini31FlashLiveModel(selectedCharacter?.modelId || selectedCharacter?.voiceModelId),
@@ -2146,6 +2147,7 @@ export function useConversationRuntimeController({
     isCompactCharacter,
     markDialogRequestState,
     recentTurnsForIntentRef,
+    selectedCharacter?.id,
     selectedCharacter?.modelId,
     selectedCharacter?.voiceModelId,
     queryKnowledgeForTurn,

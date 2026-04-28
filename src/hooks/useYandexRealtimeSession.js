@@ -349,20 +349,7 @@ export function useYandexRealtimeSession(audioPlayer, runtimeConfig = DEFAULT_RU
     }
   }, []);
 
-  const shouldSuppressUserAudioInput = useCallback(() => {
-    const userVolume = Number(userVolumeRef.current || 0);
-    if (userVolume >= SPEECH_STARTED_USER_VOLUME_GUARD) {
-      return false;
-    }
-    const bufferedAudioMs = Number(audioPlayer?.getBufferedMs?.() || 0);
-    const assistantVolume = Number(audioPlayer?.getVolume?.() || 0);
-    const recentlyPlayedAssistantAudio =
-      assistantTurnRef.current.audioChunks > 0
-      && (Date.now() - lastAssistantAudioOutputAtRef.current) < INPUT_ECHO_SUPPRESSION_TAIL_MS;
-    return bufferedAudioMs > INPUT_ECHO_SUPPRESSION_BUFFER_MS
-      || assistantVolume > INPUT_ECHO_SUPPRESSION_VOLUME_GUARD
-      || recentlyPlayedAssistantAudio;
-  }, [audioPlayer]);
+  const shouldSuppressUserAudioInput = useCallback(() => false, []);
 
   const cancelAssistantOutput = useCallback((options = {}) => {
     const responseId = normalizeText(assistantTurnRef.current.responseId || '');

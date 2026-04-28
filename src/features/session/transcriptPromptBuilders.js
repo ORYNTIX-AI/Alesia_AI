@@ -203,19 +203,25 @@ export function buildRecentTurnsPromptBlock(recentTurns = [], currentQuestion = 
     : `Краткая память последних реплик:\n${recentLines.join('\n')}`;
 }
 
+const BATYUSHKA_CHARACTER_IDS = new Set(['alesya-puck', 'batyushka-2', 'batyushka-3']);
+
 export function buildRuntimeTurnPrompt(
   question,
   {
     knowledgeHits = [],
     activePageContext = null,
-    prayerReadMode = 'knowledge-only',
+    prayerReadMode = '',
+    characterId = '',
     compactMode = false,
     recentTurns = [],
   } = {},
 ) {
   const normalizedQuestion = truncatePromptValue(question, 320);
   const hits = Array.isArray(knowledgeHits) ? knowledgeHits.slice(0, compactMode ? 1 : 3) : [];
-  const prayerMode = String(prayerReadMode || 'knowledge-only').trim().toLowerCase();
+  const defaultPrayerMode = BATYUSHKA_CHARACTER_IDS.has(String(characterId || '').trim())
+    ? 'hybrid'
+    : 'knowledge-only';
+  const prayerMode = String(prayerReadMode || defaultPrayerMode).trim().toLowerCase();
   const prayerRequested = isPrayerRequest(normalizedQuestion);
   const prayerReading = prayerRequested && prayerMode === 'knowledge-only'
     ? pickPrayerReadingHit(hits, normalizedQuestion)

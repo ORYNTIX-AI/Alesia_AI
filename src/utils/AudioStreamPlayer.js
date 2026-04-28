@@ -123,18 +123,11 @@
                 continue;
             }
             const source = this.audioContext.createBufferSource();
-            const envelope = this.audioContext.createGain();
             const startAt = this.nextStartTime;
-            const fadeDuration = Math.min(this.fadeDurationSec, Math.max(0.004, buffer.duration / 3));
             const endAt = startAt + buffer.duration;
 
             source.buffer = buffer;
-            source.connect(envelope);
-            envelope.connect(this.gainNode);
-            envelope.gain.setValueAtTime(0.0001, startAt);
-            envelope.gain.linearRampToValueAtTime(1, startAt + fadeDuration);
-            envelope.gain.setValueAtTime(1, Math.max(startAt + fadeDuration, endAt - fadeDuration));
-            envelope.gain.linearRampToValueAtTime(0.0001, endAt);
+            source.connect(this.gainNode);
             source.onended = () => {
                 this.activeSources.delete(source);
             };
