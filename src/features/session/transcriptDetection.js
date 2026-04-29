@@ -320,6 +320,11 @@ export function extractBrowserTarget(transcript) {
     return spokenDomainMatch[1];
   }
 
+  const politeTailMatch = normalized.match(/(?:^|\s)(?:\u043e\u0442\u043a\u0440\u043e\u0439|\u043e\u0442\u043a\u0440\u043e\u0439\u0442\u0435|\u0437\u0430\u0439\u0434\u0438|\u0437\u0430\u0439\u0434\u0438\u0442\u0435|\u0437\u0430\u0439\u0442\u0438|\u043f\u0435\u0440\u0435\u0439\u0434\u0438|\u043f\u0435\u0440\u0435\u0439\u0434\u0438\u0442\u0435|\u043f\u0435\u0440\u0435\u0439\u0442\u0438|\u043f\u043e\u043a\u0430\u0436\u0438|\u043f\u043e\u043a\u0430\u0436\u0438\u0442\u0435|\u043f\u043e\u0441\u043c\u043e\u0442\u0440\u0438|\u043f\u043e\u0441\u043c\u043e\u0442\u0440\u0438\u0442\u0435)\s+(?:\u043f\u043e\u0436\u0430\u043b\u0443\u0439\u0441\u0442\u0430\s+)?(?:\u043d\u0430\s+|\u0432\s+)?(?:\u043c\u043d\u0435\s+)?(?:\u0441\u0430\u0439\u0442|\u0441\u0442\u0440\u0430\u043d\u0438\u0446\u0443|\u0434\u043e\u043c\u0435\u043d|\u0430\u0434\u0440\u0435\u0441)?\s*(.+)$/iu);
+  if (politeTailMatch?.[1]) {
+    return normalizeSpeechText(politeTailMatch[1]);
+  }
+
   const tailMatch = normalized.match(/(?:открой|открыть|зайди|зайти|перейди|перейти|адкрый|адкрыць|адкрыйце|зайдзи|зайдзі|зайсці|перайдзи|перайдзі|перайсци|перайсці)\s+(?:на\s+|в\s+)?(?:мне\s+)?(?:сайт|страницу|домен|адрес)?\s*(.+)$/iu);
   if (tailMatch?.[1]) {
     return normalizeSpeechText(tailMatch[1]);
@@ -428,9 +433,11 @@ export function isExplicitBrowserRequest(transcript) {
 
   const padded = ` ${normalized} `;
   const hasOpenVerb = /(?:^|\s)(открой|открыть|открою|откроем|откроешь|откроете|зайди|зайти|зайду|зайдём|зайдешь|зайдете|перейди|перейти|перейду|перейдём|перейдешь|перейдете|адкрый|адкрыць|адкрыйце|зайдзи|зайдзі|зайсці|перайдзи|перайдзі|перайсци|перайсці)(?=\s|$)/iu.test(padded);
+  const hasPoliteImperativeOpen = /(?:^|\s)(?:\u043e\u0442\u043a\u0440\u043e\u0439\u0442\u0435|\u0437\u0430\u0439\u0434\u0438\u0442\u0435|\u043f\u0435\u0440\u0435\u0439\u0434\u0438\u0442\u0435|\u043f\u043e\u043a\u0430\u0436\u0438\u0442\u0435|\u043f\u043e\u0441\u043c\u043e\u0442\u0440\u0438\u0442\u0435)(?=\s|$)/iu.test(padded);
   const hasPoliteOpen = /(?:^|\s)(прошу|прашу|пожалуйста)\s+(?:[^ ]+\s+){0,4}(открой|открыть|зайди|зайти|перейди|перейти|адкрый|адкрыць|зайдзи|зайдзі|зайсці|перайдзи|перайдзі|перайсци|перайсці)(?=\s|$)/iu
     .test(padded);
   const hasLookupVerb = /(?:^|\s)(найди|найти|покажи|посмотри)(?=\s|$)/iu.test(padded);
+  const hasPoliteLookupVerb = /(?:^|\s)(?:\u043d\u0430\u0439\u0434\u0438\u0442\u0435|\u043f\u043e\u043a\u0430\u0436\u0438\u0442\u0435|\u043f\u043e\u0441\u043c\u043e\u0442\u0440\u0438\u0442\u0435)(?=\s|$)/iu.test(padded);
   const hasWebNoun = /(?:^|\s)(сайт|сайта|страниц[ауые]?|старонк[ауые]?|домен|адрес|url|урл|веб|web)(?=\s|$)/iu.test(padded);
   const hasWebContext = /(?:^|\s)(в интернете|в сети|онлайн|online)(?=\s|$)/iu.test(padded);
   const hasKnownSiteTarget = hasKnownDirectSiteTarget(normalized);
@@ -449,19 +456,19 @@ export function isExplicitBrowserRequest(transcript) {
     }
   }
 
-  if (hasLookupVerb && (hasWebNoun || hasWebContext)) {
+  if ((hasLookupVerb || hasPoliteLookupVerb) && (hasWebNoun || hasWebContext)) {
     return true;
   }
 
-  if (hasKnownSiteTarget && (hasOpenVerb || hasPoliteOpen || hasWebNoun || hasWebContext)) {
+  if (hasKnownSiteTarget && (hasOpenVerb || hasPoliteOpen || hasPoliteImperativeOpen || hasWebNoun || hasWebContext)) {
     return true;
   }
 
-  if ((hasOpenVerb || hasPoliteOpen) && hasWebNoun) {
+  if ((hasOpenVerb || hasPoliteOpen || hasPoliteImperativeOpen) && hasWebNoun) {
     return true;
   }
 
-  if (hasOpenVerb || hasPoliteOpen) {
+  if (hasOpenVerb || hasPoliteOpen || hasPoliteImperativeOpen || hasPoliteLookupVerb) {
     const target = extractBrowserTarget(normalized);
     if (normalizeTranscriptKey(target).length >= 4 && !isGenericNavigationTarget(target)) {
       return true;
@@ -736,6 +743,10 @@ export function isBrowserContextFollowupRequest(transcript) {
 
   if (isLikelyBrowserIntent(normalized)) {
     return false;
+  }
+
+  if (/(?:^|\s)(?:(?:\u0440\u0430\u0441\u0441\u043a\u0430\u0436\u0438|\u0441\u043a\u0430\u0436\u0438|\u043f\u043e\u044f\u0441\u043d\u0438|\u043e\u0431\u044a\u044f\u0441\u043d\u0438|\u043f\u0440\u043e\u0447\u0438\u0442\u0430\u0439|\u043f\u043e\u0441\u043c\u043e\u0442\u0440\u0438)\s+)?(?:\u0447\u0442\u043e|\u043e\s+\u0447[\u0435\u0451]\u043c)\s+(?:\u0442\u0430\u043c|\u0442\u0443\u0442|\u0437\u0434\u0435\u0441\u044c|\u0432\u043d\u0438\u0437\u0443|\u043d\u0430\s+(?:\u044d\u0442\u043e\u0439\s+|\u044d\u0442\u043e\u043c\s+)?(?:\u0441\u0430\u0439\u0442\u0435|\u0441\u0430\u0439\u0442\u0443|\u0441\u0430\u0439\u0442|\u0441\u0442\u0440\u0430\u043d\u0438\u0446\u0435|\u0441\u0442\u0440\u0430\u043d\u0438\u0446\u0443|\u0441\u0442\u0440\u0430\u043d\u0438\u0446\u0430)|\u0432\u0438\u0434\u043d\u043e|\u043d\u0430\u043f\u0438\u0441\u0430\u043d\u043e|\u043e\u0442\u043a\u0440\u044b\u0442\u043e)(?=\s|$|[?.!,])/iu.test(normalized)) {
+    return true;
   }
 
   return /(что\s+(внизу|на\s+этой\s+странице|на\s+сайте|здесь|там)|что\s+тут|что\s+видишь|о\s+ч[её]м\s+сайт|что\s+написано|что\s+сейчас\s+открыто)/i

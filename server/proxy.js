@@ -58,6 +58,7 @@ import { registerKnowledgeRoutes } from './routes/knowledgeRoutes.js';
 import { registerGeminiRoutes } from './routes/geminiRoutes.js';
 import { registerYandexRoutes } from './routes/yandexRoutes.js';
 import { registerBrowserRoutes } from './routes/browserRoutes.js';
+import { registerRealtimeToolRoutes } from './routes/realtimeToolRoutes.js';
 import { createYandexRuntimeService } from './services/yandexRuntimeService.js';
 import { registerFrontendFallback } from './http/registerFrontendFallback.js';
 import { registerUpgradeHandlers } from './ws/registerUpgradeHandlers.js';
@@ -510,6 +511,10 @@ registerBrowserRoutes(app, {
   performBrowserSessionAction,
   queryBrowserSession,
   setConversationBrowserState,
+});
+
+registerRealtimeToolRoutes(app, {
+  logRuntime,
 });
 
 registerFrontendFallback(app, {

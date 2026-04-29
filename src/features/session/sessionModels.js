@@ -148,6 +148,7 @@ export function buildSignature(character, globalRuntimeConfig = {}) {
     String(character.voiceGatewayUrl || '').trim(),
     isClientInlinePanelMode(character.browserPanelMode) ? 'client-inline' : 'remote',
     String(character.pageContextMode || 'browser-session').trim(),
+    Array.isArray(character.enabledTools) ? character.enabledTools.join(',') : '',
     String(globalRuntimeConfig.pauseMs || '').trim(),
     String(globalRuntimeConfig.firstReplySentences || '').trim(),
     String(globalRuntimeConfig.memoryTurnCount || '').trim(),

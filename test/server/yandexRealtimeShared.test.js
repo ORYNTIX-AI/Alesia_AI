@@ -47,7 +47,7 @@ test('Yandex browser tool payload exposes verified browser snapshot state', () =
   assert.equal(payload.url, 'https://example.com/')
 })
 
-test('Yandex realtime uses native server VAD response creation', () => {
+test('Yandex realtime session keeps the documented native server VAD shape with tools', () => {
   const payload = buildSessionStartPayload({
     modelId: 'gpt://folder/speech-realtime-250923',
     voiceName: 'ermil',
@@ -56,23 +56,39 @@ test('Yandex realtime uses native server VAD response creation', () => {
   })
 
   assert.equal(payload.session.audio.input.turn_detection.type, 'server_vad')
-  assert.equal(payload.session.audio.input.turn_detection.threshold, 0.7)
-  assert.equal(payload.session.audio.input.turn_detection.create_response, true)
-  assert.equal(payload.session.audio.input.turn_detection.interrupt_response, false)
+  assert.equal(payload.session.audio.input.turn_detection.threshold, 0.5)
+  assert.equal(payload.session.audio.input.turn_detection.silence_duration_ms, 400)
+  assert.equal('create_response' in payload.session.audio.input.turn_detection, false)
+  assert.equal('interrupt_response' in payload.session.audio.input.turn_detection, false)
+  assert.equal('prefix_padding_ms' in payload.session.audio.input.turn_detection, false)
   assert.equal(payload.session.audio.input.format.rate, 24000)
   assert.equal(payload.session.audio.input.format.channels, 1)
   assert.equal(payload.session.temperature, 0.2)
+  assert.deepEqual(payload.session.tools.map((tool) => tool.name), ['open_site'])
+})
+
+test('Yandex realtime can explicitly disable tools', () => {
+  const payload = buildSessionStartPayload({
+    modelId: 'gpt://folder/speech-realtime-250923',
+    enabledTools: ['open_site'],
+    advertiseTools: false,
+  })
+
   assert.deepEqual(payload.session.tools, [])
 })
 
-test('Yandex realtime advertises tools only when explicitly requested', () => {
+test('Yandex realtime advertises configured browser tools', () => {
   const payload = buildSessionStartPayload({
     modelId: 'gpt://folder/speech-realtime-250923',
-    enabledTools: ['open_site', 'view_page'],
-    advertiseTools: true,
+    enabledTools: ['open_site', 'get_browser_state', 'get_visible_page_summary', 'query_knowledge'],
   })
 
-  assert.deepEqual(payload.session.tools.map((tool) => tool.name), ['open_site', 'view_page'])
+  assert.deepEqual(payload.session.tools.map((tool) => tool.name), [
+    'query_knowledge',
+    'open_site',
+    'get_browser_state',
+    'get_visible_page_summary',
+  ])
 })
 
 test('Yandex realtime instructions describe natural conversation and reject service formulas', () => {
@@ -86,11 +102,20 @@ test('Yandex realtime instructions describe natural conversation and reject serv
   assert.match(instructions, /Never ask what you can do/i)
 })
 
-test('Yandex realtime default instructions use app-side browser context policy', () => {
+test('Yandex realtime default instructions do not claim browser tools are available', () => {
   const instructions = buildRealtimeInstructions({
     systemPrompt: 'Test persona.',
   })
 
-  assert.match(instructions, /Browser and website actions are handled by the application/i)
-  assert.match(instructions, /WEB_CONTEXT_\*/i)
+  assert.match(instructions, /Browser and website actions are not available/i)
+})
+
+test('Yandex realtime tool instructions describe the lower browser panel', () => {
+  const instructions = buildRealtimeInstructions({
+    systemPrompt: 'Test persona.',
+    enabledTools: ['open_site', 'get_browser_state'],
+  })
+
+  assert.match(instructions, /browser panel below the avatar/i)
+  assert.match(instructions, /call get_browser_state/i)
 })

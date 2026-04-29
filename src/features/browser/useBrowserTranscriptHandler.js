@@ -27,7 +27,6 @@ import {
   truncatePromptValue,
   waitForNextPaint,
 } from '../session/transcriptFlowModel.js';
-
 const CLIENT_INLINE_CONTEXT_QUESTION = 'Что сейчас находится на открытой странице';
 
 export function useBrowserTranscriptHandler({
@@ -71,9 +70,14 @@ export function useBrowserTranscriptHandler({
   BROWSER_ACTION_TIMEOUT_MS,
   BROWSER_OPEN_TIMEOUT_MS,
 }) {
-  return React.useCallback(async (transcript, {
+  const selfHandlerRef = React.useRef(null);
+  const handleBrowserTranscript = React.useCallback(async (transcript, {
     requestId: dialogRequestId = 0,
     suppressOpeningAck = false,
+    suppressResultPrompt = false,
+    preserveVoiceOutput = false,
+    waitForReadyPageQuery = false,
+    pageQueryWaitAttempt = 0,
   } = {}) => {
     const normalized = normalizeSpeechText(transcript);
     const effectiveRequestId = Number.isInteger(dialogRequestId) && dialogRequestId > 0
@@ -198,6 +202,15 @@ export function useBrowserTranscriptHandler({
           || panelState.status === 'loading'
           || panelState.clientContextStatus === 'loading'
         ) {
+          if (waitForReadyPageQuery && pageQueryWaitAttempt < 12) {
+            const nextAttempt = pageQueryWaitAttempt + 1;
+            recordConversationActionRef.current?.('browser.followup.waiting-for-ready', { requestId: effectiveRequestId, attempt: nextAttempt, browserFlowState: browserFlowStateRef.current, panelStatus: panelState.status || '', clientContextStatus: panelState.clientContextStatus || '' });
+            setTimeout(() => selfHandlerRef.current?.(normalized, {
+              requestId: effectiveRequestId,
+              suppressOpeningAck, suppressResultPrompt, preserveVoiceOutput, waitForReadyPageQuery, pageQueryWaitAttempt: nextAttempt,
+            }), 700);
+            return;
+          }
           enqueueAssistantPromptRef.current?.(
             buildWebOpenPendingPrompt(normalized, panelState, getSessionHistorySummaryRef.current?.() || ''),
             {
@@ -339,8 +352,15 @@ export function useBrowserTranscriptHandler({
     const hadActiveBrowserSession = Boolean(activeBrowserSessionIdRef.current);
     browserIntentInFlightRef.current = true;
     inFlightBrowserKeyRef.current = dedupeKey;
-    clearAssistantPromptQueueRef.current?.('browser-site-intent');
-    cancelAssistantOutputRef.current?.();
+    if (!preserveVoiceOutput) {
+      clearAssistantPromptQueueRef.current?.('browser-site-intent');
+      cancelAssistantOutputRef.current?.();
+    } else {
+      recordConversationActionRef.current?.('browser.intent.voice-preserved', {
+        requestId: effectiveRequestId,
+        intentType,
+      });
+    }
     handledTranscriptsRef.current.push({ key: dedupeKey, timestamp: now });
     const requestId = browserRequestIdRef.current + 1;
     browserRequestIdRef.current = requestId;
@@ -406,16 +426,18 @@ export function useBrowserTranscriptHandler({
           error: errorMessage,
           errorReason,
         });
-        enqueueAssistantPromptRef.current?.(
-          buildWebFailurePrompt(normalized, errorMessage, getSessionHistorySummaryRef.current?.() || ''),
-          {
-            source: 'browser.intent.error',
-            dedupeKey: `browser-intent-error:${normalizeTranscriptKey(normalized)}`,
-            requestId: liveDialogRequestId,
-            finalizeRequestOnCommit: liveDialogRequestId === effectiveRequestId,
-          },
-        );
-        finalizeDialogRequestRef.current?.(effectiveRequestId, 'browser-intent-error', { browserRequestId: requestId });
+        if (!suppressResultPrompt) {
+          enqueueAssistantPromptRef.current?.(
+            buildWebFailurePrompt(normalized, errorMessage, getSessionHistorySummaryRef.current?.() || ''),
+            {
+              source: 'browser.intent.error',
+              dedupeKey: `browser-intent-error:${normalizeTranscriptKey(normalized)}`,
+              requestId: liveDialogRequestId,
+              finalizeRequestOnCommit: liveDialogRequestId === effectiveRequestId,
+            },
+          );
+          finalizeDialogRequestRef.current?.(effectiveRequestId, 'browser-intent-error', { browserRequestId: requestId });
+        }
         return;
       }
 
@@ -461,20 +483,22 @@ export function useBrowserTranscriptHandler({
           traceId,
           transcript: normalized,
         });
-        enqueueAssistantPromptRef.current?.(
-          buildWebFailurePrompt(
-            normalized,
-            'Не получилось понять, какой сайт или страницу нужно открыть.',
-            getSessionHistorySummaryRef.current?.() || '',
-          ),
-          {
-            source: 'browser.intent.none',
-            dedupeKey: `browser-intent-none:${normalizeTranscriptKey(normalized)}`,
-            requestId: activeDialogRequestRef.current || effectiveRequestId,
-            finalizeRequestOnCommit: (activeDialogRequestRef.current || effectiveRequestId) === effectiveRequestId,
-          },
-        );
-        finalizeDialogRequestRef.current?.(effectiveRequestId, 'browser-intent-unresolved', { browserRequestId: requestId });
+        if (!suppressResultPrompt) {
+          enqueueAssistantPromptRef.current?.(
+            buildWebFailurePrompt(
+              normalized,
+              'Не получилось понять, какой сайт или страницу нужно открыть.',
+              getSessionHistorySummaryRef.current?.() || '',
+            ),
+            {
+              source: 'browser.intent.none',
+              dedupeKey: `browser-intent-none:${normalizeTranscriptKey(normalized)}`,
+              requestId: activeDialogRequestRef.current || effectiveRequestId,
+              finalizeRequestOnCommit: (activeDialogRequestRef.current || effectiveRequestId) === effectiveRequestId,
+            },
+          );
+          finalizeDialogRequestRef.current?.(effectiveRequestId, 'browser-intent-unresolved', { browserRequestId: requestId });
+        }
         return;
       }
 
@@ -508,16 +532,18 @@ export function useBrowserTranscriptHandler({
           error: intent.error || 'Не распознала сайт',
           errorReason: intent.errorReason || 'resolve_low_confidence',
         });
-        enqueueAssistantPromptRef.current?.(
-          buildWebFailurePrompt(normalized, intent.error, getSessionHistorySummaryRef.current?.() || ''),
-          {
-            source: 'browser.intent.unresolved',
-            dedupeKey: `browser-intent-unresolved:${normalizeTranscriptKey(normalized)}`,
-            requestId: activeDialogRequestRef.current || effectiveRequestId,
-            finalizeRequestOnCommit: (activeDialogRequestRef.current || effectiveRequestId) === effectiveRequestId,
-          },
-        );
-        finalizeDialogRequestRef.current?.(effectiveRequestId, 'browser-intent-unresolved', { browserRequestId: requestId });
+        if (!suppressResultPrompt) {
+          enqueueAssistantPromptRef.current?.(
+            buildWebFailurePrompt(normalized, intent.error, getSessionHistorySummaryRef.current?.() || ''),
+            {
+              source: 'browser.intent.unresolved',
+              dedupeKey: `browser-intent-unresolved:${normalizeTranscriptKey(normalized)}`,
+              requestId: activeDialogRequestRef.current || effectiveRequestId,
+              finalizeRequestOnCommit: (activeDialogRequestRef.current || effectiveRequestId) === effectiveRequestId,
+            },
+          );
+          finalizeDialogRequestRef.current?.(effectiveRequestId, 'browser-intent-unresolved', { browserRequestId: requestId });
+        }
         return;
       }
 
@@ -740,17 +766,25 @@ export function useBrowserTranscriptHandler({
           panelConfirmed,
           originalRequestId: effectiveRequestId,
         });
-        enqueueAssistantPromptRef.current?.(
-          panelConfirmed
-            ? buildWebResultPrompt(normalized, confirmedOpen, getSessionHistorySummaryRef.current?.() || '')
-            : buildWebOpenPendingPrompt(normalized, confirmedOpen, getSessionHistorySummaryRef.current?.() || ''),
-          {
-            source: 'browser.open.ready',
-            dedupeKey: `browser-open-ready:${normalizeTranscriptKey(normalized)}`,
-            requestId: liveDialogRequestId,
-            finalizeRequestOnCommit: resultBelongsToOriginalRequest,
-          },
-        );
+        if (!suppressResultPrompt) {
+          enqueueAssistantPromptRef.current?.(
+            panelConfirmed
+              ? buildWebResultPrompt(normalized, confirmedOpen, getSessionHistorySummaryRef.current?.() || '')
+              : buildWebOpenPendingPrompt(normalized, confirmedOpen, getSessionHistorySummaryRef.current?.() || ''),
+            {
+              source: 'browser.open.ready',
+              dedupeKey: `browser-open-ready:${normalizeTranscriptKey(normalized)}`,
+              requestId: liveDialogRequestId,
+              finalizeRequestOnCommit: resultBelongsToOriginalRequest,
+            },
+          );
+        } else {
+          recordConversationActionRef.current?.('browser.open.voice-prompt-skipped', {
+            requestId,
+            traceId: resolvedTraceId,
+            status: 'ready',
+          });
+        }
       } catch (requestError) {
         if (browserRequestIdRef.current !== requestId) {
           return;
@@ -791,16 +825,18 @@ export function useBrowserTranscriptHandler({
           error: truncatePromptValue(errorText, 180),
           errorReason,
         });
-        enqueueAssistantPromptRef.current?.(
-          buildWebFailurePrompt(normalized, errorText, getSessionHistorySummaryRef.current?.() || ''),
-          {
-            source: 'browser.open.error',
-            dedupeKey: `browser-open-error:${normalizeTranscriptKey(normalized)}`,
-            requestId: liveDialogRequestId,
-            finalizeRequestOnCommit: errorBelongsToOriginalRequest,
-          },
-        );
-        if (errorBelongsToOriginalRequest) {
+        if (!suppressResultPrompt) {
+          enqueueAssistantPromptRef.current?.(
+            buildWebFailurePrompt(normalized, errorText, getSessionHistorySummaryRef.current?.() || ''),
+            {
+              source: 'browser.open.error',
+              dedupeKey: `browser-open-error:${normalizeTranscriptKey(normalized)}`,
+              requestId: liveDialogRequestId,
+              finalizeRequestOnCommit: errorBelongsToOriginalRequest,
+            },
+          );
+        }
+        if (!suppressResultPrompt && errorBelongsToOriginalRequest) {
           finalizeDialogRequestRef.current?.(effectiveRequestId, 'browser-open-error', {
             browserRequestId: requestId,
             errorReason,
@@ -857,4 +893,7 @@ export function useBrowserTranscriptHandler({
     BROWSER_ACTION_TIMEOUT_MS,
     BROWSER_OPEN_TIMEOUT_MS,
   ]);
+
+  selfHandlerRef.current = handleBrowserTranscript;
+  return handleBrowserTranscript;
 }

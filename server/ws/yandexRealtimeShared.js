@@ -186,11 +186,17 @@ export function buildRealtimeInstructions(runtimeConfig = {}, restoreContext = n
 12. Если пользователь спрашивает, кто ты или как тебя зовут, отвечай по своей роли из системного промпта, не называй себя техническим id.
 13. После ответа остановись и жди следующую реплику пользователя.`);
 
-  if (runtimeConfig.advertiseTools !== true) {
+  const enabledTools = normalizeEnabledTools(runtimeConfig);
+  if (enabledTools.size) {
+    parts.push(`Realtime tool policy:
+There is a browser panel below the avatar. It can be empty, loading, ready with a website, or failed with an error.
+You do not see that panel automatically. When your answer depends on the lower browser panel, call get_browser_state or get_visible_page_summary.
+When the user asks to open a site, call open_site. Do not say a site is open until the tool result confirms it.
+Use query_knowledge only when a small confirmed knowledge lookup is useful. For normal conversation, answer directly without mentioning tools.`);
+  } else if (runtimeConfig.advertiseTools !== true) {
     parts.push(`Runtime tool policy:
-Browser and website actions are handled by the application outside this realtime session.
+Browser and website actions are not available in this realtime session.
 Do not claim that a website is opened or visible from the user's request alone.
-When a WEB_CONTEXT_* message is provided, answer only from that verified context.
 For normal conversation, answer directly and naturally without mentioning tools.`);
   }
 
@@ -240,6 +246,21 @@ export function buildBrowserToolDefinitions(enabledTools) {
       },
     });
   }
+  if (enabledTools.has('get_browser_state')) {
+    tools.push({
+      type: 'function',
+      name: 'get_browser_state',
+      description: 'Return the lower browser panel state: empty, ready, or error, including current URL, title, page summary, screenshot metadata, and visible links when available.',
+      parameters: {
+        type: 'object',
+        properties: {
+          browserSessionId: { type: 'string' },
+          refresh: { type: 'boolean' },
+        },
+        additionalProperties: false,
+      },
+    });
+  }
   if (enabledTools.has('extract_page_context')) {
     tools.push({
       type: 'function',
@@ -252,6 +273,22 @@ export function buildBrowserToolDefinitions(enabledTools) {
           browserSessionId: { type: 'string' },
         },
         required: ['question'],
+        additionalProperties: false,
+      },
+    });
+  }
+  if (enabledTools.has('get_visible_page_summary')) {
+    tools.push({
+      type: 'function',
+      name: 'get_visible_page_summary',
+      description: 'Read the current lower browser page and return a compact summary or answer to a question about what is visible there.',
+      parameters: {
+        type: 'object',
+        properties: {
+          browserSessionId: { type: 'string' },
+          question: { type: 'string' },
+          maxChars: { type: 'integer' },
+        },
         additionalProperties: false,
       },
     });
@@ -275,7 +312,7 @@ export function buildBrowserToolDefinitions(enabledTools) {
 }
 
 export function buildKnowledgeToolDefinition(enabledTools, runtimeConfig) {
-  if (!enabledTools.has('file_search')) {
+  if (!enabledTools.has('file_search') && !enabledTools.has('query_knowledge') && !enabledTools.has('knowledge_search')) {
     return [];
   }
 
@@ -292,8 +329,8 @@ export function buildKnowledgeToolDefinition(enabledTools, runtimeConfig) {
 
   return [{
     type: 'function',
-    name: 'knowledge_search',
-    description: 'Search confirmed church knowledge when file search is not yet configured.',
+    name: enabledTools.has('knowledge_search') && !enabledTools.has('query_knowledge') ? 'knowledge_search' : 'query_knowledge',
+    description: 'Search the small confirmed local knowledge base for prompts, known sites, FAQ, prayers, or church demo facts.',
     parameters: {
       type: 'object',
       properties: {
@@ -317,11 +354,9 @@ export function buildWebSearchToolDefinition(runtimeConfig) {
 }
 
 export function buildSessionStartPayload(runtimeConfig = {}, restoreContext = null) {
-  const enabledTools = runtimeConfig.advertiseTools === true
-    ? normalizeEnabledTools(runtimeConfig)
-    : new Set();
-  const tuning = normalizeVoiceInteractionTuning(runtimeConfig);
-  const turnDetectionTuning = normalizeRealtimeTurnDetectionTuning(runtimeConfig);
+  const enabledTools = runtimeConfig.advertiseTools === false
+    ? new Set()
+    : normalizeEnabledTools(runtimeConfig);
   const tools = [
     ...buildKnowledgeToolDefinition(enabledTools, runtimeConfig),
     ...buildWebSearchToolDefinition(runtimeConfig),
@@ -345,11 +380,8 @@ export function buildSessionStartPayload(runtimeConfig = {}, restoreContext = nu
           },
           turn_detection: {
             type: 'server_vad',
-            threshold: 0.7,
-            prefix_padding_ms: turnDetectionTuning.prefixPaddingMs,
-            silence_duration_ms: turnDetectionTuning.pauseMs,
-            create_response: true,
-            interrupt_response: false,
+            threshold: 0.5,
+            silence_duration_ms: 400,
           },
         },
         output: {
@@ -468,14 +500,17 @@ export function buildModelSafeToolPayload(toolName, payload) {
   switch (toolName) {
     case 'open_site':
     case 'view_page':
+    case 'get_browser_state':
       return {
         ok: base?.ok !== false,
+        status: normalizeWhitespace(base?.status || (base?.ok === false ? 'error' : 'ready')),
         browserSessionId: normalizeWhitespace(base?.browserSessionId || ''),
         verified: base?.verified === true || toolName === 'view_page',
         verificationReason: normalizeWhitespace(base?.verification?.reason || ''),
         title: truncate(base?.title || '', 220),
         url: truncate(base?.url || '', 260),
         summary: truncate(base?.summary || '', 1200),
+        error: truncate(base?.error || '', 400),
         visibleLinks: browserPreview,
       };
     case 'extract_page_context':
@@ -487,14 +522,19 @@ export function buildModelSafeToolPayload(toolName, payload) {
         answer: truncate(base?.answer || '', 1200),
         contextSnippet: truncate(base?.contextSnippet || '', 900),
       };
+    case 'get_visible_page_summary':
     case 'summarize_visible_page':
       return {
         ok: base?.ok !== false,
+        status: normalizeWhitespace(base?.status || (base?.ok === false ? 'error' : 'ready')),
         browserSessionId: normalizeWhitespace(base?.browserSessionId || ''),
         title: truncate(base?.title || '', 220),
         url: truncate(base?.url || '', 260),
-        summary: truncate(base?.summary || '', 1200),
+        summary: truncate(base?.summary || base?.answer || '', 1200),
+        answer: truncate(base?.answer || '', 1200),
+        error: truncate(base?.error || '', 400),
       };
+    case 'query_knowledge':
     case 'knowledge_search':
       return {
         ok: base?.ok !== false,

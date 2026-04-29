@@ -42,17 +42,10 @@ const DEFAULT_BACKEND_HTTP_BASE =
 const INPUT_SAMPLE_RATE = 24000;
 const OUTPUT_SAMPLE_RATE = 24000;
 const ASSISTANT_TURN_IDLE_FLUSH_MS = 2600;
-const SPEECH_STARTED_INTERRUPT_COOLDOWN_MS = 350;
 const SPEECH_STARTED_BUFFER_GUARD_MS = 120;
 const SPEECH_STARTED_VOLUME_GUARD = 0.025;
-const SPEECH_STARTED_USER_VOLUME_GUARD = 0.18;
-const INPUT_ECHO_SUPPRESSION_BUFFER_MS = 180;
-const INPUT_ECHO_SUPPRESSION_TAIL_MS = 400;
-const INPUT_ECHO_SUPPRESSION_VOLUME_GUARD = 0.012;
+const SPEECH_STARTED_USER_VOLUME_GUARD = 0.14;
 const ACTIVE_OUTPUT_BUFFER_GUARD_MS = 200;
-const LOCAL_BARGE_IN_RMS_THRESHOLD = 0.15;
-const LOCAL_BARGE_IN_HOLD_MS = 140;
-const LOCAL_BARGE_IN_COOLDOWN_MS = 900;
 
 function defaultBackendWsUrl(pathname = '/yandex-realtime-proxy') {
   if (DEFAULT_BACKEND_WS_BASE) {
@@ -145,11 +138,24 @@ export function useYandexRealtimeSession(audioPlayer, runtimeConfig = DEFAULT_RU
   });
   const closedResponseIdsRef = useRef(new Set());
   const lifecycleTokenRef = useRef(0);
-  const lastSpeechStartedInterruptAtRef = useRef(0);
   const lastAssistantAudioOutputAtRef = useRef(0);
   const inputAudioStatsRef = useRef({ chunks: 0, lastLoggedAt: 0, peakRms: 0 });
-  const localBargeInCandidateRef = useRef({ startedAt: 0 });
-  const lastLocalBargeInAtRef = useRef(0);
+
+  const recordRealtimeClientEvent = useCallback((event, details = {}) => {
+    const activeRuntime = runtimeConfigRef.current || {};
+    fetch('/api/browser/client-event', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        event,
+        details: {
+          conversationSessionId: String(activeRuntime.conversationSessionId || ''),
+          characterId: String(activeRuntime.characterId || ''),
+          ...details,
+        },
+      }),
+    }).catch(() => {});
+  }, []);
 
   useEffect(() => {
     runtimeConfigRef.current = { ...DEFAULT_RUNTIME_CONFIG, ...runtimeConfig };
@@ -358,8 +364,6 @@ export function useYandexRealtimeSession(audioPlayer, runtimeConfig = DEFAULT_RU
     }
   }, []);
 
-  const shouldSuppressUserAudioInput = useCallback(() => false, []);
-
   const cancelAssistantOutput = useCallback((options = {}) => {
     const responseId = normalizeText(assistantTurnRef.current.responseId || '');
     const bufferedAudioMs = Number(audioPlayer?.getBufferedMs?.() || 0);
@@ -378,31 +382,6 @@ export function useYandexRealtimeSession(audioPlayer, runtimeConfig = DEFAULT_RU
     }
     return true;
   }, [audioPlayer, flushAssistantTurn, requestAssistantInterrupt]);
-
-  const maybeTriggerLocalBargeIn = useCallback((rms = 0, source = 'mic') => {
-    const now = Date.now();
-    const bufferedAudioMs = Number(audioPlayer?.getBufferedMs?.() || 0);
-    const hasAssistantOutput = assistantTurnRef.current.active
-      || assistantTurnRef.current.audioChunks > 0
-      || bufferedAudioMs > SPEECH_STARTED_BUFFER_GUARD_MS;
-    if (!hasAssistantOutput || rms < LOCAL_BARGE_IN_RMS_THRESHOLD) {
-      localBargeInCandidateRef.current = { startedAt: 0 };
-      return false;
-    }
-    if ((now - lastLocalBargeInAtRef.current) < LOCAL_BARGE_IN_COOLDOWN_MS) {
-      return false;
-    }
-    if (!localBargeInCandidateRef.current.startedAt) {
-      localBargeInCandidateRef.current = { startedAt: now };
-      return false;
-    }
-    if ((now - localBargeInCandidateRef.current.startedAt) < LOCAL_BARGE_IN_HOLD_MS) {
-      return false;
-    }
-    localBargeInCandidateRef.current = { startedAt: 0 };
-    lastLocalBargeInAtRef.current = now;
-    return cancelAssistantOutput({ reason: `local-rms-barge-in:${source}` });
-  }, [audioPlayer, cancelAssistantOutput]);
 
   const sendTextTurn = useCallback((text, options = {}) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
@@ -454,10 +433,16 @@ export function useYandexRealtimeSession(audioPlayer, runtimeConfig = DEFAULT_RU
       const activeRuntime = runtimeConfigRef.current;
       const isStale = () => lifecycleTokenRef.current !== lifecycleToken;
       inputAudioStatsRef.current = { chunks: 0, lastLoggedAt: 0, peakRms: 0 };
-      localBargeInCandidateRef.current = { startedAt: 0 };
-      lastLocalBargeInAtRef.current = 0;
+      recordRealtimeClientEvent('voice.yandex.profile', {
+        runtimeProvider: String(activeRuntime.runtimeProvider || ''),
+        modelId: String(activeRuntime.modelId || ''),
+        voiceName: String(activeRuntime.voiceName || ''),
+        captureUserAudio: activeRuntime.captureUserAudio !== false,
+        outputMode: 'webaudio-sequential',
+      });
 
-      audioPlayer.setPreferHtmlAudioOutput?.(true);
+      audioPlayer.setPreferHtmlAudioOutput?.(false);
+      audioPlayer.setSequentialPlaybackMode?.(true);
       await audioPlayer.initialize?.();
 
       if (activeRuntime.captureUserAudio !== false) {
@@ -500,10 +485,6 @@ export function useYandexRealtimeSession(audioPlayer, runtimeConfig = DEFAULT_RU
             }
             const rms = Math.sqrt(sum / Math.max(1, inputData.length));
             userVolumeRef.current = Math.min(1, rms * 5.5);
-            maybeTriggerLocalBargeIn(rms, 'script-processor');
-            if (shouldSuppressUserAudioInput()) {
-              return;
-            }
             const payloadBuffer = audioContext.sampleRate === INPUT_SAMPLE_RATE
               ? inputData
               : downsampleBuffer(inputData, audioContext.sampleRate, INPUT_SAMPLE_RATE);
@@ -548,10 +529,6 @@ export function useYandexRealtimeSession(audioPlayer, runtimeConfig = DEFAULT_RU
             }
             const rms = Math.sqrt(sum / Math.max(1, inputBuffer.length));
             userVolumeRef.current = Math.min(1, rms * 5.5);
-            maybeTriggerLocalBargeIn(rms, 'audio-worklet');
-            if (shouldSuppressUserAudioInput()) {
-              return;
-            }
             const payloadBuffer = audioContext.sampleRate === INPUT_SAMPLE_RATE
               ? inputBuffer
               : downsampleBuffer(inputBuffer, audioContext.sampleRate, INPUT_SAMPLE_RATE);
@@ -613,6 +590,10 @@ export function useYandexRealtimeSession(audioPlayer, runtimeConfig = DEFAULT_RU
             resetAssistantTurn();
             statusRef.current = 'connected';
             setStatus('connected');
+            recordRealtimeClientEvent('voice.yandex.ready', {
+              resumed: payload?.resumed === true,
+              shouldSendGreeting: payload?.shouldSendGreeting !== false,
+            });
             callbacksRef.current.onSessionReady?.({
               resumed: payload?.resumed === true,
               shouldSendGreeting: payload?.shouldSendGreeting !== false,
@@ -625,16 +606,15 @@ export function useYandexRealtimeSession(audioPlayer, runtimeConfig = DEFAULT_RU
             const finalText = normalizeText(payload?.text || '');
             callbacksRef.current.onInputTranscription?.('');
             if (finalText) {
+              recordRealtimeClientEvent('voice.yandex.final-transcript', {
+                textLength: finalText.length,
+              });
               callbacksRef.current.onInputTranscriptionCommit?.({ text: finalText });
             }
             break;
           }
           case 'speech_started':
             {
-              const now = Date.now();
-              if ((now - lastSpeechStartedInterruptAtRef.current) < SPEECH_STARTED_INTERRUPT_COOLDOWN_MS) {
-                break;
-              }
               const bufferedAudioMs = Number(audioPlayer?.getBufferedMs?.() || 0);
               const assistantVolume = Number(audioPlayer?.getVolume?.() || 0);
               const userVolume = Number(userVolumeRef.current || 0);
@@ -642,11 +622,20 @@ export function useYandexRealtimeSession(audioPlayer, runtimeConfig = DEFAULT_RU
                 || assistantTurnRef.current.audioChunks > 0
                 || bufferedAudioMs > SPEECH_STARTED_BUFFER_GUARD_MS
                 || assistantVolume > SPEECH_STARTED_VOLUME_GUARD;
-              if (hasAssistantOutput && userVolume >= SPEECH_STARTED_USER_VOLUME_GUARD) {
-                lastSpeechStartedInterruptAtRef.current = now;
-                const responseId = normalizeText(assistantTurnRef.current.responseId || '');
-                requestAssistantInterrupt(responseId);
-                audioPlayer.stop?.();
+              const shouldStopLocalOutput = hasAssistantOutput
+                && assistantTurnRef.current.active
+                && userVolume >= SPEECH_STARTED_USER_VOLUME_GUARD;
+              recordRealtimeClientEvent('voice.yandex.speech-started', {
+                hasAssistantOutput,
+                shouldStopLocalOutput,
+                assistantActive: assistantTurnRef.current.active,
+                assistantAudioChunks: assistantTurnRef.current.audioChunks,
+                bufferedAudioMs,
+                assistantVolume: Number(assistantVolume.toFixed(5)),
+                userVolume: Number(userVolume.toFixed(5)),
+              });
+              if (shouldStopLocalOutput) {
+                audioPlayer.stop?.('yandex-speech-started');
                 if (assistantTurnRef.current.active) {
                   assistantTurnRef.current.interrupted = true;
                   callbacksRef.current.onAssistantInterrupted?.();
@@ -676,6 +665,17 @@ export function useYandexRealtimeSession(audioPlayer, runtimeConfig = DEFAULT_RU
             if (pcm.length) {
               const sampleRate = Number(payload?.sampleRate || OUTPUT_SAMPLE_RATE) || OUTPUT_SAMPLE_RATE;
               const playbackResult = audioPlayer.addChunk?.(pcm, sampleRate);
+              recordRealtimeClientEvent('voice.yandex.audio-delta', {
+                responseId,
+                sampleRate,
+                samples: pcm.length,
+                ok: playbackResult?.ok !== false,
+                reason: playbackResult?.reason || '',
+                contextState: playbackResult?.contextState || '',
+                queuedMs: Number(playbackResult?.queuedMs || 0),
+                outputMode: playbackResult?.outputMode || '',
+                queueDepth: Number(playbackResult?.queueDepth || 0),
+              });
               if (playbackResult?.ok === false) {
                 callbacksRef.current.onAssistantAudioDrop?.({
                   responseId,
@@ -710,6 +710,11 @@ export function useYandexRealtimeSession(audioPlayer, runtimeConfig = DEFAULT_RU
             if (!responseId || responseId !== normalizeText(assistantTurnRef.current.responseId)) {
               break;
             }
+            recordRealtimeClientEvent('voice.yandex.turn-done', {
+              responseId,
+              audioChunks: assistantTurnRef.current.audioChunks,
+              textChunks: assistantTurnRef.current.textChunks,
+            });
             flushAssistantTurn('commit');
             break;
           }
@@ -718,7 +723,7 @@ export function useYandexRealtimeSession(audioPlayer, runtimeConfig = DEFAULT_RU
             if (!responseId || responseId !== normalizeText(assistantTurnRef.current.responseId)) {
               break;
             }
-            audioPlayer.stop?.();
+            audioPlayer.stop?.('yandex-turn-cancelled');
             assistantTurnRef.current.interrupted = true;
             callbacksRef.current.onAssistantInterrupted?.();
             flushAssistantTurn('cancel');
@@ -732,6 +737,9 @@ export function useYandexRealtimeSession(audioPlayer, runtimeConfig = DEFAULT_RU
             break;
           case 'error': {
             const message = normalizeText(payload?.message || 'Ошибка Yandex Realtime');
+            recordRealtimeClientEvent('voice.yandex.error', {
+              message,
+            });
             setError(message);
             if (statusRef.current !== 'connected') {
               statusRef.current = 'error';
@@ -755,6 +763,7 @@ export function useYandexRealtimeSession(audioPlayer, runtimeConfig = DEFAULT_RU
         if (isStale()) {
           return;
         }
+        recordRealtimeClientEvent('voice.yandex.ws-error');
         setError('Ошибка подключения к Yandex Realtime');
       };
 
@@ -787,15 +796,18 @@ export function useYandexRealtimeSession(audioPlayer, runtimeConfig = DEFAULT_RU
     ensureAssistantTurnStarted,
     flushAssistantTurn,
     recordInputAudioSent,
+    recordRealtimeClientEvent,
     releaseInputResources,
-    requestAssistantInterrupt,
     resetAssistantTurn,
     scheduleAssistantTurnFlush,
-    shouldSuppressUserAudioInput,
-    maybeTriggerLocalBargeIn,
   ]);
 
   const disconnect = useCallback(() => {
+    const wasConnected = Boolean(wsRef.current)
+      || Boolean(streamRef.current)
+      || Boolean(audioContextRef.current)
+      || statusRef.current !== 'disconnected'
+      || assistantTurnRef.current.active;
     lifecycleTokenRef.current += 1;
     clearAssistantTurnTimer();
     clearClosedResponseIds();
@@ -814,12 +826,25 @@ export function useYandexRealtimeSession(audioPlayer, runtimeConfig = DEFAULT_RU
       wsRef.current = null;
     }
     releaseInputResources();
-    audioPlayer.stop?.();
+    if (wasConnected) {
+      audioPlayer.stop?.('yandex-disconnect');
+      audioPlayer.setSequentialPlaybackMode?.(false);
+    }
     userVolumeRef.current = 0;
     setError(null);
-    statusRef.current = 'disconnected';
-    setStatus('disconnected');
+    if (statusRef.current !== 'disconnected') {
+      statusRef.current = 'disconnected';
+      setStatus('disconnected');
+    }
   }, [audioPlayer, clearAssistantTurnTimer, clearClosedResponseIds, releaseInputResources, resetAssistantTurn]);
+
+  const disconnectRef = useRef(disconnect);
+
+  useEffect(() => {
+    disconnectRef.current = disconnect;
+  }, [disconnect]);
+
+  useEffect(() => () => disconnectRef.current?.(), []);
 
   const getUserVolume = useCallback(() => userVolumeRef.current, []);
 

@@ -3,6 +3,7 @@ import { base64ToFloat32Array, float32ToBase64, downsampleBuffer } from '../util
 import {
   DEFAULT_CALLBACKS,
   DEFAULT_RUNTIME_CONFIG,
+  buildGeminiLiveToolDefinitions,
   TRANSIENT_CLOSE_CODES,
   buildSystemInstruction,
   buildThinkingConfig,
@@ -15,7 +16,10 @@ import {
   resolveBackendUrl,
   resolveRealtimeInputConfig,
   shouldCommitGeminiAssistantTurn,
+  shouldUseSapphireGeminiAudio,
 } from './geminiLiveShared.js';
+import { buildGeminiLiveToolResponses } from './geminiLiveToolCalls.js';
+import { useSapphireGeminiAudioQueue } from './useSapphireGeminiAudioQueue.js';
 
 const BATYUSHKA_2_BARGE_IN_RMS_THRESHOLD = 0.18;
 const BATYUSHKA_2_BARGE_IN_HOLD_MS = 900;
@@ -56,6 +60,28 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
   const lastAssistantPlaybackActiveAtRef = useRef(0);
   const localBargeInCandidateRef = useRef({ startedAt: 0 });
   const lastLocalBargeInAtRef = useRef(0);
+  const {
+    clearQueuedAudio: clearQueuedSapphireAudio,
+    enqueueAudioChunk: enqueueSapphireAudioChunk,
+    resetAudio: resetSapphireAudio,
+    stopAudio: stopSapphireAudio,
+  } = useSapphireGeminiAudioQueue({ audioContextRef, audioPlayer });
+
+  const recordGeminiClientEvent = useCallback((event, details = {}) => {
+    const activeRuntime = runtimeConfigRef.current || {};
+    fetch('/api/browser/client-event', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        event,
+        details: {
+          conversationSessionId: String(activeRuntime.conversationSessionId || ''),
+          characterId: String(activeRuntime.characterId || ''),
+          ...details,
+        },
+      }),
+    }).catch(() => {});
+  }, []);
 
   const releaseSuppressedAudio = useCallback(() => {
     suppressAudioRef.current = false;
@@ -127,6 +153,9 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
   }, [clearAssistantTurnTimer, resetAssistantTurnState]);
 
   const scheduleAssistantTurnFlush = useCallback(() => {
+    if (shouldUseSapphireGeminiAudio(runtimeConfigRef.current)) {
+      return;
+    }
     clearAssistantTurnTimer();
     const debounceMs = resolveAssistantTurnIdleFlushMs(runtimeConfigRef.current);
     const armTimer = (delayMs) => {
@@ -144,12 +173,12 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
     armTimer(debounceMs);
   }, [audioPlayer, clearAssistantTurnTimer, flushAssistantTurn]);
 
-  const ensureAssistantTurnStarted = useCallback(() => {
+  const ensureAssistantTurnStarted = useCallback((details = {}) => {
     if (assistantTurnRef.current.active) {
       return !assistantTurnRef.current.rejected;
     }
 
-    const accepted = callbacksRef.current.onAssistantTurnStart?.() !== false;
+    const accepted = callbacksRef.current.onAssistantTurnStart?.(details) !== false;
     assistantTurnRef.current.active = true;
     assistantTurnRef.current.rejected = !accepted;
     assistantTurnRef.current.text = '';
@@ -181,12 +210,16 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
 
   const cancelAssistantOutput = useCallback(() => {
     suppressAudioRef.current = true;
-    audioPlayer.stop?.();
+    if (shouldUseSapphireGeminiAudio(runtimeConfigRef.current)) {
+      stopSapphireAudio('gemini-cancel');
+    } else {
+      audioPlayer.stop?.('gemini-cancel');
+    }
     if (assistantTurnRef.current.active) {
       assistantTurnRef.current.interrupted = true;
     }
     flushAssistantTurn('cancel');
-  }, [audioPlayer, flushAssistantTurn]);
+  }, [audioPlayer, flushAssistantTurn, stopSapphireAudio]);
 
   const triggerLocalBargeIn = useCallback((reason = 'local-rms-barge-in') => {
     const nowMs = Date.now();
@@ -215,7 +248,11 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
     }
 
     if (options.interrupt !== false) {
-      audioPlayer.stop?.();
+      if (shouldUseSapphireGeminiAudio(runtimeConfigRef.current)) {
+        stopSapphireAudio('gemini-text-turn');
+      } else {
+        audioPlayer.stop?.('gemini-text-turn');
+      }
       releaseSuppressedAudio();
       flushAssistantTurn('cancel');
     }
@@ -240,7 +277,7 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
 
     wsRef.current.send(JSON.stringify(payload));
     return true;
-  }, [audioPlayer, flushAssistantTurn, releaseSuppressedAudio]);
+  }, [audioPlayer, flushAssistantTurn, releaseSuppressedAudio, stopSapphireAudio]);
 
   const clearInputTranscription = useCallback(() => {
     inputTranscriptionRef.current = '';
@@ -253,6 +290,7 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
   }, []);
 
   const releaseInputResources = useCallback(() => {
+    resetSapphireAudio();
     if (processorRef.current) {
       processorRef.current.port?.onmessage && (processorRef.current.port.onmessage = null);
       processorRef.current.disconnect?.();
@@ -277,7 +315,7 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
       });
       streamRef.current = null;
     }
-  }, []);
+  }, [resetSapphireAudio]);
 
   const connect = useCallback(async (runtimeOverride = null) => {
     const currentStatus = statusRef.current;
@@ -292,7 +330,6 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
     lastAssistantPlaybackActiveAtRef.current = 0;
     localBargeInCandidateRef.current = { startedAt: 0 };
     lastLocalBargeInAtRef.current = 0;
-    audioPlayer.setPreferHtmlAudioOutput?.(false);
 
     try {
       if (runtimeOverride && typeof runtimeOverride === 'object') {
@@ -303,6 +340,18 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
         };
       }
       const activeRuntime = runtimeConfigRef.current;
+      const useSapphireAudio = shouldUseSapphireGeminiAudio(activeRuntime);
+      recordGeminiClientEvent('voice.gemini.profile', {
+        useSapphireAudio,
+        runtimeProvider: String(activeRuntime.runtimeProvider || ''),
+        characterId: String(activeRuntime.characterId || ''),
+        voiceModelId: String(activeRuntime.voiceModelId || ''),
+        modelId: String(activeRuntime.modelId || ''),
+        voiceName: String(activeRuntime.voiceName || ''),
+        captureUserAudio: activeRuntime.captureUserAudio !== false,
+      });
+      audioPlayer.setPreferHtmlAudioOutput?.(false);
+      audioPlayer.setSequentialPlaybackMode?.(false);
       let audioContext = null;
       let source = null;
       let workletNode = null;
@@ -310,21 +359,25 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
       const isStale = () => lifecycleTokenRef.current !== lifecycleToken;
 
       if (activeRuntime.captureUserAudio !== false) {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            channelCount: 1,
-            echoCancellation: true,
-            autoGainControl: true,
-            noiseSuppression: true,
-          },
-        });
+        const stream = await navigator.mediaDevices.getUserMedia(useSapphireAudio
+          ? { audio: true }
+          : {
+            audio: {
+              channelCount: 1,
+              echoCancellation: true,
+              autoGainControl: true,
+              noiseSuppression: true,
+            },
+          });
         if (isStale()) {
           stream.getTracks().forEach((track) => track.stop());
           return;
         }
         streamRef.current = stream;
 
-        audioContext = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 'interactive' });
+        audioContext = new (window.AudioContext || window.webkitAudioContext)(
+          useSapphireAudio ? { sampleRate: 16000 } : { latencyHint: 'interactive' },
+        );
         if (isStale()) {
           stream.getTracks().forEach((track) => track.stop());
           audioContext.close().catch(() => {});
@@ -335,9 +388,12 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
         sourceRef.current = source;
         handleAudioBuffer = (buffer) => {
           let inputData = buffer;
-          const GAIN = isBatyushka2StableRuntime(activeRuntime) ? 1.45 : 2.4;
-          for (let index = 0; index < inputData.length; index += 1) {
-            inputData[index] *= GAIN;
+          const stableBatyushkaRuntime = isBatyushka2StableRuntime(activeRuntime);
+          if (!useSapphireAudio) {
+            const GAIN = stableBatyushkaRuntime ? 1.45 : 2.4;
+            for (let index = 0; index < inputData.length; index += 1) {
+              inputData[index] *= GAIN;
+            }
           }
 
           let sum = 0;
@@ -346,9 +402,8 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
           }
           const rms = Math.sqrt(sum / inputData.length);
           userVolumeRef.current = Math.min(1, rms * 5);
-          const stableBatyushkaRuntime = isBatyushka2StableRuntime(activeRuntime);
           const nowMs = Date.now();
-          if (stableBatyushkaRuntime && rms >= BATYUSHKA_2_BARGE_IN_RMS_THRESHOLD) {
+          if (!useSapphireAudio && stableBatyushkaRuntime && rms >= BATYUSHKA_2_BARGE_IN_RMS_THRESHOLD) {
             strongUserSpeechUntilRef.current = nowMs + BATYUSHKA_2_BARGE_IN_HOLD_MS;
           }
 
@@ -357,7 +412,7 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
             && wsRef.current
             && wsRef.current.readyState === WebSocket.OPEN
           ) {
-            if (stableBatyushkaRuntime) {
+            if (!useSapphireAudio && stableBatyushkaRuntime) {
               const assistantBufferedMs = Number(audioPlayer?.getBufferedMs?.() || 0);
               if (
                 assistantBufferedMs > 80
@@ -399,22 +454,31 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
           }
         };
 
-        try {
-          await audioContext.audioWorklet.addModule('/mic-processor.js');
-          if (isStale()) {
-            releaseInputResources();
-            return;
-          }
-          workletNode = new AudioWorkletNode(audioContext, 'mic-processor');
-          processorRef.current = workletNode;
-        } catch (workletError) {
-          console.warn('AudioWorklet failed, falling back to ScriptProcessorNode', workletError);
-          const fallbackNode = audioContext.createScriptProcessor(1024, 1, 1);
-          processorRef.current = fallbackNode;
-          fallbackNode.onaudioprocess = (event) => {
+        if (useSapphireAudio) {
+          const processorNode = audioContext.createScriptProcessor(4096, 1, 1);
+          processorRef.current = processorNode;
+          processorNode.onaudioprocess = (event) => {
             const inputData = event.inputBuffer.getChannelData(0);
             handleAudioBuffer(inputData);
           };
+        } else {
+          try {
+            await audioContext.audioWorklet.addModule('/mic-processor.js');
+            if (isStale()) {
+              releaseInputResources();
+              return;
+            }
+            workletNode = new AudioWorkletNode(audioContext, 'mic-processor');
+            processorRef.current = workletNode;
+          } catch (workletError) {
+            console.warn('AudioWorklet failed, falling back to ScriptProcessorNode', workletError);
+            const fallbackNode = audioContext.createScriptProcessor(1024, 1, 1);
+            processorRef.current = fallbackNode;
+            fallbackNode.onaudioprocess = (event) => {
+              const inputData = event.inputBuffer.getChannelData(0);
+              handleAudioBuffer(inputData);
+            };
+          }
         }
 
         if (audioContext.state === 'suspended') {
@@ -467,7 +531,6 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
                   },
                 },
               },
-              thinkingConfig: buildThinkingConfig(activeRuntime),
             },
             systemInstruction: {
               parts: [
@@ -478,10 +541,16 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
             },
           },
         };
-        if (activeRuntime.captureUserAudio !== false) {
-          setupMessage.setup.realtimeInputConfig = resolveRealtimeInputConfig(activeRuntime);
+        if (!useSapphireAudio) {
+          setupMessage.setup.generationConfig.thinkingConfig = buildThinkingConfig(activeRuntime);
         }
-        if (isGemini31FlashLiveModel(activeRuntime.voiceModelId)) {
+        if (activeRuntime.captureUserAudio !== false) {
+          const realtimeInputConfig = resolveRealtimeInputConfig(activeRuntime);
+          if (realtimeInputConfig) {
+            setupMessage.setup.realtimeInputConfig = realtimeInputConfig;
+          }
+        }
+        if (!useSapphireAudio && isGemini31FlashLiveModel(activeRuntime.voiceModelId)) {
           setupMessage.setup.contextWindowCompression = {
             slidingWindow: {},
           };
@@ -492,8 +561,12 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
         if (activeRuntime.captureUserAudio !== false) {
           setupMessage.setup.inputAudioTranscription = {};
         }
-        if (activeRuntime.outputAudioTranscription !== false) {
+        if (useSapphireAudio || activeRuntime.outputAudioTranscription !== false) {
           setupMessage.setup.outputAudioTranscription = {};
+        }
+        const toolDefinitions = buildGeminiLiveToolDefinitions(activeRuntime);
+        if (toolDefinitions.length) {
+          setupMessage.setup.tools = toolDefinitions;
         }
         ws.send(JSON.stringify(setupMessage));
         if (setupAlreadyCompleted) {
@@ -533,6 +606,25 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
             callbacksRef.current.onSessionGoAway?.(data.goAway);
           }
 
+          const functionCalls = Array.isArray(data.toolCall?.functionCalls)
+            ? data.toolCall.functionCalls
+            : [];
+          if (functionCalls.length) {
+            const functionResponses = await buildGeminiLiveToolResponses({
+              functionCalls,
+              activeRuntime,
+              callbacks: callbacksRef.current,
+            });
+            if (functionResponses.length && wsRef.current?.readyState === WebSocket.OPEN) {
+              wsRef.current.send(JSON.stringify({
+                toolResponse: {
+                  functionResponses,
+                },
+              }));
+            }
+            return;
+          }
+
           if (data.serverContent?.inputTranscription?.text) {
             inputTranscriptionRef.current += data.serverContent.inputTranscription.text;
             callbacksRef.current.onInputTranscription?.(normalizeAssistantText(inputTranscriptionRef.current));
@@ -541,7 +633,7 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
           if (data.serverContent?.modelTurn?.parts) {
             for (const part of data.serverContent.modelTurn.parts) {
               if (part.text && !part.thought) {
-                const accepted = ensureAssistantTurnStarted();
+                const accepted = ensureAssistantTurnStarted({ nativeDirect: useSapphireAudio });
                 if (!accepted) {
                   continue;
                 }
@@ -554,7 +646,7 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
               }
 
               if (part.inlineData && part.inlineData.mimeType.startsWith('audio/pcm')) {
-                const accepted = ensureAssistantTurnStarted();
+                const accepted = ensureAssistantTurnStarted({ nativeDirect: useSapphireAudio });
                 if (!accepted) {
                   continue;
                 }
@@ -564,14 +656,36 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
                 noteAssistantTurnChunk({ kind: 'audio' });
                 if (!suppressAudioRef.current) {
                   const pcmData = base64ToFloat32Array(part.inlineData.data);
-                  audioPlayer.addChunk(pcmData);
+                  const playbackResult = useSapphireAudio
+                    ? enqueueSapphireAudioChunk(pcmData, 24000)
+                    : audioPlayer.addChunk(pcmData, 24000);
+                  if (playbackResult?.ok === false) {
+                    callbacksRef.current.onAssistantAudioDrop?.({
+                      responseId: '',
+                      reason: playbackResult.reason || 'audio-playback-rejected',
+                      sampleRate: 24000,
+                      samples: pcmData.length,
+                      contextState: playbackResult.contextState || '',
+                      queuedMs: Number(playbackResult.queuedMs || 0),
+                      outputMode: playbackResult.outputMode || '',
+                    });
+                  } else if (assistantTurnRef.current.audioChunks === 1) {
+                    callbacksRef.current.onAssistantAudioStart?.({
+                      responseId: '',
+                      sampleRate: 24000,
+                      samples: pcmData.length,
+                      contextState: playbackResult?.contextState || '',
+                      queuedMs: Number(playbackResult?.queuedMs || 0),
+                      outputMode: playbackResult?.outputMode || '',
+                    });
+                  }
                 }
               }
             }
           }
 
           if (data.serverContent?.outputTranscription?.text) {
-            const accepted = ensureAssistantTurnStarted();
+            const accepted = ensureAssistantTurnStarted({ nativeDirect: useSapphireAudio });
             if (accepted && !assistantTurnRef.current.interrupted) {
               releaseSuppressedAudio();
             }
@@ -585,14 +699,24 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
           }
 
           if (data.serverContent?.interrupted) {
+            if (useSapphireAudio) {
+              clearQueuedSapphireAudio('gemini-interrupted');
+              suppressAudioRef.current = true;
+              assistantTurnRef.current.interrupted = true;
+              callbacksRef.current.onAssistantInterrupted?.();
+              flushAssistantTurn('cancel');
+              return;
+            }
             if (
+              !useSapphireAudio
+              &&
               isBatyushka2StableRuntime(runtimeConfigRef.current)
               && Date.now() >= strongUserSpeechUntilRef.current
             ) {
               suppressAudioRef.current = false;
               return;
             }
-            audioPlayer.stop?.();
+            audioPlayer.stop?.('gemini-interrupted');
             suppressAudioRef.current = true;
             assistantTurnRef.current.interrupted = true;
             callbacksRef.current.onAssistantInterrupted?.();
@@ -602,7 +726,10 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
           if (shouldCommitGeminiAssistantTurn(data.serverContent)) {
             const finalInputTranscription = normalizeAssistantText(inputTranscriptionRef.current);
             if (finalInputTranscription) {
-              callbacksRef.current.onInputTranscriptionCommit?.({ text: finalInputTranscription });
+              callbacksRef.current.onInputTranscriptionCommit?.({
+                text: finalInputTranscription,
+                nativeDirect: useSapphireAudio,
+              });
               clearInputTranscription();
             }
             if (assistantTurnRef.current.rejected) {
@@ -682,15 +809,23 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
         setStatus('error');
       }
     }
-  }, [audioPlayer, clearInputTranscription, ensureAssistantTurnStarted, flushAssistantTurn, noteAssistantTurnChunk, releaseInputResources, releaseSuppressedAudio, triggerLocalBargeIn]);
+  }, [audioPlayer, clearInputTranscription, clearQueuedSapphireAudio, enqueueSapphireAudioChunk, ensureAssistantTurnStarted, flushAssistantTurn, noteAssistantTurnChunk, recordGeminiClientEvent, releaseInputResources, releaseSuppressedAudio, triggerLocalBargeIn]);
 
   const disconnect = useCallback(() => {
+    const wasConnected = Boolean(wsRef.current)
+      || setupCompleteRef.current
+      || statusRef.current !== 'disconnected'
+      || assistantTurnRef.current.active;
     lifecycleTokenRef.current += 1;
     setupCompleteRef.current = false;
     clearInputTranscription();
     releaseSuppressedAudio();
     flushAssistantTurn('cancel');
-    audioPlayer.stop?.();
+    if (wasConnected) {
+      stopSapphireAudio('gemini-disconnect');
+      audioPlayer.stop?.('gemini-disconnect');
+      audioPlayer.setSequentialPlaybackMode?.(false);
+    }
     pendingGoAwayRef.current = null;
 
     if (wsRef.current) {
@@ -699,11 +834,19 @@ export function useGeminiLive(audioPlayer, runtimeConfig = DEFAULT_RUNTIME_CONFI
     }
     releaseInputResources();
 
-    statusRef.current = 'disconnected';
-    setStatus('disconnected');
-  }, [audioPlayer, clearInputTranscription, flushAssistantTurn, releaseInputResources, releaseSuppressedAudio]);
+    if (statusRef.current !== 'disconnected') {
+      statusRef.current = 'disconnected';
+      setStatus('disconnected');
+    }
+  }, [audioPlayer, clearInputTranscription, flushAssistantTurn, releaseInputResources, releaseSuppressedAudio, stopSapphireAudio]);
 
-  useEffect(() => () => disconnect(), [disconnect]);
+  const disconnectRef = useRef(disconnect);
+
+  useEffect(() => {
+    disconnectRef.current = disconnect;
+  }, [disconnect]);
+
+  useEffect(() => () => disconnectRef.current?.(), []);
 
   const getUserVolume = useCallback(() => userVolumeRef.current, []);
 

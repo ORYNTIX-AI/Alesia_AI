@@ -30,7 +30,22 @@
         this.htmlChunkTargetMs = 360;
         this.htmlChunkFlushDelayMs = 90;
         this.preferHtmlAudioOutput = false;
+        this.sequentialPlaybackMode = false;
+        this.sequentialQueue = [];
+        this.sequentialPlaying = false;
+        this.sequentialSource = null;
+        this.sequentialBufferedUntilMs = 0;
         this.playbackEventCallback = null;
+    }
+
+    setSequentialPlaybackMode(enabled) {
+        this.sequentialPlaybackMode = Boolean(enabled);
+        if (!this.sequentialPlaybackMode) {
+            this.sequentialQueue = [];
+            this.sequentialPlaying = false;
+            this.sequentialSource = null;
+            this.sequentialBufferedUntilMs = 0;
+        }
     }
 
     setPreferHtmlAudioOutput(preferHtmlAudioOutput) {
@@ -52,6 +67,13 @@
         } catch {
             // Playback telemetry must never break audio.
         }
+    }
+
+    setSyntheticVolume(volume = 0, durationMs = 0) {
+        this.syntheticVolume = Math.max(0, Math.min(1, Number(volume) || 0));
+        this.syntheticVolumeUntilMs = this.syntheticVolume > 0 && Number(durationMs) > 0
+            ? Date.now() + Number(durationMs)
+            : 0;
     }
 
     async initialize() {
@@ -85,7 +107,10 @@
             sampleRate: effectiveRate,
             contextState: this.audioContext?.state || '',
             queuedMs: this.getBufferedMs(),
-            outputMode: this.preferHtmlAudioOutput ? 'html' : 'webaudio',
+            queueDepth: this.queue.length + this.sequentialQueue.length + this.htmlQueue.length,
+            outputMode: this.preferHtmlAudioOutput
+                ? 'html'
+                : (this.sequentialPlaybackMode ? 'webaudio-sequential' : 'webaudio'),
         });
 
         if (!this.audioContext) {
@@ -105,7 +130,11 @@
         if (this.audioContext.state === 'suspended') {
             this.audioContext.resume()
                 .then(() => {
-                    this.scheduleQueue();
+                    if (this.sequentialPlaybackMode) {
+                        this.playNextSequentialChunk();
+                    } else {
+                        this.scheduleQueue();
+                    }
                 })
                 .catch(() => {});
         }
@@ -113,10 +142,79 @@
         const buffer = this.audioContext.createBuffer(1, float32Array.length, effectiveRate);
         buffer.getChannelData(0).set(float32Array);
         const generation = this.playbackGeneration;
+        if (this.sequentialPlaybackMode) {
+            const durationMs = Math.round(buffer.duration * 1000);
+            this.sequentialQueue.push({ buffer, generation, durationMs });
+            this.sequentialBufferedUntilMs = Math.max(this.sequentialBufferedUntilMs, performance.now()) + durationMs;
+            this.lastChunkAt = performance.now();
+            this.playNextSequentialChunk();
+            return buildResult(true);
+        }
         this.queue.push({ buffer, generation });
         this.lastChunkAt = performance.now();
         this.scheduleQueue();
         return buildResult(true);
+    }
+
+    playNextSequentialChunk() {
+        if (!this.audioContext || this.sequentialPlaying || this.sequentialQueue.length === 0) {
+            return;
+        }
+        if (this.audioContext.state === 'suspended') {
+            this.audioContext.resume()
+                .then(() => this.playNextSequentialChunk())
+                .catch(() => {});
+            return;
+        }
+
+        const queued = this.sequentialQueue.shift();
+        if (!queued) {
+            return;
+        }
+        const { buffer, generation, durationMs } = queued;
+        if (generation !== this.playbackGeneration) {
+            this.playNextSequentialChunk();
+            return;
+        }
+
+        const source = this.audioContext.createBufferSource();
+        source.buffer = buffer;
+        source.connect(this.gainNode);
+        this.sequentialPlaying = true;
+        this.sequentialSource = source;
+        const startedAtMs = performance.now();
+        this.activeSources.add(source);
+        source.onended = () => {
+            const elapsedMs = Math.max(0, Math.round(performance.now() - startedAtMs));
+            this.activeSources.delete(source);
+            if (generation !== this.playbackGeneration) {
+                return;
+            }
+            if (this.sequentialSource === source) {
+                this.sequentialSource = null;
+            }
+            this.sequentialPlaying = false;
+            this.emitPlaybackEvent('audio-playback-ended', {
+                outputMode: 'webaudio-sequential',
+                sampleRate: buffer.sampleRate,
+                samples: buffer.length,
+                durationMs,
+                elapsedMs,
+                earlyEnded: durationMs > 80 && elapsedMs < Math.round(durationMs * 0.6),
+                queueDepth: this.sequentialQueue.length,
+                bufferedMs: this.getBufferedMs(),
+            });
+            this.playNextSequentialChunk();
+        };
+        source.start();
+        this.emitPlaybackEvent('audio-playback-start', {
+            outputMode: 'webaudio-sequential',
+            sampleRate: buffer.sampleRate,
+            samples: buffer.length,
+            durationMs,
+            queueDepth: this.sequentialQueue.length,
+            bufferedMs: this.getBufferedMs(),
+        });
     }
 
     scheduleQueue() {
@@ -153,16 +251,24 @@
             const startAt = this.nextStartTime;
             const endAt = startAt + buffer.duration;
             const durationMs = Math.round(buffer.duration * 1000);
+            const scheduledDelayMs = Math.max(0, Math.round((startAt - currentTime) * 1000));
 
             source.buffer = buffer;
             source.connect(this.gainNode);
+            const scheduledAtMs = performance.now();
             source.onended = () => {
+                const elapsedMs = Math.max(0, Math.round(performance.now() - scheduledAtMs));
                 this.activeSources.delete(source);
                 this.emitPlaybackEvent('audio-playback-ended', {
                     outputMode: 'webaudio',
                     sampleRate: buffer.sampleRate,
                     samples: buffer.length,
                     durationMs,
+                    elapsedMs,
+                    scheduledDelayMs,
+                    earlyEnded: durationMs > 80 && elapsedMs < Math.round(durationMs * 0.6),
+                    queueDepth: this.queue.length,
+                    bufferedMs: this.getBufferedMs(),
                 });
             };
             this.activeSources.add(source);
@@ -172,6 +278,9 @@
                 sampleRate: buffer.sampleRate,
                 samples: buffer.length,
                 durationMs,
+                scheduledDelayMs,
+                queueDepth: this.queue.length,
+                bufferedMs: this.getBufferedMs(),
             });
             this.nextStartTime = endAt;
             this.bufferedUntil = Math.max(this.bufferedUntil, endAt);
@@ -275,6 +384,8 @@
             sampleRate: item.sampleRate,
             samples: item.float32Array?.length || 0,
             durationMs: item.durationMs,
+            queueDepth: this.htmlQueue.length,
+            bufferedMs: this.getBufferedMs(),
         });
         const playPromise = this.htmlAudio.play();
         if (playPromise?.catch) {
@@ -294,6 +405,8 @@
             sampleRate: item?.sampleRate || this.sampleRate,
             samples: item?.float32Array?.length || 0,
             durationMs: item?.durationMs || 0,
+            queueDepth: this.htmlQueue.length,
+            bufferedMs: this.getBufferedMs(),
         });
         if (item?.blobUrl) {
             URL.revokeObjectURL(item.blobUrl);
@@ -351,9 +464,24 @@
         return buffer;
     }
 
-    stop() {
+    stop(reason = '') {
+        const outputMode = this.preferHtmlAudioOutput
+            ? 'html'
+            : (this.sequentialPlaybackMode ? 'webaudio-sequential' : 'webaudio');
+        this.emitPlaybackEvent('audio-playback-stop', {
+            reason: String(reason || ''),
+            outputMode,
+            activeSources: this.activeSources.size,
+            queueDepth: this.queue.length + this.sequentialQueue.length + this.htmlQueue.length,
+            bufferedMs: this.getBufferedMs(),
+            htmlPendingSamples: this.htmlPendingSamples,
+        });
         this.playbackGeneration += 1;
         this.queue = [];
+        this.sequentialQueue = [];
+        this.sequentialPlaying = false;
+        this.sequentialSource = null;
+        this.sequentialBufferedUntilMs = 0;
         this.htmlQueue.forEach((item) => {
             if (item?.blobUrl) {
                 URL.revokeObjectURL(item.blobUrl);
@@ -406,7 +534,8 @@
             ? Math.max(0, this.bufferedUntil - this.audioContext.currentTime) * 1000
             : 0;
         const htmlRemaining = Math.max(0, this.htmlBufferedUntilMs - performance.now());
-        return Math.round(Math.max(webAudioRemaining, htmlRemaining));
+        const sequentialRemaining = Math.max(0, this.sequentialBufferedUntilMs - performance.now());
+        return Math.round(Math.max(webAudioRemaining, htmlRemaining, sequentialRemaining));
     }
 
     getVolume() {

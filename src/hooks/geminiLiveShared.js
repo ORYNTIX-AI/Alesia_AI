@@ -9,6 +9,8 @@ export const DEFAULT_RUNTIME_CONFIG = {
   voiceGatewayUrl: '',
   conversationSessionId: '',
   characterId: '',
+  enabledTools: [],
+  maxToolResults: 4,
 };
 
 export const DEFAULT_CALLBACKS = {
@@ -20,6 +22,8 @@ export const DEFAULT_CALLBACKS = {
   onAssistantInterrupted: null,
   onSessionGoAway: null,
   onSessionReady: null,
+  onToolCall: null,
+  onToolResult: null,
 };
 
 const DEFAULT_BACKEND_WS_BASE =
@@ -63,7 +67,109 @@ export function isGemini31FlashLiveModel(modelId) {
 }
 
 export function isBatyushka2StableRuntime(runtimeConfig) {
-  return String(runtimeConfig?.characterId || '').trim() === BATYUSHKA_2_STABLE_CHARACTER_ID;
+  return String(runtimeConfig?.characterId || '').trim() === BATYUSHKA_2_STABLE_CHARACTER_ID
+    || (
+      String(runtimeConfig?.runtimeProvider || '').trim() === 'gemini-live'
+      && String(runtimeConfig?.voiceName || runtimeConfig?.ttsVoiceName || '').trim() === 'Zephyr'
+      && isGemini31FlashLiveModel(runtimeConfig?.voiceModelId || runtimeConfig?.modelId)
+    );
+}
+
+export function shouldUseSapphireGeminiAudio(runtimeConfig) {
+  return isGemini31FlashLiveModel(runtimeConfig?.voiceModelId || runtimeConfig?.modelId);
+}
+
+export function normalizeEnabledTools(runtimeConfig = {}) {
+  return new Set(
+    (Array.isArray(runtimeConfig.enabledTools) ? runtimeConfig.enabledTools : [])
+      .map((tool) => normalizeAssistantText(tool).toLowerCase())
+      .filter(Boolean),
+  );
+}
+
+function toolEnabled(enabledTools, ...names) {
+  return names.some((name) => enabledTools.has(name));
+}
+
+export function buildGeminiLiveToolDefinitions(runtimeConfig = {}) {
+  if (runtimeConfig.advertiseTools === false) {
+    return [];
+  }
+
+  const enabledTools = normalizeEnabledTools(runtimeConfig);
+  const declarations = [];
+
+  if (toolEnabled(enabledTools, 'open_site')) {
+    declarations.push({
+      name: 'open_site',
+      description: 'Open a public website in the lower browser panel when the user asks to open or view a site. Return confirmed URL, title, status, summary, and page snapshot state.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'The user request or site name to open.' },
+          url: { type: 'string', description: 'A direct URL if already known.' },
+        },
+      },
+    });
+  }
+
+  if (toolEnabled(enabledTools, 'get_browser_state', 'view_page')) {
+    declarations.push({
+      name: 'get_browser_state',
+      description: 'Inspect the lower browser panel. Use when the answer depends on whether a site is empty, loading, ready, failed, or what page is currently open.',
+      parameters: {
+        type: 'object',
+        properties: {
+          browserSessionId: { type: 'string' },
+          refresh: { type: 'boolean' },
+        },
+      },
+    });
+  }
+
+  if (toolEnabled(enabledTools, 'get_visible_page_summary', 'extract_page_context', 'summarize_visible_page')) {
+    declarations.push({
+      name: 'get_visible_page_summary',
+      description: 'Read the current lower browser page and return a compact summary or an answer to a question about what is visible there.',
+      parameters: {
+        type: 'object',
+        properties: {
+          browserSessionId: { type: 'string' },
+          question: { type: 'string', description: 'Optional question about the currently visible page.' },
+          maxChars: { type: 'integer' },
+        },
+      },
+    });
+  }
+
+  if (toolEnabled(enabledTools, 'query_knowledge', 'knowledge_search', 'file_search')) {
+    declarations.push({
+      name: 'query_knowledge',
+      description: 'Search the small confirmed local knowledge base for prompts, known sites, FAQ, prayers, or church demo facts. Use only when this context is useful.',
+      parameters: {
+        type: 'object',
+        properties: {
+          question: { type: 'string' },
+          limit: { type: 'integer' },
+        },
+        required: ['question'],
+      },
+    });
+  }
+
+  return declarations.length ? [{ functionDeclarations: declarations }] : [];
+}
+
+function buildRealtimeToolInstruction(runtimeConfig = {}) {
+  if (!normalizeEnabledTools(runtimeConfig).size) {
+    return '';
+  }
+
+  return `Realtime tools:
+There is a browser panel below the avatar. It can be empty, loading, ready with a website, or failed with an error.
+You do not see that panel automatically. When your answer depends on the lower browser panel, call get_browser_state or get_visible_page_summary.
+When the user asks to open a website, call open_site. Do not say a website is open until the tool result confirms it.
+Use query_knowledge for the small confirmed knowledge base only when it helps. For ordinary conversation, answer directly and do not mention tools.`;
 }
 
 function buildGemini31SystemInstruction(runtimeConfig) {
@@ -90,6 +196,11 @@ function buildGemini31SystemInstruction(runtimeConfig) {
 2. WEB_CONTEXT_ACTIVE значит вопрос относится к уже открытой странице.
 3. WEB_CONTEXT_ERROR значит текущая попытка не удалась и надо сказать об этом прямо, без общих отказов.
 4. WEB_ACTION_RESULT значит действие на странице уже выполнено.`);
+
+  const toolInstruction = buildRealtimeToolInstruction(runtimeConfig);
+  if (toolInstruction) {
+    sections.push(toolInstruction);
+  }
 
   if (prayerInstruction) {
     sections.push(prayerInstruction);
@@ -131,6 +242,10 @@ export function shouldCommitGeminiAssistantTurn(serverContent) {
 }
 
 export function resolveRealtimeInputConfig(runtimeConfig) {
+  if (shouldUseSapphireGeminiAudio(runtimeConfig)) {
+    return null;
+  }
+
   const stableBatyushkaProfile = isBatyushka2StableRuntime(runtimeConfig);
 
   return {

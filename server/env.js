@@ -2,12 +2,23 @@ function normalizeWhitespace(value) {
   return String(value || '').replace(/\s+/g, ' ').trim()
 }
 
+const DEFAULT_GEMINI_31_LIVE_MODEL = 'models/gemini-3.1-flash-live-preview'
+
 function parseNumber(value, fallback, { min = Number.NEGATIVE_INFINITY } = {}) {
   const numeric = Number(value)
   if (!Number.isFinite(numeric)) {
     return fallback
   }
   return Math.max(min, numeric)
+}
+
+function normalizeGeminiModel(value, fallback = DEFAULT_GEMINI_31_LIVE_MODEL) {
+  const normalized = normalizeWhitespace(value)
+  const modelCode = normalized.replace(/^models\//, '')
+  if (!normalized || (modelCode.startsWith('gemini-') && !modelCode.startsWith('gemini-3.1-'))) {
+    return fallback
+  }
+  return normalized
 }
 
 export function loadServerEnv(env = process.env) {
@@ -37,7 +48,7 @@ export function loadServerEnv(env = process.env) {
       apiKey: normalizeWhitespace(env.GEMINI_API_KEY || ''),
       connectMaxAttempts: parseNumber(env.GEMINI_CONNECT_MAX_ATTEMPTS || 4, 4, { min: 1 }),
       connectRetryDelayMs: parseNumber(env.GEMINI_CONNECT_RETRY_DELAY_MS || 500, 500, { min: 250 }),
-      sttModel: normalizeWhitespace(env.STT_MODEL || ''),
+      sttModel: normalizeGeminiModel(env.STT_MODEL || ''),
     },
     yandex: {
       apiKey: normalizeWhitespace(env.YANDEX_API_KEY || ''),

@@ -319,16 +319,31 @@ export function useYandexVoiceSession(audioPlayer, runtimeConfig = DEFAULT_RUNTI
   }, [audioPlayer, finalizeSpeechCapture, releaseAudioResources, resetSpeechState]);
 
   const disconnect = useCallback(() => {
+    const wasConnected = Boolean(streamRef.current)
+      || Boolean(audioContextRef.current)
+      || Boolean(currentTurnAbortRef.current)
+      || status !== 'disconnected';
     lifecycleTokenRef.current += 1;
     currentTurnAbortRef.current?.abort?.();
+    currentTurnAbortRef.current = null;
     botSpeechGuardUntilRef.current = 0;
     resetSpeechState();
     releaseAudioResources();
-    audioPlayer.stop?.();
-    setStatus('disconnected');
-  }, [audioPlayer, releaseAudioResources, resetSpeechState]);
+    if (wasConnected) {
+      audioPlayer.stop?.('yandex-legacy-disconnect');
+    }
+    if (status !== 'disconnected') {
+      setStatus('disconnected');
+    }
+  }, [audioPlayer, releaseAudioResources, resetSpeechState, status]);
 
-  useEffect(() => () => disconnect(), [disconnect]);
+  const disconnectRef = useRef(disconnect);
+
+  useEffect(() => {
+    disconnectRef.current = disconnect;
+  }, [disconnect]);
+
+  useEffect(() => () => disconnectRef.current?.(), []);
 
   const sendTextTurn = useCallback(async (text, options = {}) => {
     const prompt = normalizeText(text);

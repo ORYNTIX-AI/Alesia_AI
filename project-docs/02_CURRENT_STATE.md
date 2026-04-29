@@ -224,3 +224,108 @@
 - Runtime skips knowledge lookup for simple greetings/persona/capability/browser/stop turns; longer lookup/prayer turns get a short high-priority status prompt first.
 - Browser voice routing now logs `browser.intent.input`, `browser.intent.classified`, `browser.intent.skipped`, `browser.open.started`, and `browser.open.result`.
 - Local checks after the change passed: `npm test`, `npm run lint`, `npm run build`, `npm run test:architecture`, `npm run test:e2e`.
+
+## 2026-04-28 Batyushka 2 Gemini 3.1 config alignment v0.0.17
+
+- Footer/package version raised to `v0.0.17`.
+- Batyushka 2 keeps the local Orthodox prompt, but its Gemini Live defaults are aligned to the working Gemini 3.1 setup: Live model `models/gemini-3.1-flash-live-preview`, TTS model `gemini-3.1-flash-tts-preview`, audio response modality, prebuilt voice `Schedar`, and output audio transcription enabled.
+- `STT_MODEL` now normalizes old Gemini model strings below 3.1 back to `models/gemini-3.1-flash-live-preview`, so copied env values cannot silently restore Gemini 2.5.
+- `.env.example` no longer suggests Gemini models below 3.1 for STT/browser resolver defaults.
+- Deployed `v0.0.17` to `https://alesia-ai.constitution.of.by`; `/health` is OK, active bundle is `assets/index-BJ6GHkD2.js`, and runtime config for `batyushka-2` has `outputAudioTranscription: true`.
+- Production Gemini smoke for `batyushka-2` reached `setupComplete`, returned PCM audio chunks, and reached `turnComplete`; fresh container logs had no `assistant.turn.drop`, `unexpected-start`, `audio-drop`, `answer-audio-missed`, or error matches.
+
+## 2026-04-28 Batyushka 2 Sapphire-compatible native Gemini audio v0.0.18
+
+- Footer/package version raised to `v0.0.18`.
+- Compared against the provided stable `assistant-sapphire` project and matched the important Gemini Live behavior for `batyushka-2`.
+- Batyushka 2 now lets Gemini Live own the native audio turn: recognized input transcription is recorded, but it is not replayed back to Gemini as a second text prompt.
+- Removed the explicit `realtimeInputConfig` for Batyushka 2 Gemini 3.1 so the session uses Gemini Live defaults like the stable project.
+- Batyushka 2 microphone capture now mirrors the stable project: `getUserMedia({ audio: true })`, `AudioContext({ sampleRate: 16000 })`, `ScriptProcessorNode(4096)`, no local input gain, no local RMS barge-in, and no mic-tail frame gate.
+- Batyushka 2 output playback uses simple sequential WebAudio chunk playback instead of pre-scheduled overlapping chunk playback.
+- Native Gemini audio that starts before local request bookkeeping is now accepted by creating/recovering a local request instead of dropping it as `assistant.turn.drop: unexpected-start`.
+- Local checks after the change passed: `npm run lint`, `npm test`, `npm run test:architecture`, `npm run build`, `npm run test:e2e`.
+- Deployed `v0.0.18` to `https://alesia-ai.constitution.of.by`; `/health` reports version `0.0.18`, commit `d253af9-local-v0.0.18`, active bundle `assets/index-iWqBrB4s.js`, and container `ALesia_AI` is healthy.
+- Production `batyushka-2` config still uses Gemini 3.1 Live/TTS, `liveInputEnabled: true`, `outputAudioTranscription: true`, `remote` browser panel, and `url-fetch` page context.
+- Direct production `batyushka-2` WebSocket text smoke reached `setupComplete`, returned 23 PCM audio chunks, and reached `turnComplete`; fresh logs had no `assistant.turn.drop`, `unexpected-start`, `audio-drop`, or `answer-audio-missed`.
+
+## 2026-04-28 Batyushka 3 native Yandex Realtime simplification v0.0.19
+
+- Footer/package version raised to `v0.0.19`.
+- Batyushka 3 Yandex Realtime was still carrying local runtime overlays: local RMS barge-in, final-transcript suppression, echo/backchannel drops, client-side `response.cancel` on `speech_started`, HTMLAudio output preference, and custom VAD fields.
+- Aligned Batyushka 3 closer to the official Yandex Realtime voice-agent flow: server VAD in session config, client streams microphone audio, `speech_started` clears only local playback, response audio is accepted from the native response, and final transcripts are recorded without being filtered/replayed.
+- Yandex Realtime `turn_detection` now uses the documented minimal shape: `type: server_vad`, `threshold: 0.5`, `silence_duration_ms: 400`; no `prefix_padding_ms`, `create_response`, or `interrupt_response` override.
+- Yandex Realtime output now uses sequential WebAudio playback instead of forcing HTMLAudio fallback.
+- Local checks after the change passed: `npm run lint`, `npm test`, `npm run build`, `npm run test:architecture`, `npm run test:e2e`.
+- Deployed `v0.0.19` to `https://alesia-ai.constitution.of.by`; `/health` reports version `0.0.19`, commit `d253af9-local-v0.0.19`, container `ALesia_AI` is healthy, and active bundle is `assets/index-3OSVtMBB.js`.
+
+## 2026-04-28 Voice playback diagnostics and repair v0.0.20
+
+- Footer/package version raised to `v0.0.20`.
+- Production logs showed the real user-visible failure mode: audio chunks were accepted and scheduled, but playback could be stopped almost immediately after `speech_started`, leaving no audible voice or lip movement.
+- Batyushka 3/Yandex Realtime now logs the whole audio path: `voice.yandex.profile`, `voice.yandex.ready`, `voice.yandex.final-transcript`, `voice.yandex.audio-delta`, `voice.yandex.speech-started`, `voice.yandex.turn-done`, plus server-side `yandex.realtime.*` upstream events.
+- Yandex `speech_started` no longer stops already-buffered local playback after the native response has been handed to the player. It can stop only an active streaming turn with real local user volume above the guard.
+- Batyushka 2/Gemini 3.1 now forces the Sapphire-compatible audio path for Gemini 3.1 Live even if character metadata is stale: no explicit realtime input config and sequential WebAudio output.
+- Playback telemetry now includes stop reasons, queue depth, buffered milliseconds, elapsed milliseconds, scheduled delay, and `earlyEnded` so false "audio-start" can be separated from audible playback.
+- Local checks after the change passed: `npm run lint`, `npm test`, `npm run build`, `npm run test:architecture`, `npm run test:e2e`.
+- Deployed `v0.0.20` to `https://alesia-ai.constitution.of.by`; `/health` reports version `0.0.20`, commit `d253af9-local-v0.0.20`, container `ALesia_AI` is healthy, and active bundle is `assets/index-K9n5_rEe.js`.
+
+## 2026-04-28 Batyushka 2 Sapphire direct playback v0.0.21
+
+- Footer/package version raised to `v0.0.21`.
+- Batyushka 2/Gemini 3.1 no longer sends assistant PCM through the shared `AudioStreamPlayer` scheduler. It uses a dedicated Sapphire-style queue: `Float32Array[]`, `AudioContext.createBuffer(..., 24000)`, `BufferSource -> audioContext.destination`, and `onended -> next chunk`.
+- The direct Sapphire queue still emits playback telemetry and synthetic volume so the avatar mouth and voice meter can move without putting the audio through the shared gain/analyser path.
+- Sapphire-path Gemini setup now matches the provided stable project more closely: audio response modality, prebuilt voice `Zephyr`, input/output audio transcription, no explicit `realtimeInputConfig`, no `thinkingConfig`, no session resumption, and no context window compression. The local Batyushka prompt remains.
+- Local checks after the change passed: `npm run lint`, `npm test`, `npm run build`, `npm run test:architecture`, `npm run test:e2e`.
+- Deployed `v0.0.21` to `https://alesia-ai.constitution.of.by`; `/health` reports version `0.0.21`, commit `d253af9-local-v0.0.21`, active bundle is `assets/index-DyCMqEDn.js`, and container `ALesia_AI` is healthy.
+- Production runtime config was updated only for `batyushka-2`: active character remains `batyushka-2`, voice/tts voice are `Zephyr`, `outputAudioTranscription` is `true`, and Gemini model remains `models/gemini-3.1-flash-live-preview`.
+- Production Batyushka 2 direct WebSocket smoke with the Sapphire-style setup returned output transcription and 10 PCM audio chunks.
+
+## 2026-04-29 Shared audio cleanup fix v0.0.22
+
+- Footer/package version raised to `v0.0.22`.
+- Found the non-obvious production failure: inactive runtime cleanup could stop the shared audio player. During active `batyushka-3` Yandex sessions, logs showed repeated `assistant.turn.audio-playback-stop` with `reason: "gemini-disconnect"` and `outputMode: "webaudio"`.
+- `useGeminiLive`, `useYandexVoiceSession`, and `useYandexRealtimeSession` now use idempotent disconnect cleanup; inactive runtimes no longer stop shared playback just because React rerendered or an adapter object changed.
+- `useVoiceRuntimeAdapters` now calls inactive runtime disconnect through refs and depends only on runtime flags, not full session objects.
+- Batyushka 2 Sapphire-style Gemini playback now soft-clears queued chunks on Gemini `serverContent.interrupted` instead of stopping the currently playing `BufferSource`, matching the provided stable Sapphire project more closely.
+- Local checks passed after the fix: `npm run lint`, `npm test`, `npm run test:architecture`, `npm run build`, `npm run test:e2e`.
+- Deployed `v0.0.22` to `https://alesia-ai.constitution.of.by`; `/health` reports version `0.0.22`, commit `d253af9-local-v0.0.22`, active bundle is `assets/index-D7J43UzO.js`, and container `ALesia_AI` is healthy.
+- Production live smoke passed for `gemini-live` and `yandex-realtime`; direct `batyushka-2` WebSocket smoke returned text `Мир вам.`, output transcription, 7 PCM chunks, and no `interrupted`.
+- Browser fake-mic check against the domain with active `batyushka-3` produced audible-path telemetry: `assistant.turn.audio-playback-ended`, `assistant.turn.commit`, `runtime.request.final: answered`, and last answer `Здравствуйте, меня зовут Николай, помогаю по церковным вопросам.`
+
+## 2026-04-29 Browser panel and male Batyushka 2 voice v0.0.23
+
+- Footer/package version raised to `v0.0.23`.
+- Batyushka 2 default Gemini Live voice and Gemini TTS fallback voice are now `Sadachbia`, marked as male in `SUPPORTED_VOICES`. This was later rolled back in `v0.0.24`.
+- Site opening is separated from the voice stream: browser intents from native Gemini/Yandex final transcripts run as a side-effect with `preserveVoiceOutput`, `suppressOpeningAck`, and `suppressResultPrompt`, so they do not call `cancelAssistantOutput()` or clear the assistant voice queue.
+- Production browser failure cause found and fixed: the Docker runtime installed Chromium but not Playwright system libraries. `/api/browser/open` failed with missing `libglib-2.0.so.0`; Dockerfile now uses `playwright install --with-deps chromium`.
+- Deployed `v0.0.23` to `https://alesia-ai.constitution.of.by`; `/health` reports version `0.0.23`, commit `d253af9-local-v0.0.23`, active bundle is `assets/index-BT9O8mQi.js`, and container `ALesia_AI` is healthy.
+- Production `/api/browser/intent` resolves `открой сайт азбука веры` to `https://azbyka.ru/`; production `/api/browser/open` returns `verified: true`, page title, URL, and screenshot.
+- Production `LIVE_SMOKE_TARGETS=gemini-live,yandex-realtime npm run test:live` passed with real env; Yandex Realtime `open_site` verified `https://azbyka.ru/` through the fixed browser runtime.
+
+## 2026-04-29 Batyushka 2 voice rollback v0.0.24
+
+- Footer/package version raised to `v0.0.24`.
+- Reverted only Batyushka 2 default Gemini Live voice and Gemini TTS fallback voice from `Sadachbia` back to `Zephyr` after phone validation reported stutter with `Sadachbia`; the Sapphire-compatible audio path and browser side-effect logic were not changed.
+- Production runtime config active character was restored to `batyushka-2`; Batyushka 2 `voiceName` and `ttsVoiceName` are `Zephyr`.
+- The configured `webProviders` list is still present: `weather`, `news`, `currency`, `maps`, `wiki`, `search`. Batyushka 3 still has `open_site`, `view_page`, `extract_page_context`, and `summarize_visible_page` enabled.
+- Deployed `v0.0.24` to `https://alesia-ai.constitution.of.by`; `/health` reports version `0.0.24`, commit `d253af9-local-v0.0.24`, and container `ALesia_AI` is healthy.
+- Production `/api/browser/intent` still resolves `открой сайт азбука веры` to `https://azbyka.ru/`. No site-opening logic was changed in this rollback.
+
+## 2026-04-29 Browser command/context routing v0.0.25
+
+- Footer/package version raised to `v0.0.25`.
+- Voice streaming was intentionally left untouched: no changes to Gemini/Yandex audio, VAD, WebAudio playback, microphone capture, voice names, or the Batyushka 2 Sapphire-style queue.
+- Batyushka 2 browser command detection now accepts polite/direct forms like `откройте сайт ...`, `зайдите на сайт ...`, `перейдите на сайт ...`, and `покажите сайт ...`; this fixes cases where a Gemini final transcript was treated as plain chat and the assistant only said it would open the site.
+- Batyushka 3 page questions with an active browser now use the app-side browser response as primary: the generic native Yandex response is suppressed, the handler waits briefly for the page to become ready, then answers from the open page context.
+- Deployed `v0.0.25` to `https://alesia-ai.constitution.of.by`; `/health` reports version `0.0.25`, commit `d253af9-local-v0.0.25`, and container `ALesia_AI` is healthy.
+- Production `/api/browser/intent` resolves `откройте сайт азбука веры` to `https://azbyka.ru/`; production `/api/browser/open` returns `status: ready`, page title `Православный портал «Азбука веры» | Православный сайт`, URL, reader text, and screenshot.
+
+## 2026-04-29 Native realtime browser tools v0.0.26
+
+- Footer/package version raised to `v0.0.26`.
+- The voice stream remains the sacred layer: no audio capture, VAD, WebAudio playback, microphone, voice-name, or Sapphire queue changes were made for this version.
+- Removed the risky `v0.0.25` transcript side-effect path from native Gemini/Yandex turns: browser commands are no longer replayed through app-side transcript routing and Yandex page answers are no longer made `browser-primary` by suppressing the native model response.
+- Batyushka 2 and Batyushka 3 now expose browser/knowledge through native realtime tools: `open_site`, `get_browser_state`, `get_visible_page_summary`, and `query_knowledge`.
+- Gemini Live sends those tools in `setup.tools` and answers model tool calls with `toolResponse`; Yandex Realtime advertises the same tool set in the session payload.
+- Added `/api/realtime/tool` as the shared server executor for Gemini/Yandex tool calls, backed by the existing browser runtime and knowledge search.
+- Local checks passed: `npm run lint`, `npm test`, `npm run test:architecture`, `npm run build`.

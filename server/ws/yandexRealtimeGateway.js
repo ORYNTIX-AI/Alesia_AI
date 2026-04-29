@@ -49,6 +49,11 @@ export function attachYandexRealtimeBridgeConnection(clientWs, { voiceSession = 
     pendingResponseDoneTimers: new Map(),
     closedResponseIds: new Set(),
     reconnectAttempt: 0,
+    clientAudioAppendCount: 0,
+    assistantAudioDeltaCount: 0,
+    assistantTextDeltaCount: 0,
+    finalTranscriptCount: 0,
+    responseCreatedCount: 0,
   };
 
   const clearReconnectTimer = () => {
@@ -120,6 +125,11 @@ export function attachYandexRealtimeBridgeConnection(clientWs, { voiceSession = 
       }
 
       if (eventPayload.type === 'session.updated') {
+        logRuntime('yandex.realtime.session.updated', {
+          route,
+          conversationSessionId: connectionState.conversationSessionId,
+          characterId: connectionState.characterId,
+        });
         if (!connectionState.readySent) {
           connectionState.readySent = true;
           sendJson(clientWs, {
@@ -133,12 +143,30 @@ export function attachYandexRealtimeBridgeConnection(clientWs, { voiceSession = 
 
       const transcriptEvent = normalizeTranscriptEvent(eventPayload);
       if (transcriptEvent) {
+        if (transcriptEvent.type === 'final_transcript') {
+          connectionState.finalTranscriptCount += 1;
+          logRuntime('yandex.realtime.final-transcript', {
+            route,
+            conversationSessionId: connectionState.conversationSessionId,
+            characterId: connectionState.characterId,
+            count: connectionState.finalTranscriptCount,
+            textLength: String(transcriptEvent.text || '').length,
+          });
+        }
         sendJson(clientWs, transcriptEvent);
         return;
       }
 
       if (eventPayload.type === 'response.created') {
         connectionState.activeResponseId = extractResponseId(eventPayload) || connectionState.activeResponseId;
+        connectionState.responseCreatedCount += 1;
+        logRuntime('yandex.realtime.response.created', {
+          route,
+          conversationSessionId: connectionState.conversationSessionId,
+          characterId: connectionState.characterId,
+          responseId: connectionState.activeResponseId,
+          count: connectionState.responseCreatedCount,
+        });
         return;
       }
 
@@ -171,7 +199,41 @@ export function attachYandexRealtimeBridgeConnection(clientWs, { voiceSession = 
             scheduleAssistantTurnDone(clientWs, connectionState, responseId);
           }
         }
+        if (assistantEvent.type === 'assistant_text_delta') {
+          connectionState.assistantTextDeltaCount += 1;
+          if (connectionState.assistantTextDeltaCount === 1 || connectionState.assistantTextDeltaCount % 8 === 0) {
+            logRuntime('yandex.realtime.assistant-text-delta', {
+              route,
+              conversationSessionId: connectionState.conversationSessionId,
+              characterId: connectionState.characterId,
+              responseId,
+              count: connectionState.assistantTextDeltaCount,
+              textLength: String(assistantEvent.text || '').length,
+            });
+          }
+        }
+        if (assistantEvent.type === 'assistant_audio_delta') {
+          connectionState.assistantAudioDeltaCount += 1;
+          if (connectionState.assistantAudioDeltaCount === 1 || connectionState.assistantAudioDeltaCount % 8 === 0) {
+            logRuntime('yandex.realtime.assistant-audio-delta', {
+              route,
+              conversationSessionId: connectionState.conversationSessionId,
+              characterId: connectionState.characterId,
+              responseId,
+              count: connectionState.assistantAudioDeltaCount,
+              audioLength: String(assistantEvent.audio || '').length,
+            });
+          }
+        }
         if (eventPayload.type === 'response.done' && responseId) {
+          logRuntime('yandex.realtime.response.done', {
+            route,
+            conversationSessionId: connectionState.conversationSessionId,
+            characterId: connectionState.characterId,
+            responseId,
+            audioDeltaCount: connectionState.assistantAudioDeltaCount,
+            textDeltaCount: connectionState.assistantTextDeltaCount,
+          });
           connectionState.responseIdsWithTextDelta.delete(responseId);
           if (connectionState.activeResponseId === responseId) {
             connectionState.activeResponseId = '';
@@ -415,6 +477,16 @@ export function attachYandexRealtimeBridgeConnection(clientWs, { voiceSession = 
       case 'audio.append': {
         if (!connectionState.sessionConfigured) {
           return;
+        }
+        connectionState.clientAudioAppendCount += 1;
+        if (connectionState.clientAudioAppendCount === 1 || connectionState.clientAudioAppendCount % 120 === 0) {
+          logRuntime('yandex.realtime.client-audio-append', {
+            route,
+            conversationSessionId: connectionState.conversationSessionId,
+            characterId: connectionState.characterId,
+            count: connectionState.clientAudioAppendCount,
+            audioLength: String(payload.audio || '').length,
+          });
         }
         upstreamWs.send(JSON.stringify({
           type: 'input_audio_buffer.append',

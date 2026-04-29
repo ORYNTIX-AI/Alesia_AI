@@ -321,6 +321,59 @@ export async function toolViewPage(args = {}, connectionState) {
   };
 }
 
+export async function toolGetBrowserState(args = {}, connectionState) {
+  const browserSessionId = await resolveActiveBrowserSessionId(
+    connectionState.conversationSessionId,
+    args.browserSessionId,
+  );
+  if (!browserSessionId) {
+    return {
+      ok: true,
+      status: 'empty',
+      browserSessionId: '',
+      title: '',
+      url: '',
+      summary: '',
+      error: '',
+      view: null,
+    };
+  }
+
+  try {
+    const [view, pageContext] = await Promise.all([
+      getBrowserSessionView(browserSessionId, { refresh: args.refresh === true }),
+      getBrowserSessionContext(browserSessionId),
+    ]);
+    await setConversationBrowserState(connectionState.conversationSessionId, {
+      browserSessionId,
+      title: view?.title || pageContext?.title || '',
+      url: view?.url || pageContext?.url || '',
+      lastUpdated: view?.lastUpdated || pageContext?.lastUpdated || null,
+    }, { characterId: connectionState.characterId });
+    return {
+      ok: true,
+      status: 'ready',
+      browserSessionId,
+      title: pageContext?.title || view?.title || '',
+      url: pageContext?.url || view?.url || '',
+      summary: summarizeText(pageContext?.readerText || ''),
+      error: '',
+      view,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      status: 'error',
+      browserSessionId,
+      title: '',
+      url: '',
+      summary: '',
+      error: normalizeWhitespace(error?.message || 'Browser state is unavailable'),
+      view: null,
+    };
+  }
+}
+
 export async function toolExtractPageContext(args = {}, connectionState) {
   const question = normalizeWhitespace(args.question || '');
   if (!question) {
@@ -380,6 +433,37 @@ export async function toolSummarizeVisiblePage(args = {}, connectionState) {
   };
 }
 
+export async function toolGetVisiblePageSummary(args = {}, connectionState) {
+  const question = normalizeWhitespace(args.question || '');
+  if (question) {
+    const answer = await toolExtractPageContext({ ...args, question }, connectionState);
+    return {
+      ...answer,
+      status: 'ready',
+      summary: answer.answer || answer.contextSnippet || '',
+    };
+  }
+
+  try {
+    const summary = await toolSummarizeVisiblePage(args, connectionState);
+    return {
+      ...summary,
+      status: 'ready',
+    };
+  } catch (error) {
+    const state = await toolGetBrowserState(args, connectionState);
+    if (state.status === 'empty') {
+      return state;
+    }
+    return {
+      ...state,
+      ok: false,
+      status: 'error',
+      error: normalizeWhitespace(error?.message || state.error || 'Visible page summary is unavailable'),
+    };
+  }
+}
+
 export async function toolKnowledgeSearch(args = {}, connectionState) {
   const question = normalizeWhitespace(args.question || '');
   if (!question) {
@@ -408,16 +492,26 @@ export async function toolKnowledgeSearch(args = {}, connectionState) {
   };
 }
 
+export async function toolQueryKnowledge(args = {}, connectionState) {
+  return toolKnowledgeSearch(args, connectionState);
+}
+
 export async function executeToolCall(toolName, rawArgs, connectionState) {
   switch (toolName) {
     case 'open_site':
       return toolOpenSite(rawArgs, connectionState);
+    case 'get_browser_state':
+      return toolGetBrowserState(rawArgs, connectionState);
     case 'view_page':
       return toolViewPage(rawArgs, connectionState);
     case 'extract_page_context':
       return toolExtractPageContext(rawArgs, connectionState);
+    case 'get_visible_page_summary':
+      return toolGetVisiblePageSummary(rawArgs, connectionState);
     case 'summarize_visible_page':
       return toolSummarizeVisiblePage(rawArgs, connectionState);
+    case 'query_knowledge':
+      return toolQueryKnowledge(rawArgs, connectionState);
     case 'knowledge_search':
       return toolKnowledgeSearch(rawArgs, connectionState);
     default:

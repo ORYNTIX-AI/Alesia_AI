@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
 import { useGeminiLive } from '../../hooks/useGeminiLive.js'
 import { useYandexRealtimeSession } from '../../hooks/useYandexRealtimeSession.js'
 import { useYandexVoiceSession } from '../../hooks/useYandexVoiceSession.js'
@@ -42,6 +42,22 @@ export function useVoiceRuntimeAdapters({
   const yandexSession = useYandexVoiceSession(audioPlayer, runtimeConfig, callbacks)
   const yandexRealtimeSession = useYandexRealtimeSession(audioPlayer, runtimeConfig, callbacks)
   const runtimeState = resolveVoiceRuntimeState(runtimeProvider, runtimeProviderOverride)
+  const geminiDisconnectRef = useRef(geminiSession.disconnect)
+  const yandexDisconnectRef = useRef(yandexSession.disconnect)
+  const yandexRealtimeDisconnectRef = useRef(yandexRealtimeSession.disconnect)
+
+  useEffect(() => {
+    geminiDisconnectRef.current = geminiSession.disconnect
+  }, [geminiSession.disconnect])
+
+  useEffect(() => {
+    yandexDisconnectRef.current = yandexSession.disconnect
+  }, [yandexSession.disconnect])
+
+  useEffect(() => {
+    yandexRealtimeDisconnectRef.current = yandexRealtimeSession.disconnect
+  }, [yandexRealtimeSession.disconnect])
+
   const sessions = useMemo(() => ({
     geminiSession,
     yandexSession,
@@ -83,25 +99,22 @@ export function useVoiceRuntimeAdapters({
 
   useEffect(() => {
     if (runtimeState.usesYandexRealtimeRuntime) {
-      geminiSession.disconnect?.()
-      yandexSession.disconnect?.()
+      geminiDisconnectRef.current?.()
+      yandexDisconnectRef.current?.()
       return
     }
 
     if (runtimeState.usesYandexLegacyRuntime) {
-      geminiSession.disconnect?.()
-      yandexRealtimeSession.disconnect?.()
+      geminiDisconnectRef.current?.()
+      yandexRealtimeDisconnectRef.current?.()
       return
     }
 
-    yandexSession.disconnect?.()
-    yandexRealtimeSession.disconnect?.()
+    yandexDisconnectRef.current?.()
+    yandexRealtimeDisconnectRef.current?.()
   }, [
-    geminiSession,
     runtimeState.usesYandexLegacyRuntime,
     runtimeState.usesYandexRealtimeRuntime,
-    yandexRealtimeSession,
-    yandexSession,
   ])
 
   return {

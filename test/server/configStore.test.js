@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { sanitizeAppConfig } from '../../server/configStore.js'
+import { loadServerEnv } from '../../server/env.js'
 
 test('sanitizeAppConfig migrates legacy config into schema v2 runtime shape', () => {
   const migrated = sanitizeAppConfig({
@@ -69,4 +70,12 @@ test('sanitizeAppConfig migrates legacy config into schema v2 runtime shape', ()
   assert.equal(Boolean(batyushka.greetingText), true)
   assert.equal(batyushka.avatarModelUrl, 'avatars/nikolay.glb')
   assert.equal('safetySwitches' in migrated, false)
+})
+
+test('loadServerEnv keeps Gemini STT defaults on 3.1', () => {
+  const env = loadServerEnv({
+    STT_MODEL: 'models/gemini-2.5-flash-native-audio-preview-12-2025',
+  })
+
+  assert.equal(env.gemini.sttModel, 'models/gemini-3.1-flash-live-preview')
 })

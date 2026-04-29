@@ -52,11 +52,10 @@ export const YANDEX_REALTIME_RUNTIME_PROVIDER = 'yandex-realtime';
 export const YANDEX_LEGACY_RUNTIME_PROVIDER = 'yandex-full-legacy';
 export const YANDEX_RUNTIME_PROVIDER = YANDEX_LEGACY_RUNTIME_PROVIDER;
 export const DEFAULT_YANDEX_ENABLED_TOOLS = [
-  'file_search',
   'open_site',
-  'view_page',
-  'extract_page_context',
-  'summarize_visible_page',
+  'get_browser_state',
+  'get_visible_page_summary',
+  'query_knowledge',
 ];
 
 function readJsonFile(filePath) {

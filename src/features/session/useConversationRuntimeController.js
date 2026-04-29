@@ -66,7 +66,6 @@ const SILENT_TURN_FALLBACK_FIRST_CHUNK_TIMEOUT_MS = 12000;
 const SILENT_TURN_FALLBACK_NEXT_CHUNK_TIMEOUT_MS = 12000;
 const SILENT_TURN_FALLBACK_CHUNK_MAX_CHARS = 90;
 const USER_FINAL_DEDUP_WINDOW_MS = 4200;
-const YANDEX_REALTIME_EXTRA_FINAL_SUPPRESS_MS = 900;
 const LIVE_INPUT_FINAL_DEDUP_SOURCES = new Set([
   'gemini-input',
   'yandex-realtime-input',
@@ -203,6 +202,9 @@ export function useConversationRuntimeController({
   const activeVoiceStatusRef = React.useRef('disconnected');
   const activeVoiceDisconnectRef = React.useRef(() => {});
   const voiceConversationStateRef = React.useRef(createVoiceConversationState());
+  const usesSapphireGeminiNative = String(selectedCharacter?.id || '').trim() === 'batyushka-2'
+    && effectiveRuntimeProvider === 'gemini-live'
+    && isGemini31FlashLiveModel(runtimeConfig?.voiceModelId || selectedCharacter?.voiceModelId || selectedCharacter?.modelId);
 
   const {
     appendSessionWebHistory,
@@ -347,6 +349,34 @@ export function useConversationRuntimeController({
     markDialogRequestState(nextRequestId, 'assistant-active', { source });
     return nextRequestId;
   }, [activeDialogRequestRef, clearAssistantPromptQueue, finalizeDialogRequest, markDialogRequestState, recordConversationAction]);
+
+  const ensureNativeGeminiDialogRequest = React.useCallback((source = 'gemini-live-native-output') => {
+    if (assistantAwaitingResponseRef.current && assistantInFlightRequestIdRef.current > 0) {
+      return assistantInFlightRequestIdRef.current;
+    }
+
+    const requestId = beginAssistantInitiatedRequest(source);
+    assistantPromptInFlightRef.current = true;
+    assistantInFlightRequestIdRef.current = requestId;
+    assistantAwaitingResponseRef.current = true;
+    assistantPromptMetaRef.current = {
+      source,
+      finalizeRequestOnCommit: true,
+    };
+    recordConversationAction('assistant.turn.recover', {
+      conversationSessionId: conversationSessionIdRef.current || '',
+      reason: source,
+      requestId,
+    });
+    return requestId;
+  }, [
+    assistantAwaitingResponseRef,
+    assistantInFlightRequestIdRef,
+    assistantPromptInFlightRef,
+    assistantPromptMetaRef,
+    beginAssistantInitiatedRequest,
+    recordConversationAction,
+  ]);
 
   const triggerBargeIn = React.useCallback((reason = 'speech-overlap') => {
     const now = Date.now();
@@ -651,49 +681,10 @@ export function useConversationRuntimeController({
     usesYandexRuntime,
   ]);
 
-  const commitNativeYandexRealtimeUserTranscript = React.useCallback((transcript) => {
+  const commitNativeGeminiInputTranscript = React.useCallback((transcript) => {
     const normalized = normalizeSpeechText(transcript);
     setLiveInputTranscript('');
     if (!normalized || isAssistantBrowserNarration(normalized)) {
-      return false;
-    }
-
-    const botVolume = audioPlayer?.getVolume?.() || 0;
-    const botBufferedMs = Number(audioPlayer?.getBufferedMs?.() || 0);
-    const lastAssistantTs = Number(lastAssistantTurnRef.current?.timestamp || 0);
-    const timeSinceAssistantMs = lastAssistantTs > 0 ? Date.now() - lastAssistantTs : Number.POSITIVE_INFINITY;
-    const shortTurnType = classifyShortHumanTurn(normalized);
-    const recentAssistantSpeech = botBufferedMs > 0 || timeSinceAssistantMs < 400;
-
-    if (recentAssistantSpeech && shortTurnType === 'backchannel') {
-      recordConversationAction('stt.stream.backchannel', {
-        conversationSessionId: conversationSessionIdRef.current || '',
-        source: 'yandex-realtime-input',
-        textLength: normalized.length,
-      });
-      return false;
-    }
-
-    if (isLikelyAssistantEchoFinal(normalized, lastAssistantTurnRef.current, botVolume, tunedSpeechConfig)) {
-      recordConversationAction('stt.stream.echo-drop', {
-        conversationSessionId: conversationSessionIdRef.current || '',
-        source: 'yandex-realtime-input',
-        textLength: normalized.length,
-        reason: recentAssistantSpeech ? 'assistant-overlap' : 'assistant-echo',
-      });
-      return false;
-    }
-
-    if (
-      isLikelyVoiceStopCommand(normalized, { allowFuzzy: true })
-      && (botBufferedMs > 0 || botVolume > tunedSpeechConfig.botVolumeGuard || assistantPromptInFlightRef.current || assistantAwaitingResponseRef.current)
-    ) {
-      triggerBargeIn('voice-stop-command-yandex-realtime-input');
-      recordConversationAction('stt.stream.stop-command', {
-        conversationSessionId: conversationSessionIdRef.current || '',
-        source: 'yandex-realtime-input',
-        textLength: normalized.length,
-      });
       return false;
     }
 
@@ -703,22 +694,90 @@ export function useConversationRuntimeController({
     if (
       transcriptKey
       && previousLiveFinal.key === transcriptKey
-      && previousLiveFinal.source === 'yandex-realtime-input'
+      && previousLiveFinal.source === 'gemini-live-native-input'
       && (now - previousLiveFinal.timestamp) < USER_FINAL_DEDUP_WINDOW_MS
     ) {
       recordConversationAction('stt.stream.final-drop', {
         conversationSessionId: conversationSessionIdRef.current || '',
-        source: 'yandex-realtime-input',
+        source: 'gemini-live-native-input',
         reason: 'dedupe-window',
         textLength: normalized.length,
       });
       return false;
     }
 
-    if (botVolume > tunedSpeechConfig.botVolumeGuard && shortTurnType !== 'backchannel') {
-      triggerBargeIn('bargein-final-yandex-realtime-input');
+    const requestId = assistantInFlightRequestIdRef.current > 0
+      ? assistantInFlightRequestIdRef.current
+      : ensureNativeGeminiDialogRequest('gemini-live-native-input');
+    transitionVoiceConversationState(VOICE_CONVERSATION_EVENTS.INPUT_FINAL_COMMIT, {
+      reason: 'gemini-live-native-input',
+      requestId,
+    });
+    setLastRecognizedTurn(normalized);
+    setLastIssueText('');
+    lastLiveFinalRef.current = {
+      key: transcriptKey,
+      timestamp: now,
+      requestId,
+      source: 'gemini-live-native-input',
+    };
+    updateConversationSessionState({
+      lastFinalTranscriptHash: transcriptKey,
+      activeSttSessionId: conversationSessionIdRef.current
+        ? `gemini-live-native:${conversationSessionIdRef.current}`
+        : '',
+    });
+    const hasActiveBrowserSession = Boolean(activeBrowserSessionIdRef.current)
+      || Boolean(usesClientInlinePanel && browserPanelRef.current?.clientUrl);
+    const intentType = classifyTranscriptIntent(normalized, { hasActiveBrowserSession });
+    const implicitBrowserAction = Boolean(activeBrowserSessionIdRef.current)
+      && Boolean(parseImplicitBrowserActionRequest(normalized));
+    const shouldRouteToBrowser = intentType === 'browser_action'
+      || intentType === 'page_query'
+      || intentType === 'site_open'
+      || implicitBrowserAction;
+    recordConversationAction('stt.stream.final', {
+      conversationSessionId: conversationSessionIdRef.current || '',
+      source: 'gemini-live-native-input',
+      textLength: normalized.length,
+      intentType,
+      browserSideEffect: false,
+      browserNativeTools: shouldRouteToBrowser,
+      browserHandlerReady: Boolean(handleBrowserTranscriptRef.current),
+    });
+    recordConversationAction('user.turn.final', {
+      conversationSessionId: conversationSessionIdRef.current || '',
+      source: 'gemini-live-native-input',
+      textLength: normalized.length,
+      intentType,
+      browserSideEffect: false,
+      browserNativeTools: shouldRouteToBrowser,
+    });
+    recordConversationTurn('user', normalized, 'gemini-live-native-input');
+    return true;
+  }, [
+    activeBrowserSessionIdRef,
+    assistantInFlightRequestIdRef,
+    browserPanelRef,
+    ensureNativeGeminiDialogRequest,
+    handleBrowserTranscriptRef,
+    recordConversationAction,
+    recordConversationTurn,
+    setLastIssueText,
+    transitionVoiceConversationState,
+    updateConversationSessionState,
+    usesClientInlinePanel,
+  ]);
+
+  const commitNativeYandexRealtimeUserTranscript = React.useCallback((transcript) => {
+    const normalized = normalizeSpeechText(transcript);
+    setLiveInputTranscript('');
+    if (!normalized || isAssistantBrowserNarration(normalized)) {
+      return false;
     }
 
+    const transcriptKey = normalizeTranscriptKey(normalized);
+    const now = Date.now();
     const hasActiveBrowserSession = Boolean(activeBrowserSessionIdRef.current)
       || Boolean(usesClientInlinePanel && browserPanelRef.current?.clientUrl);
     const intentType = classifyTranscriptIntent(normalized, { hasActiveBrowserSession });
@@ -726,23 +785,19 @@ export function useConversationRuntimeController({
       && Boolean(parseImplicitBrowserActionRequest(normalized));
     const shouldRouteToBrowser = intentType === 'site_open'
       || (hasActiveBrowserSession && (intentType === 'browser_action' || intentType === 'page_query' || implicitBrowserAction));
-    const canRouteToBrowserRuntime = shouldRouteToBrowser && Boolean(handleBrowserTranscriptRef.current);
+    const requestSource = 'yandex-realtime-native-audio';
 
-    const requestId = beginUserRequest(
-      canRouteToBrowserRuntime ? 'yandex-realtime-browser-audio' : 'yandex-realtime-native-audio',
-    );
-    if (!canRouteToBrowserRuntime) {
-      assistantPromptInFlightRef.current = true;
-      assistantInFlightRequestIdRef.current = requestId;
-      assistantAwaitingResponseRef.current = true;
-      assistantPromptMetaRef.current = {
-        source: 'yandex-realtime-native-audio',
-        finalizeRequestOnCommit: true,
-      };
-    }
+    const requestId = beginUserRequest(requestSource);
+    assistantPromptInFlightRef.current = true;
+    assistantInFlightRequestIdRef.current = requestId;
+    assistantAwaitingResponseRef.current = true;
+    assistantPromptMetaRef.current = {
+      source: requestSource,
+      finalizeRequestOnCommit: true,
+    };
 
     transitionVoiceConversationState(VOICE_CONVERSATION_EVENTS.INPUT_FINAL_COMMIT, {
-      reason: 'yandex-realtime-native-audio',
+      reason: requestSource,
       requestId,
     });
     setLastRecognizedTurn(normalized);
@@ -764,33 +819,24 @@ export function useConversationRuntimeController({
       source: 'yandex-realtime-input',
       textLength: normalized.length,
       nativeResponse: true,
-      browserRouted: canRouteToBrowserRuntime,
+      intentType,
+      browserSideEffect: false,
+      browserNativeTools: shouldRouteToBrowser,
     });
     recordConversationAction('user.turn.final', {
       conversationSessionId: conversationSessionIdRef.current || '',
       source: 'yandex-realtime-input',
       textLength: normalized.length,
       nativeResponse: true,
-      browserRouted: canRouteToBrowserRuntime,
+      intentType,
+      browserSideEffect: false,
+      browserNativeTools: shouldRouteToBrowser,
     });
     recordConversationTurn('user', normalized, 'yandex-realtime-transcription');
-    if (canRouteToBrowserRuntime) {
-      transitionVoiceConversationState(VOICE_CONVERSATION_EVENTS.TOOL_CALL, {
-        reason: 'browser-runtime',
-        requestId,
-      });
-      markDialogRequestState(requestId, 'browser-routing', {
-        source: 'yandex-realtime-browser-audio',
-        intentType,
-      });
-      handleBrowserTranscriptRef.current?.(normalized, {
-        requestId,
-        suppressOpeningAck: false,
-      });
-      return true;
-    }
     markDialogRequestState(requestId, 'awaiting-native-response', {
-      source: 'yandex-realtime-native-audio',
+      source: requestSource,
+      intentType,
+      browserNativeTools: shouldRouteToBrowser,
     });
     return true;
   }, [
@@ -799,17 +845,13 @@ export function useConversationRuntimeController({
     assistantInFlightRequestIdRef,
     assistantPromptInFlightRef,
     assistantPromptMetaRef,
-    audioPlayer,
     beginUserRequest,
     browserPanelRef,
-    handleBrowserTranscriptRef,
     markDialogRequestState,
     recordConversationAction,
     recordConversationTurn,
     setLastIssueText,
-    tunedSpeechConfig,
     transitionVoiceConversationState,
-    triggerBargeIn,
     updateConversationSessionState,
     usesClientInlinePanel,
   ]);
@@ -920,53 +962,11 @@ export function useConversationRuntimeController({
       return;
     }
 
-    const isGreetingOnly = isGreetingOnlyTranscript(normalized);
-    if (
-      (!isGreetingOnly && !isMeaningfulYandexUserTurn(normalized))
-      || (!isGreetingOnly && isLikelyUnclearStandaloneTranscript(normalized))
-    ) {
-      clearPendingYandexRealtimeFinal();
-      recordConversationAction('stt.stream.final-drop', {
-        conversationSessionId: conversationSessionIdRef.current || '',
-        source: 'yandex-realtime-input',
-        reason: 'low-value-yandex-final',
-        textLength: normalized.length,
-      });
-      transitionVoiceConversationState(VOICE_CONVERSATION_EVENTS.INPUT_IGNORED, {
-        reason: 'low-value-yandex-final',
-      });
-      return;
-    }
-
-    const now = Date.now();
-    const previousFinal = lastLiveFinalRef.current;
-    const transcriptKey = normalizeTranscriptKey(normalized);
-    if (
-      previousFinal?.source === 'yandex-realtime-input'
-      && (now - Number(previousFinal.timestamp || 0)) < YANDEX_REALTIME_EXTRA_FINAL_SUPPRESS_MS
-      && transcriptKey
-      && previousFinal.key === transcriptKey
-      && activeDialogRequestRef.current > 0
-      && assistantAwaitingResponseRef.current
-    ) {
-      recordConversationAction('stt.stream.final-drop', {
-        conversationSessionId: conversationSessionIdRef.current || '',
-        source: 'yandex-realtime-input',
-        reason: 'extra-final-during-response',
-        textLength: normalized.length,
-      });
-      return;
-    }
-
     clearPendingYandexRealtimeFinal();
     commitNativeYandexRealtimeUserTranscript(normalized);
   }, [
-    activeDialogRequestRef,
-    assistantAwaitingResponseRef,
     clearPendingYandexRealtimeFinal,
     commitNativeYandexRealtimeUserTranscript,
-    recordConversationAction,
-    transitionVoiceConversationState,
   ]);
 
   const handleLiveInputTranscription = React.useCallback((transcript) => {
@@ -988,6 +988,7 @@ export function useConversationRuntimeController({
       transitionVoiceConversationState(VOICE_CONVERSATION_EVENTS.INPUT_PARTIAL, {
         reason: 'partial-transcript',
       });
+      return;
     }
 
     const botVolume = audioPlayer?.getVolume?.() || 0;
@@ -1430,11 +1431,15 @@ export function useConversationRuntimeController({
         }
         handleLiveInputTranscription(text);
       },
-      onInputTranscriptionCommit: ({ text }) => {
+      onInputTranscriptionCommit: ({ text, nativeDirect = false }) => {
         if (runtimeConfig?.captureUserAudio === false) {
           return;
         }
         if (preferServerSttRef.current) {
+          return;
+        }
+        if (nativeDirect && usesSapphireGeminiNative) {
+          commitNativeGeminiInputTranscript(text);
           return;
         }
         if (usesYandexRealtimeRuntime) {
@@ -1457,7 +1462,7 @@ export function useConversationRuntimeController({
             : (usesYandexLegacyRuntime ? 'yandex-input-transcription' : 'gemini-input-transcription'),
         });
       },
-      onAssistantTurnStart: ({ responseId = '' } = {}) => {
+      onAssistantTurnStart: ({ responseId = '', nativeDirect = false } = {}) => {
         const hasInFlightRequest = assistantPromptInFlightRef.current || assistantInFlightRequestIdRef.current > 0;
         if (!assistantAwaitingResponseRef.current && hasInFlightRequest) {
           assistantAwaitingResponseRef.current = true;
@@ -1467,6 +1472,9 @@ export function useConversationRuntimeController({
             requestId: assistantInFlightRequestIdRef.current || activeDialogRequestRef.current || 0,
             responseId,
           });
+        }
+        if (!assistantAwaitingResponseRef.current && nativeDirect && usesSapphireGeminiNative && !browserIntentInFlightRef.current) {
+          ensureNativeGeminiDialogRequest('gemini-live-native-output');
         }
         if (!assistantAwaitingResponseRef.current) {
           recordConversationAction('assistant.turn.drop', {
@@ -1839,6 +1847,13 @@ export function useConversationRuntimeController({
         sampleRate: Number(details.sampleRate || 0),
         samples: Number(details.samples || 0),
         durationMs: Number(details.durationMs || 0),
+        elapsedMs: Number(details.elapsedMs || 0),
+        scheduledDelayMs: Number(details.scheduledDelayMs || 0),
+        earlyEnded: details.earlyEnded === true,
+        queueDepth: Number(details.queueDepth || 0),
+        bufferedMs: Number(details.bufferedMs || 0),
+        activeSources: Number(details.activeSources || 0),
+        reason: String(details.reason || ''),
       });
       if (event === 'audio-playback-start' && details.outputMode) {
         recordConversationAction('assistant.turn.audio-output-mode', {
