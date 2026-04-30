@@ -1,5 +1,5 @@
-import React, { useLayoutEffect, useMemo } from 'react';
-import { useFrame, useLoader } from '@react-three/fiber';
+import React, { useEffect, useLayoutEffect, useMemo, useState } from 'react';
+import { useFrame } from '@react-three/fiber';
 import { Box3, Vector3 } from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { clone as cloneSkeleton } from 'three/examples/jsm/utils/SkeletonUtils.js';
@@ -15,6 +15,8 @@ const DEFAULT_IDLE_MOTION_PROFILE = {
     bobAmplitude: 0.012,
     bobSpeed: 0.42,
 };
+const AVATAR_FETCH_TIMEOUT_MS = 20000;
+const AVATAR_FETCH_RETRY_DELAYS_MS = [0, 900, 1800];
 
 function resolveModelUrl(modelUrl) {
     const normalizedUrl = String(modelUrl || '').trim();
@@ -27,6 +29,56 @@ function resolveModelUrl(modelUrl) {
     }
 
     return new URL(normalizedUrl.replace(/^\/+/, ''), `${window.location.origin}/`).toString();
+}
+
+function getErrorMessage(error) {
+    return String(error?.message || error || 'Unknown avatar error').trim();
+}
+
+function delay(ms) {
+    return new Promise((resolve) => {
+        window.setTimeout(resolve, ms);
+    });
+}
+
+async function fetchAvatarArrayBuffer(url) {
+    let lastError = null;
+
+    for (const retryDelayMs of AVATAR_FETCH_RETRY_DELAYS_MS) {
+        if (retryDelayMs > 0) {
+            await delay(retryDelayMs);
+        }
+
+        const controller = new AbortController();
+        const timeoutId = window.setTimeout(() => {
+            controller.abort(new Error(`Avatar fetch timed out after ${AVATAR_FETCH_TIMEOUT_MS}ms`));
+        }, AVATAR_FETCH_TIMEOUT_MS);
+
+        try {
+            const response = await fetch(url, {
+                signal: controller.signal,
+                cache: 'reload',
+            });
+            if (!response.ok) {
+                throw new Error(`Avatar HTTP ${response.status}`);
+            }
+            return await response.arrayBuffer();
+        } catch (error) {
+            lastError = error;
+        } finally {
+            window.clearTimeout(timeoutId);
+        }
+    }
+
+    throw new Error(`Could not load ${url}: ${getErrorMessage(lastError)}`);
+}
+
+function parseAvatarGltf(arrayBuffer, url) {
+    const loader = new GLTFLoader();
+    const baseUrl = new URL('.', url).toString();
+    return new Promise((resolve, reject) => {
+        loader.parse(arrayBuffer, baseUrl, resolve, reject);
+    });
 }
 
 function cloneAvatarScene(sourceScene, instanceId) {
@@ -64,8 +116,61 @@ export function Avatar({
     const avatarRef = React.useRef();
     const basePositionRef = React.useRef({ x: 0, y: 0, z: 0 });
     const resolvedModelUrl = useMemo(() => resolveModelUrl(modelUrl), [modelUrl]);
-    const gltf = useLoader(GLTFLoader, resolvedModelUrl);
-    const sourceScene = gltf?.scene || null;
+    const [loadState, setLoadState] = useState({
+        url: '',
+        sourceScene: null,
+        error: null,
+    });
+
+    useEffect(() => {
+        let cancelled = false;
+
+        void (async () => {
+            try {
+                setLoadState((previous) => (
+                    previous.url === resolvedModelUrl
+                        ? previous
+                        : {
+                            url: resolvedModelUrl,
+                            sourceScene: null,
+                            error: null,
+                        }
+                ));
+                const arrayBuffer = await fetchAvatarArrayBuffer(resolvedModelUrl);
+                if (cancelled) {
+                    return;
+                }
+                const gltf = await parseAvatarGltf(arrayBuffer, resolvedModelUrl);
+                if (cancelled) {
+                    return;
+                }
+                setLoadState({
+                    url: resolvedModelUrl,
+                    sourceScene: gltf?.scene || null,
+                    error: null,
+                });
+            } catch (error) {
+                if (cancelled) {
+                    return;
+                }
+                const errorMessage = getErrorMessage(error);
+                setLoadState({
+                    url: resolvedModelUrl,
+                    sourceScene: null,
+                    error: new Error(errorMessage.startsWith('Could not load ')
+                        ? errorMessage
+                        : `Could not load ${resolvedModelUrl}: ${errorMessage}`),
+                });
+            }
+        })();
+
+        return () => {
+            cancelled = true;
+        };
+    }, [resolvedModelUrl]);
+
+    const sourceScene = loadState.url === resolvedModelUrl ? loadState.sourceScene : null;
+    const loadError = loadState.url === resolvedModelUrl ? loadState.error : null;
     const avatarScene = useMemo(() => (
         sourceScene ? cloneAvatarScene(sourceScene, instanceId) : null
     ), [sourceScene, instanceId]);
@@ -133,6 +238,10 @@ export function Avatar({
             );
         }
     });
+
+    if (loadError) {
+        throw loadError;
+    }
 
     if (!avatarScene) {
         return null;

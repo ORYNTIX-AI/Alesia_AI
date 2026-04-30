@@ -6,7 +6,7 @@ function withAppConfigMetadata(config, supportedVoiceNames, supportedVoices) {
   };
 }
 
-const APP_VERSION = process.env.APP_VERSION || '0.0.26';
+const APP_VERSION = process.env.APP_VERSION || '0.0.27';
 const APP_COMMIT = process.env.APP_COMMIT || 'unknown';
 const APP_BUILD_TIME = process.env.APP_BUILD_TIME || '';
 

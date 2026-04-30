@@ -5,7 +5,7 @@ services:
     build:
       context: .
       args:
-        APP_VERSION: ${APP_VERSION:-0.0.26}
+        APP_VERSION: ${APP_VERSION:-0.0.27}
         APP_COMMIT: ${APP_COMMIT:-unknown}
         APP_BUILD_TIME: ${APP_BUILD_TIME:-unknown}
     environment:

@@ -329,3 +329,10 @@
 - Gemini Live sends those tools in `setup.tools` and answers model tool calls with `toolResponse`; Yandex Realtime advertises the same tool set in the session payload.
 - Added `/api/realtime/tool` as the shared server executor for Gemini/Yandex tool calls, backed by the existing browser runtime and knowledge search.
 - Local checks passed: `npm run lint`, `npm test`, `npm run test:architecture`, `npm run build`.
+
+## 2026-04-30 Avatar fetch hardening v0.0.27
+
+- Footer/package version raised to `v0.0.27`.
+- Production reported intermittent `Could not load .../avatars/nikolay.glb: Failed to fetch` in the 3D avatar stage while the server still returned the `.glb` files with HTTP 200.
+- Avatar model loading now uses an explicit client fetch with retry and timeout before GLTF parsing, so transient browser/network failures do not immediately surface as a broken avatar stage.
+- No voice, browser-tool, VAD, WebAudio, or session-flow logic was changed.
